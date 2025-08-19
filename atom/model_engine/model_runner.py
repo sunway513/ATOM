@@ -3,6 +3,7 @@ import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
+from aiter import dtypes
 
 from atom.config import Config
 from atom.model_engine.sequence import Sequence
@@ -135,7 +136,22 @@ class ModelRunner:
             self.block_size,
             num_kv_heads,
             hf_config.head_dim,
+            dtype=dtypes.fp8,
+            device="cuda"
         )
+        # kv_scale_shape = (config.num_kvcache_blocks, num_kv_heads, self.block_size)
+        # self.k_scale = torch.empty(kv_scale_shape)
+        # self.v_scale = torch.empty_like(self.k_scale)
+        self.kv_scale = torch.zeros(
+            2,
+            hf_config.num_hidden_layers,
+            config.num_kvcache_blocks,
+            self.block_size,
+            num_kv_heads,
+            dtype=dtypes.fp32,
+            device="cuda"
+        )
+
         layer_id = 0
         x = 16 // self.kv_cache.element_size()
         for module in self.model.modules():
@@ -153,7 +169,15 @@ class ModelRunner:
                     hf_config.head_dim,
                     self.block_size,
                 )
+                # module.k_scale = self.k_scale
+                # module.v_scale = self.v_scale
+                module.k_scale = self.kv_scale[0, layer_id]
+                module.v_scale = self.kv_scale[1, layer_id]
+                module.max_model_len = self.config.max_model_len
+                # module.max_model_len = 256
+
                 layer_id += 1
+
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
@@ -270,7 +294,6 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(
             cu_seqlens_k, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
-
         set_context(
             False,
             cu_seqlens_q=cu_seqlens_q,
@@ -299,9 +322,13 @@ class ModelRunner:
     def run_model(
         self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool
     ):
+        torch.cuda.empty_cache()
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+            # print('input_ids', input_ids.size(0))
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
+            # print('input_ids 2222', input_ids.shape)
+
             bs = input_ids.size(0)
             context = get_context()
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
@@ -357,21 +384,8 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
 
-            current_max_seqlen_k = context_lens[:bs].max().item() if bs > 0 else 1
-            set_context(
-                False,
-                cu_seqlens_q=cu_seqlens_q[: bs + 1],
-                cu_seqlens_k=cu_seqlens_k[: bs + 1],
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=current_max_seqlen_k,
-                min_seqlen_q=min_seqlen_q,
-                slot_mapping=slot_mapping[:bs],
-                context_lens=context_lens[:bs],
-                block_tables=block_tables[:bs],
-                dropout_p=dropout_p,
-            )
-            # set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
 
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):
