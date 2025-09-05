@@ -44,8 +44,6 @@ class ModelRunner:
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
         self.model = suppot_model_arch_dict[hf_config.architectures[0]](config)
-        if self.config.compilation_config.level == 3:
-            self.model = torch.compile(self.model, fullgraph=True, backend="eager")
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
@@ -54,6 +52,8 @@ class ModelRunner:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
+        if self.config.compilation_config.level == 3:
+            self.model = torch.compile(self.model, fullgraph=True, backend="eager")
 
         if self.world_size > 1:
             if rank == 0:
