@@ -3,7 +3,8 @@ from glob import glob
 import torch
 from torch import nn
 from safetensors import safe_open
-from atom.model_loader.weight_utils import download_weights_from_hf
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from atom.model_loader.weight_utils import download_weights_from_hf, filter_duplicate_safetensors_files
 from atom.model_ops.base_config import QuantizeMethodBase
 from tqdm import tqdm
 
@@ -22,7 +23,8 @@ def load_model(model: nn.Module, model_name_or_path: str):
             model_name_or_path, None, ["*.safetensors"], ignore_patterns=["original/*"]
         )
     )
-    for file in tqdm(glob(os.path.join(path, "*.safetensors"))):
+    hf_weights_files = filter_duplicate_safetensors_files(glob(os.path.join(path, "*.safetensors")), path, SAFE_WEIGHTS_INDEX_NAME)
+    for file in tqdm(hf_weights_files):
         print(f"Loading weights from {file}")
         with safe_open(file, "pt", "cpu") as f:
             for name in f.keys():

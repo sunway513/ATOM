@@ -12,7 +12,8 @@ import hashlib
 import fnmatch
 import torch
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, List
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -145,3 +146,27 @@ def set_weight_attrs(
         # we sync the param tensor after its weight loader is called.
         # TODO(woosuk): Remove this hack once we have a better solution.
         setattr(weight, key, value)
+
+
+def filter_duplicate_safetensors_files(hf_weights_files: List[str],
+                                       hf_folder: str,
+                                       index_file: str) -> List[str]:
+    # model.safetensors.index.json is a mapping from keys in the
+    # torch state_dict to safetensors file holding that weight.
+    index_file_name = os.path.join(hf_folder, index_file)
+    if not os.path.isfile(index_file_name):
+        return hf_weights_files
+
+    # Iterate through the weight_map (weight_name: safetensors files)
+    # to identify weights that we should use.
+    with open(index_file_name) as f:
+        weight_map = json.load(f)["weight_map"]
+    weight_files_in_index = set()
+    for weight_name in weight_map:
+        weight_files_in_index.add(
+            os.path.join(hf_folder, weight_map[weight_name]))
+    # Filter out any fields that are not found in the index file.
+    hf_weights_files = [
+        f for f in hf_weights_files if f in weight_files_in_index
+    ]
+    return hf_weights_files
