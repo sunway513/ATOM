@@ -6,6 +6,7 @@ from typing import Callable, List, Optional, Tuple
 from aiter.dist.parallel_state import get_tp_group
 from transformers import PretrainedConfig
 from aiter import QuantType, dtypes
+from aiter import get_hip_quant
 from atom.config import QuantizationConfig
 from atom.model_ops.base_config import QuantizeMethodBase
 from atom.model_ops.topK import rocm_aiter_grouped_topk as grouped_topk
@@ -18,7 +19,6 @@ from atom.model_ops.utils import (
     shuffle_weights, 
     normalize_e4m3fn_to_e4m3fnuz, 
     per_tensor_dequantize, 
-    scaled_fp8_quant, 
     all_close_1d,
 )
 from atom.model_loader.weight_utils import set_weight_attrs
@@ -437,8 +437,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         layer.w13_weight[expert_id][start:start +
                                                     shard_size, :],
                         layer.w13_weight_scale[expert_id][shard_id])
+                    quant_func = get_hip_quant(self.quant_type)
                     layer.w13_weight[expert_id][
-                        start:start + shard_size, :], _ = scaled_fp8_quant(
+                        start:start + shard_size, :], _ = quant_func(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 

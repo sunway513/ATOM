@@ -1,7 +1,10 @@
 from typing import Tuple, Optional, List, Union
 import torch
+from torch.library import Library
+from typing import Callable, Optional, Tuple
 from aiter import per_tensor_quant, dtypes
 from aiter.ops.shuffle import shuffle_weight
+from aiter.ops.quant import per_tensor_quant
 
 def per_tensor_dequantize(
     tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
@@ -109,59 +112,49 @@ def per_tensor_dequantize(
     return dq_weight
 
 
-def scaled_fp8_quant(
-    input: torch.Tensor,
-    scale: Optional[torch.Tensor] = None,
-    num_token_padding: Optional[int] = None,
-    scale_ub: Optional[torch.Tensor] = None,
-    use_per_token_if_dynamic: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+aiter_lib = Library("aiter", "FRAGMENT")
+
+
+def direct_register_custom_op(
+    op_name: str,
+    op_func: Callable,
+    mutates_args: list[str],
+    fake_impl: Optional[Callable] = None,
+    target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
+    tags: Tuple[torch.Tag, ...] = (),
+):
     """
-    Quantize input tensor to FP8 and return quantized tensor and scale.
+    `torch.library.custom_op` can have significant overhead because it
+    needs to consider complicated dispatching logic. This function
+    directly registers a custom op and dispatches it to the CUDA backend.
+    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
+    for more details.
 
-    This function supports both static and dynamic quantization: If you
-    provide the scale, it will use static scaling and if you omit it,
-    the scale will be determined dynamically. The function also allows
-    optional padding of the output tensors for downstream kernels that
-    will benefit from padding.
+    By default, the custom op is registered to the vLLM library. If you
+    want to register it to a different library, you can pass the library
+    object to the `target_lib` argument.
 
-    Args:
-        input: The input tensor to be quantized to FP8
-        scale: Optional scaling factor for the FP8 quantization
-        scale_ub: Optional upper bound for scaling factor in dynamic
-            per token case
-        num_token_padding: If specified, pad the first dimension
-            of the output to at least this value.
-        use_per_token_if_dynamic: Whether to do per_tensor or per_token
-            in the dynamic quantization case.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
-            scaling factor.
+    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
+    library object. If you want to bind the operator to a different library,
+    make sure the library object is alive when the operator is used.
     """
-    # This code assumes batch_dim and num_tokens are flattened
-    assert (input.ndim == 2)
-    shape: Union[tuple[int, int], torch.Size] = input.shape
-    # For ROCm on MI300, the output fp8 dtype is torch.float_e4m3fnuz
-    # TODO check rocm platfom, float_e4m3fnuz for now
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz
-    if num_token_padding:
-        shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    import torch.library
 
-    if scale is None:
-        if use_per_token_if_dynamic:
-            scale = torch.empty((shape[0], 1),
-                                device=input.device,
-                                dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input.contiguous(), scale, scale_ub)
-        else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+    def _op_func(*args, **kwargs):
+        # if AITER_LOG_MORE >= 2:
+        #     log_args(op_func, *args, **kwargs)
+        return op_func(*args, **kwargs)
+
+    if hasattr(torch.library, "infer_schema"):
+        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
     else:
-        # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 or num_token_padding is None)
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+        # for pytorch 2.4
+        import torch._custom_op.impl
 
-    return output, scale
+        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
+    my_lib = target_lib or aiter_lib
+    my_lib.define(op_name + schema_str, tags=tags)
+    my_lib.impl(op_name, _op_func, dispatch_key=dispatch_key)
+    if fake_impl is not None:
+        my_lib._register_fake(op_name, fake_impl)

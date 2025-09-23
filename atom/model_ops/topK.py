@@ -1,7 +1,7 @@
 import torch
 from functools import cache, lru_cache
 from typing import Optional
-from vllm.utils import direct_register_custom_op
+from atom.model_ops.utils import direct_register_custom_op
 
 
 def is_rocm_aiter_fusion_shared_expert_enabled():
@@ -345,7 +345,7 @@ def rocm_aiter_topk_softmax(
     renormalize: bool,
     num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, ...]:
-    return torch.ops.vllm.rocm_aiter_topk_softmax(
+    return torch.ops.aiter.rocm_aiter_topk_softmax(
         gating_output, topk, renormalize, num_fused_shared_experts
     )
 
@@ -363,7 +363,7 @@ def rocm_aiter_grouped_topk(
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if e_score_correction_bias is not None:
-        return torch.ops.vllm.rocm_aiter_biased_grouped_topk(
+        return torch.ops.aiter.rocm_aiter_biased_grouped_topk(
             gating_output,
             e_score_correction_bias,
             num_expert_group,
@@ -375,7 +375,7 @@ def rocm_aiter_grouped_topk(
         )
     else:
         assert scoring_func == "softmax" or scoring_func == "sigmoid"
-        return torch.ops.vllm.rocm_aiter_grouped_topk(
+        return torch.ops.aiter.rocm_aiter_grouped_topk(
             gating_output,
             num_expert_group,
             topk_group,

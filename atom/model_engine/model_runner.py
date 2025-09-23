@@ -178,7 +178,7 @@ class ModelRunner:
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
-        if not hasattr(hf_config, "head_dim"):
+        if not hasattr(hf_config, "head_dim") or hf_config.head_dim is None:
             hf_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
         free, total = torch.cuda.mem_get_info()
         used = total - free
