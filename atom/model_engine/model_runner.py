@@ -95,7 +95,7 @@ class ModelRunner:
 
     def exit(self, msg=None):
         logger.info(f"Exiting ModelRunner for rank {self.rank}/{self.world_size} {msg}")
-        if dist.is_initialized():
+        if dist.is_initialized() and self.world_size > 1:
             self.shm.close()
             dist.barrier()
             if self.rank == 0:
