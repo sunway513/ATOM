@@ -59,13 +59,13 @@ class Qwen3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=qkv_bias,
-            # quant_config=quant_config,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            # quant_config=quant_config,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -116,13 +116,13 @@ class Qwen3MLP(nn.Module):
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
-            # quant_config=quant_config,
+            quant_config=quant_config,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
-            # quant_config=quant_config,
+            quant_config=quant_config,
         )
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()
@@ -156,14 +156,14 @@ class Qwen3DecoderLayer(nn.Module):
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
             kv_cache_dtype=cache_config,
-            layer_num=layer_num
-            # quant_config=quant_config,
+            layer_num=layer_num,
+            quant_config=quant_config,
         )
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            # quant_config=quant_config,
+            quant_config=quant_config,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
