@@ -30,6 +30,9 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
+    def extend(self, seqs: list[Sequence]):
+        self.waiting.extend(seqs)
+
     def schedule(self) -> ScheduledBatchs:
         # prefill
         scheduled_seqs = []

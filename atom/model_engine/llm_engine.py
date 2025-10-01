@@ -1,3 +1,4 @@
+import itertools
 import logging
 import time
 from dataclasses import fields
@@ -52,15 +53,15 @@ class LLMEngine:
         # prompts: list[str] | list[list[int]],
         prompts: list[str],
         sampling_params: SamplingParams | list[SamplingParams],
-        enable_profiling: bool = False,
     ) -> list[str]:
-        # # Start profiling for all ranks if enabled
-        # if enable_profiling:
-        #     self.model_runner.call("start_profiler")
-        if not isinstance(sampling_params, list):
-            sampling_params = [sampling_params] * len(prompts)
-        for prompt, sp in zip(prompts, sampling_params):
+        if isinstance(sampling_params, list):
+            iter_func = zip
+        else:
+            iter_func = itertools.product
+            sampling_params = [sampling_params]
+        for prompt, sp in iter_func(prompts, sampling_params):
             self.add_request(prompt, sp)
+
         outputs = {}
         while not self.is_finished() and (
             self.core_mgr.is_alive() or self.core_mgr.is_rest()
@@ -68,9 +69,7 @@ class LLMEngine:
             seqs = self.step()
             outs = self.io_processor.postprocess(seqs)
             outputs.update(outs)
-        # # Stop profiling for all ranks if enabled
-        # if enable_profiling:
-        #     self.model_runner.call("stop_profiler")
+
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]
         return outputs
 
@@ -108,8 +107,7 @@ class InputOutputProcessor:
         outputs = {}
         for req in reqs:
             self.requests.pop(req.id)
-            # output_str = self.tokenizer.decode(req.completion_token_ids)
-            output_str = "self.tokenizer.decode(req.completion_token_ids)"
+            output_str = self.tokenizer.decode(req.completion_token_ids)
             req.leave_time = time.time()
             print(
                 f"Request {req.id} finished with reason {req.leave_reason}. "

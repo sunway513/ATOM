@@ -123,12 +123,16 @@ class EngineCore:
         )
 
     def _process_input_queue(self):
+        recv_reqs = []
         while not self.input_queue.empty():
             seq = self.input_queue.get_nowait()
-            print(f"Engine core processing sequence {seq.id} with status {seq.status}")
+            # print(f"Engine core processing sequence {seq.id} with status {seq.status}")
             if seq.status == SequenceStatus.EXIT_ENGINE:
                 return True
-            self.scheduler.add(seq)
+            recv_reqs.append(seq)
+        if len(recv_reqs) > 0:
+            print(f"put {len(recv_reqs)} reqs to scheduler")
+            self.scheduler.extend(recv_reqs)
         return False
 
     def process_input_sockets(self, input_address: str):
