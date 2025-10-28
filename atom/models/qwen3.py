@@ -8,7 +8,8 @@ from transformers import Qwen3Config
 from atom.config import QuantizationConfig, Config
 
 from atom.model_ops.activation import SiluAndMul
-from atom.model_ops.attention import Attention
+# from atom.model_ops.attention import Attention
+from atom.model_ops.base_attention import Attention
 from atom.model_ops.layernorm import RMSNorm
 from atom.model_ops.linear import (
     QKVParallelLinear,
@@ -81,6 +82,7 @@ class Qwen3Attention(nn.Module):
             self.num_kv_heads,
             kv_cache_dtype=kv_cache_dtype,
             layer_num=layer_num,
+            use_mla=False,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)

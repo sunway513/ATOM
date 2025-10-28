@@ -2,8 +2,10 @@ from abc import ABC, abstractmethod
 from typing import Type, Tuple, Generic, Optional, List, TypeVar, Dict, Any
 from atom.model_engine.scheduler import ScheduledBatch
 from atom.utils.context import set_context
+from atom.model_ops.attention_mla import MLAModules
 
 import torch
+from torch import nn
 
 T = TypeVar('T', bound="BroadcastableModelInput")
 
@@ -49,14 +51,8 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        raise NotImplementedError
+    def get_impl_cls() -> Type["AttentionImpl"]:
+        return AttentionImpl
 
 
 
@@ -64,7 +60,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, inpblock_size: int) -> None:
+    def __init__(self, block_size: int) -> None:
         """Create the builder, remember some configuration and parameters."""
         raise NotImplementedError
 
@@ -135,3 +131,29 @@ class CommonAttentionBuilder(AttentionMetadataBuilder[T], Generic[T]):
             **ctx,
         )
         return var["positions"].copy_to_gpu(sum_scheduled_tokens)
+
+
+
+class AttentionImpl(nn.Module):
+    @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
+        layer_num: int = 0,
+        mla_modules: MLAModules=None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        position: torch.Tensor=None,
+    ) -> torch.Tensor:
+        raise NotImplementedError

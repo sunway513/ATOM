@@ -6,6 +6,7 @@ import numpy as np
 
 from atom.model_engine.scheduler import ScheduledBatch
 from atom.utils.context import set_context
+from atom.model_ops.attention_mla import MLAAttention
 
 
 class AiterMLABackend(AttentionBackend):
@@ -16,6 +17,11 @@ class AiterMLABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> Type["MLAAttention"]:
+        return MLAAttention
+
 
 class AiterMLAMetadataBuilder(CommonAttentionBuilder):
     BLOCK_TABLE_EXTENDER: list[list[int]] = [[]]

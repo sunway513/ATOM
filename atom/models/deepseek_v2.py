@@ -28,7 +28,8 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from atom.model_ops.attention_mla import MLAAttention
+from atom.model_ops.attention_mla import MLAModules
+from atom.model_ops.base_attention import Attention
 from atom.config import QuantizationConfig, Config
 from aiter.dist.parallel_state import (get_pp_group,
                               get_tensor_model_parallel_world_size)
@@ -298,13 +299,8 @@ class DeepseekV2MLAAttention(nn.Module):
         #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
         # i.e.
         #     kv_lora_rank + qk_rope_head_dim == head_size
-        self.mla_attn = MLAAttention(
-            num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=self.scaling,
-            num_kv_heads=1,
-            kv_cache_dtype=cache_config,
-            # MLA Args
+
+        mla_modules = MLAModules(
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
             qk_nope_head_dim=self.qk_nope_head_dim,
@@ -315,7 +311,17 @@ class DeepseekV2MLAAttention(nn.Module):
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
+        )
+
+        self.mla_attn = Attention(
+            num_heads=self.num_local_heads,
+            head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+            scale=self.scaling,
+            num_kv_heads=1,
+            kv_cache_dtype=cache_config,
             layer_num=layer_num,
+            use_mla=True,
+            mla_modules=mla_modules
         )
 
         self.prefix = prefix

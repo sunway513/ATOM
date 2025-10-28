@@ -31,7 +31,9 @@ from torch import nn
 from transformers import LlamaConfig
 
 from aiter import QuantType
-from atom.model_ops.attention import Attention
+# from atom.model_ops.attention import Attention
+from atom.model_ops.base_attention import Attention
+
 from aiter.dist.parallel_state import (
     get_pp_group,
     get_tp_group,

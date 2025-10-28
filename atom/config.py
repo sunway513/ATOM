@@ -153,6 +153,9 @@ class CompilationConfig:
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
 
+    static_forward_context: dict[str, Any] = field(default_factory=dict,
+                                                   init=False)
+
     def init_with_cudagraph_sizes(self) -> None:
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""

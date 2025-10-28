@@ -474,48 +474,50 @@ class ModelRunner:
         layer_id = 0
         x = 16 // self.kv_cache.element_size()
         for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id].view(
-                    config.num_kvcache_blocks,
-                    num_kv_heads,
-                    hf_config.head_dim // x,
-                    self.block_size,
-                    x,
-                )
-                module.v_cache = self.kv_cache[1, layer_id].view(
-                    config.num_kvcache_blocks,
-                    num_kv_heads,
-                    hf_config.head_dim,
-                    self.block_size,
-                )
-                module.max_model_len = self.config.max_model_len
-                if config.kv_cache_dtype == "fp8":
-                    module.k_scale = self.kv_scale[0, layer_id]
-                    module.v_scale = self.kv_scale[1, layer_id]
-                attention_metadata = AttentionMetadata(
-                    k_cache=module.k_cache,
-                    v_cache=module.v_cache,
-                    k_scale=module.k_scale,
-                    v_scale=module.v_scale,
-                )
-                set_forward_context(module.layer_num, attention_metadata)
+            # Since use attention base and there are child in attention, add base condition
+            if hasattr(module, "base_attention"):
+                if hasattr(module, "use_mla") and not module.use_mla:
+                    module.k_cache = self.kv_cache[0, layer_id].view(
+                        config.num_kvcache_blocks,
+                        num_kv_heads,
+                        hf_config.head_dim // x,
+                        self.block_size,
+                        x,
+                    )
+                    module.v_cache = self.kv_cache[1, layer_id].view(
+                        config.num_kvcache_blocks,
+                        num_kv_heads,
+                        hf_config.head_dim,
+                        self.block_size,
+                    )
+                    module.max_model_len = self.config.max_model_len
+                    if config.kv_cache_dtype == "fp8":
+                        module.k_scale = self.kv_scale[0, layer_id]
+                        module.v_scale = self.kv_scale[1, layer_id]
+                    attention_metadata = AttentionMetadata(
+                        k_cache=module.k_cache,
+                        v_cache=module.v_cache,
+                        k_scale=module.k_scale,
+                        v_scale=module.v_scale,
+                    )
+                    set_forward_context(module.layer_num, attention_metadata)
 
-                layer_id += 1
-            elif hasattr(module, "kv_cache") and isMLA:
-                module.kv_cache = self.kv_cache[layer_id].view(
-                    config.num_kvcache_blocks * self.block_size,
-                    1,
-                    576,
-                )
-                module.max_model_len = self.config.max_model_len
-                attention_metadata = AttentionMetadata(
-                    k_cache=module.kv_cache,
-                    v_cache=None,
-                    k_scale=None,
-                    v_scale=None,
-                )
-                set_forward_context(module.layer_num, attention_metadata)
-                layer_id += 1
+                    layer_id += 1
+                elif hasattr(module, "use_mla") and module.use_mla:
+                    module.kv_cache = self.kv_cache[layer_id].view(
+                        config.num_kvcache_blocks * self.block_size,
+                        1,
+                        576,
+                    )
+                    module.max_model_len = self.config.max_model_len
+                    attention_metadata = AttentionMetadata(
+                        k_cache=module.kv_cache,
+                        v_cache=None,
+                        k_scale=None,
+                        v_scale=None,
+                    )
+                    set_forward_context(module.layer_num, attention_metadata)
+                    layer_id += 1
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
         return True

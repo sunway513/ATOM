@@ -3,34 +3,7 @@ from typing import Tuple, Optional, Type, List
 from abc import ABC, abstractmethod
 from functools import cache
 from atom.utils import resolve_obj_by_qualname
-from atom.model_ops.attentions.backends import AttentionMetadataBuilder
-
-class AttentionBackend(ABC):
-    """Abstract class for attention backends."""
-    # For some attention backends, we allocate an output tensor before
-    # calling the custom op. When piecewise cudagraph is enabled, this
-    # makes sure the output tensor is allocated inside the cudagraph.
-    accept_output_buffer: bool = False
-
-    @staticmethod
-    @abstractmethod
-    def get_name() -> str:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> Tuple[int, ...]:
-        raise NotImplementedError
+from atom.model_ops.attentions.backends import AttentionBackend
 
 
 def get_attn_backend(
