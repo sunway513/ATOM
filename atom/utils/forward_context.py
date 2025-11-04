@@ -46,6 +46,9 @@ class AttentionMetaData:
     kv_indptr: Optional[torch.Tensor] = None
     kv_indices: Optional[torch.Tensor] = None
     kv_last_page_lens: Optional[torch.Tensor] = None
+    cu_seqlen_ks: Optional[torch.Tensor] = None
+    cu_seqlen_ke: Optional[torch.Tensor] = None
+    sparse_kv_indptr: Optional[torch.Tensor] = None
 
     def __init__(
         self,
@@ -62,6 +65,9 @@ class AttentionMetaData:
         kv_indptr: Optional[torch.Tensor] = None,
         kv_indices: Optional[torch.Tensor] = None,
         kv_last_page_lens: Optional[torch.Tensor] = None,
+        cu_seqlen_ks: Optional[torch.Tensor] = None,
+        cu_seqlen_ke: Optional[torch.Tensor] = None,
+        sparse_kv_indptr: Optional[torch.Tensor] = None,
     ):
         self.cu_seqlens_q = cu_seqlens_q
         self.cu_seqlens_k = cu_seqlens_k
@@ -76,6 +82,9 @@ class AttentionMetaData:
         self.kv_indptr = kv_indptr
         self.kv_indices = kv_indices
         self.kv_last_page_lens = kv_last_page_lens
+        self.cu_seqlen_ks = cu_seqlen_ks
+        self.cu_seqlen_ke = cu_seqlen_ke
+        self.sparse_kv_indptr = sparse_kv_indptr
 
     def asdict_zerocopy(self, skip_fields: Optional[Set[str]] = None) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""

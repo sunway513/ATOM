@@ -25,39 +25,62 @@
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
+from aiter import (
+    QuantType,
+    concat_and_cache_mla,
+    cp_gather_indexer_k_quant_cache,
+    dtypes,
+    flash_attn_varlen_func,
+    gemm_a8w8_blockscale,
+    get_hip_quant,
+    indexer_k_quant_and_cache,
+    topk_per_row,
+    topk_per_row_decode,
+)
+from aiter.dist.communication_op import tensor_model_parallel_all_reduce
+from aiter.dist.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+)
+from aiter.ops.triton.pa_mqa_logits import (
+    deepgemm_fp8_paged_mqa_logits,
+    deepgemm_fp8_paged_mqa_logits_stage1,
+)
+from aiter.rotary_embedding import get_rope
 from torch import nn
 from transformers import PretrainedConfig
 
+from atom.config import Config, QuantizationConfig, get_current_atom_config
+from atom.model_ops.activation import SiluAndMul
 from atom.model_ops.attention_mla import MLAModules
 from atom.model_ops.base_attention import Attention
-from atom.config import QuantizationConfig, Config
-from aiter.dist.parallel_state import (get_pp_group,
-                              get_tensor_model_parallel_world_size)
-from aiter.dist.communication_op import tensor_model_parallel_all_reduce
-from atom.model_ops.activation import SiluAndMul
-from atom.model_ops.moe import FusedMoE
-from atom.model_ops.layernorm import RMSNorm
-from atom.model_ops.linear import (ColumnParallelLinear,
+from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
+from atom.model_ops.fp8_mqa_logits import fp8_mqa_logits
+from atom.model_ops.layernorm import LayerNorm, RMSNorm
+from atom.model_ops.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from aiter.rotary_embedding import get_rope
-from atom.model_ops.embed_head import (
-    ParallelLMHead, VocabParallelEmbedding)
-
-from atom.models.utils import (PPMissingLayer,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix,
-                    IntermediateTensors,
-)
-
+from atom.model_ops.moe import FusedMoE
 from atom.model_ops.topK import (
+    is_rocm_aiter_fuse_routed_scaling_factor,
     is_rocm_aiter_fusion_shared_expert_enabled,
-    is_rocm_aiter_fuse_routed_scaling_factor
 )
+from atom.models.utils import (
+    IntermediateTensors,
+    PPMissingLayer,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
+from atom.utils.forward_context import get_forward_context
+from atom.utils.custom_register import direct_register_custom_op
 from atom.utils.decorators import support_torch_compile
 
+# from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
 
 class DeepseekV2MLP(nn.Module):
 
@@ -191,6 +214,240 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
+class DeepseekV32IndexerCache(nn.Module):
+
+    def __init__(self, head_dim: int, dtype: torch.dtype, prefix: str,
+                 cache_config: str):
+        super().__init__()
+        self.kv_cache = [torch.tensor([])]
+        self.head_dim = head_dim
+        self.prefix = prefix
+        self.cache_config = cache_config
+        self.dtype = dtype
+
+
+def sparse_attn_indexer(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: str,
+    kv_cache: torch.Tensor,
+    q_fp8: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: Optional[str],
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor,
+) -> torch.Tensor:
+    # careful! this will be None in dummy run
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    context = forward_context.context
+    slot_mapping = attn_metadata.slot_mapping
+    if kv_cache.numel() == 0:
+        # dummy runner
+        return weights
+    num_decode_tokens = context.batch_size if not context.is_prefill else 0
+    indexer_k_quant_and_cache(
+        k,
+        kv_cache,
+        slot_mapping,
+        quant_block_size,
+        scale_fmt,
+    )
+    if context.is_prefill:
+        prefill_metadata = attn_metadata
+        num_prefills = context.batch_size
+        total_seq_lens = hidden_states.shape[0]
+        k_fp8 = torch.empty(
+            [total_seq_lens, head_dim],
+            device=k.device,
+            dtype=dtypes.fp8)
+        k_scale = torch.empty(
+            [total_seq_lens, 1],
+            device=k.device,
+            dtype=torch.float32)
+        if prefill_metadata.block_tables.shape[0] < num_prefills:
+            new_shape = (num_prefills, prefill_metadata.block_tables.shape[1])
+            prefill_metadata.block_tables = torch.full(new_shape, -1, dtype=torch.long, device=prefill_metadata.block_tables.device)
+        cp_gather_indexer_k_quant_cache(
+            kv_cache,
+            k_fp8,
+            k_scale.view(dtypes.fp8),
+            prefill_metadata.block_tables,
+            prefill_metadata.cu_seqlens_q,
+            # num_prefills,
+        )
+        cu_seqlen_ks = prefill_metadata.cu_seqlen_ks
+        cu_seqlen_ke = prefill_metadata.cu_seqlen_ke
+        num_tokens = hidden_states.shape[0]
+        logits = fp8_mqa_logits(Q=q_fp8[num_decode_tokens:num_tokens], KV=k_fp8, kv_scales=k_scale, weights=weights[num_decode_tokens:num_tokens], 
+                                cu_starts=cu_seqlen_ks, cu_ends=cu_seqlen_ke)
+        num_rows = logits.shape[0]
+        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
+        topk_indices = topk_indices_buffer[
+            num_decode_tokens:num_tokens, :topk_tokens
+        ]
+        topk_per_row(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            topk_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+        )
+    else:
+        decode_metadata = attn_metadata
+        # kv_cache size requirement [num_block, block_size, n_head, head_dim],
+        # we only have [num_block, block_size, head_dim],
+        kv_cache = kv_cache.unsqueeze(-2)
+        padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(context.batch_size, -1, *q_fp8.shape[1:])
+        # TODO: move and optimize below logic with triton kernels
+        batch_size = padded_q_fp8_decode_tokens.shape[0]
+        next_n = padded_q_fp8_decode_tokens.shape[1]
+        assert batch_size == context.batch_size
+        num_padded_tokens = batch_size * next_n
+        batch_size, next_n, heads, _ = padded_q_fp8_decode_tokens.shape
+        logits = torch.empty([batch_size * next_n, max_model_len], dtype=torch.float32, device="cuda")
+        deepgemm_fp8_paged_mqa_logits(padded_q_fp8_decode_tokens, kv_cache, weights[:num_padded_tokens], logits, decode_metadata.context_lens, attn_metadata.block_tables, max_model_len)
+        num_rows = logits.shape[0]
+        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
+        topk_indices = topk_indices_buffer[
+            :num_decode_tokens, :topk_tokens
+        ]
+        topk_per_row_decode(
+            logits,
+            next_n,
+            decode_metadata.context_lens,
+            topk_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+        )
+    return weights
+
+def sparse_attn_indexer_fake(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: str,
+    kv_cache: torch.Tensor,
+    q_fp8: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: Optional[str],
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor,
+) -> torch.Tensor:
+    # profile run
+    # NOTE(Chen): create the max possible flattened_kv. So that
+    # profile_run can get correct memory usage.
+    _flattened_kv = torch.empty([total_seq_lens, head_dim + 4],
+                                device=k.device,
+                                dtype=torch.uint8)
+    _k_fp8 = _flattened_kv[..., :head_dim].view(
+        torch.float8_e4m3fn).contiguous()
+    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
+    return weights
+
+direct_register_custom_op(
+    op_name="sparse_attn_indexer",
+    op_func=sparse_attn_indexer,
+    mutates_args=["topk_indices_buffer"],
+    fake_impl=sparse_attn_indexer_fake,
+)
+
+class Indexer(nn.Module):
+
+    def __init__(self,
+                 atom_config: Config,
+                 config: PretrainedConfig,
+                 hidden_size: int,
+                 q_lora_rank: int,
+                 quant_config: Optional[QuantizationConfig],
+                 cache_config: str,
+                 topk_indices_buffer: Optional[torch.Tensor],
+                 prefix: str = ""):
+        super().__init__()
+        self.atom_config = atom_config
+        self.config = config
+        # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
+        self.topk_tokens = config.index_topk
+        self.n_head = config.index_n_heads  # 64
+        self.head_dim = config.index_head_dim  # 128
+        self.rope_dim = config.qk_rope_head_dim  # 64
+        self.q_lora_rank = q_lora_rank  # 1536
+        # no tensor parallel, just replicated
+        self.wq_b = ReplicatedLinear(self.q_lora_rank,
+                                     self.head_dim * self.n_head,
+                                     bias=False,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.wq_b")
+        self.wk = ReplicatedLinear(hidden_size,
+                                   self.head_dim,
+                                   bias=False,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.wk")
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.weights_proj = ReplicatedLinear(hidden_size,
+                                             self.n_head,
+                                             quant_config=None,
+                                             prefix=f"{prefix}.weights_proj")
+        self.softmax_scale = self.head_dim**-0.5
+
+        self.scale_fmt = "ue8m0"
+        self.quant_func = get_hip_quant(QuantType.per_1x128)
+        self.quant_block_size = 128  # TODO: get from config
+        self.topk_indices_buffer = topk_indices_buffer
+
+        # TODO (zyongye) change dim to fp8 later to (self.head_dim + 4)
+        self.k_cache = DeepseekV32IndexerCache(head_dim=self.head_dim + 4,
+                                               dtype=torch.uint8,
+                                               prefix=f"{prefix}.k_cache",
+                                               cache_config=cache_config)
+        self.max_model_len = atom_config.max_model_len
+        self.prefix = prefix
+        self.max_total_seq_len = atom_config.max_num_seqs * self.max_model_len 
+        # register_metadata_builder("indexer_attn_metadata", self.k_cache.get_attn_backend().get_builder_cls())
+
+    def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions,
+                rotary_emb) -> torch.Tensor:
+        q = self.wq_b(qr)
+        q = q.view(-1, self.n_head, self.head_dim)
+        q_pe, q_nope = torch.split(
+            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+
+        k = self.wk(hidden_states)
+        k = self.k_norm(k)
+        k_pe, k_nope = torch.split(
+            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
+
+        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe)
+
+        # we only quant q here since k quant is fused with cache insertion
+        q = q.view(-1, self.head_dim)
+
+        q_fp8, q_scale = self.quant_func(q, quant_dtype=dtypes.fp8)
+        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
+        q_scale = q_scale.view(-1, self.n_head, 1)
+
+        weights = self.weights_proj(hidden_states)
+        weights = weights.unsqueeze(
+            -1) * q_scale * self.softmax_scale * self.n_head**-0.5
+        weights = weights.squeeze(-1)
+
+        return torch.ops.aiter.sparse_attn_indexer(
+            hidden_states, self.k_cache.prefix, self.k_cache.kv_cache[0],
+            q_fp8, k, weights, self.quant_block_size, self.scale_fmt,
+            self.topk_tokens, self.head_dim, self.max_model_len,
+            self.max_total_seq_len, self.topk_indices_buffer)
+
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -216,6 +473,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         layer_num: int = 0,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -293,6 +551,22 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
+        
+        self.is_v32 = hasattr(config, "index_topk")
+
+        if self.is_v32:
+            self.indexer = Indexer(
+                get_current_atom_config(),
+                config,
+                hidden_size,
+                q_lora_rank,
+                quant_config,
+                cache_config,
+                topk_indices_buffer,
+                f"{prefix}.indexer",
+            )
+        else:
+            self.indexer = None
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
         # the concat_and_cache_mla op requires
@@ -311,6 +585,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
+            indexer=self.indexer,
         )
 
         self.mla_attn = Attention(
@@ -321,7 +596,7 @@ class DeepseekV2MLAAttention(nn.Module):
             kv_cache_dtype=cache_config,
             layer_num=layer_num,
             use_mla=True,
-            mla_modules=mla_modules
+            mla_modules=mla_modules,
         )
 
         self.prefix = prefix
@@ -339,6 +614,9 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_c, k_pe = torch.split(self.kv_a_proj_with_mqa(hidden_states),
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
+        if self.is_v32 and self.indexer is not None:
+            _topk_indices = self.indexer(hidden_states, hidden_states_or_q_c, positions, self.rotary_emb)
+
         return self.mla_attn(hidden_states_or_q_c,
                              kv_c_normed,
                              k_pe,
@@ -351,6 +629,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
         cache_config: str = "bf16",
         quant_config: Optional[QuantizationConfig] = None,
         layer_num: int = 0,
@@ -383,6 +662,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             layer_num=layer_num,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
         if (config.n_routed_experts is not None
@@ -467,6 +747,17 @@ class DeepseekV2Model(nn.Module):
         self.config = config
 
         self.vocab_size = config.vocab_size
+        self.is_v32 = hasattr(
+            config, "index_topk"
+        )
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            topk_indices_buffer = torch.empty(atom_config.max_num_batched_tokens,
+                                              topk_tokens,
+                                              dtype=torch.int32,
+                                              device="cuda")
+        else:
+            topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -481,6 +772,7 @@ class DeepseekV2Model(nn.Module):
             lambda prefix, layer_num=None: DeepseekV2DecoderLayer(
                 config,
                 prefix,
+                topk_indices_buffer=topk_indices_buffer,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 layer_num=layer_num,

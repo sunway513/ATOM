@@ -1,17 +1,29 @@
 from typing import List, Tuple, Optional, Union
 import torch
 from torch import nn
-from aiter import rmsnorm2d_fwd, rmsnorm2d_fwd_with_add, rms_norm
+from aiter import (
+    rmsnorm2d_fwd,
+    rmsnorm2d_fwd_with_add,
+    rms_norm,
+    layernorm2d_fwd,
+    layernorm2d_fwd_with_add,
+)
 from aiter.jit.utils.torch_guard import torch_compile_guard
 
+
 @torch_compile_guard()
-def rmsnorm2d_fwd_(x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int) -> torch.Tensor:
+def rmsnorm2d_fwd_(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, dim: int
+) -> torch.Tensor:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
     return rmsnorm2d_fwd(x, weight, eps).view(ori_shape)
 
+
 @torch_compile_guard()
-def rmsnorm2d_fwd_with_add_(x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def rmsnorm2d_fwd_with_add_(
+    x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor, eps: float, dim: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
     ori_shape = x.shape
     x = x.reshape(-1, dim)
     out = torch.empty_like(x)
@@ -67,3 +79,55 @@ class RMSNorm(nn.Module):
         else:
             # return self.add_rms_forward(x, residual)
             return rmsnorm2d_fwd_with_add_(x, self.weight, residual, self.eps, self.dim)
+
+
+@torch_compile_guard()
+def layernorm2d_fwd_(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float, dim: int
+) -> torch.Tensor:
+    ori_shape = x.shape
+    x = x.reshape(-1, dim)
+    return layernorm2d_fwd(x, weight, bias, eps).view(ori_shape)
+
+
+@torch_compile_guard()
+def layernorm2d_fwd_with_add_(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    ori_shape = x.shape
+    x = x.reshape(-1, dim)
+    out = torch.empty_like(x)
+    residual_out = torch.empty_like(x)
+    layernorm2d_fwd_with_add(out, x, residual, residual_out, weight, bias, eps)
+    return out.view(ori_shape), residual_out.view(ori_shape)
+
+
+class LayerNorm(nn.Module):
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            return layernorm2d_fwd_(x, self.weight, self.bias, self.eps, self.dim)
+        else:
+            return layernorm2d_fwd_with_add_(
+                x, self.weight, residual, self.bias, self.eps, self.dim
+            )

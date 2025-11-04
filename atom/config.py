@@ -161,7 +161,6 @@ class CompilationConfig:
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
 
-
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -332,6 +331,34 @@ def get_quant_config(config: PretrainedConfig) -> QuantizationConfig:
     return QuantizationConfig(quant_type, quant_dtype, is_dynamic)
 
 
+_CONFIG_REGISTRY: dict[str, str] = {
+    "deepseek_v32": "deepseek_v3",
+}
+
+
+def get_hf_config(model: str) -> PretrainedConfig:
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model,
+    )
+    model_type = config_dict.get("model_type")
+
+    def _get_hf_token() -> str | None:
+        token = os.getenv("HF_TOKEN")
+        if token and token.strip():
+            return token
+        return None
+
+    if model_type in _CONFIG_REGISTRY:
+        config_class = AutoConfig.for_model(_CONFIG_REGISTRY[model_type])
+        return config_class.from_pretrained(
+            model,
+            # revision=revision,
+            # code_revision=code_revision,
+            token=_get_hf_token(),
+        )
+    return AutoConfig.from_pretrained(model)
+
+
 @dataclass
 class Config:
     model: str
@@ -378,7 +405,7 @@ class Config:
             self.kv_cache_block_size % 16 == 0 or self.kv_cache_block_size == 1
         ), f"kv_cache_block_size ({self.kv_cache_block_size}) must be a multiple of 16 or 1"
         assert 1 <= self.tensor_parallel_size <= 8
-        self.hf_config = AutoConfig.from_pretrained(self.model)
+        self.hf_config = get_hf_config(self.model)
         self.quant_config = get_quant_config(self.hf_config)
         self.max_model_len = min(
             self.max_model_len, self.hf_config.max_position_embeddings

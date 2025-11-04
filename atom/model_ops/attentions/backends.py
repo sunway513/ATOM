@@ -2,12 +2,14 @@ from abc import ABC, abstractmethod
 from typing import Type, Tuple, Generic, Optional, List, TypeVar, Dict, Any
 from atom.model_engine.scheduler import ScheduledBatch
 from atom.model_ops.attention_mla import MLAModules
+import numpy as np
 
 from atom.utils.forward_context import AttentionMetaData
 import torch
 from torch import nn
 
-T = TypeVar('T', bound="BroadcastableModelInput")
+T = TypeVar("T", bound="BroadcastableModelInput")
+
 
 class BroadcastableModelInput(ABC):
 
@@ -35,6 +37,7 @@ class BroadcastableModelInput(ABC):
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
@@ -53,7 +56,6 @@ class AttentionBackend(ABC):
     @staticmethod
     def get_impl_cls() -> Type["AttentionImpl"]:
         return AttentionImpl
-
 
 
 class AttentionMetadataBuilder(ABC, Generic[T]):
@@ -129,6 +131,21 @@ class CommonAttentionBuilder(AttentionMetadataBuilder[T], Generic[T]):
             ("cu_seqlens_q", bs + 1),
             ("slot_mapping", len(slot_mapping)),
         ]
+        if "cu_seqlen_ke" in var and "cu_seqlen_ks" in var:
+            block_tables = forward_vars["block_tables"].np
+            for i, seq in enumerate(seqs):
+                block_tables[i] = 0
+                if len(seq.block_table) > 0:
+                    block_tables[i, : seq.num_blocks] = seq.block_table
+            var["cu_seqlen_ke"].np[:sum_scheduled_tokens] = (
+                np.arange(sum_scheduled_tokens, dtype=np.int32) + 1
+            )
+            counts = var["cu_seqlens_q"].np[1 : bs + 1] - var["cu_seqlens_q"].np[:bs]
+            var["cu_seqlen_ks"].np[:sum_scheduled_tokens] = np.repeat(
+                var["cu_seqlens_q"].np[:bs], counts
+            )
+            vars_used.append(("cu_seqlen_ke", sum_scheduled_tokens))
+            vars_used.append(("cu_seqlen_ks", sum_scheduled_tokens))
         ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
         attn_metadata = AttentionMetaData(
             cu_seqlens_k=cu_seqlens_k.cuda(non_blocking=True),

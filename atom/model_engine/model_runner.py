@@ -29,6 +29,7 @@ suppot_model_arch_dict = {
     "LlamaForCausalLM": LlamaForCausalLM,
     "MixtralForCausalLM": MixtralForCausalLM,
     "DeepseekV3ForCausalLM": DeepseekV2ForCausalLM,
+    "DeepseekV32ForCausalLM": DeepseekV2ForCausalLM,
 }
 # seed=1
 # np.random.seed(seed)
@@ -206,7 +207,12 @@ class ModelRunner:
             self.block_size,
             use_mla=self.use_mla,
         )
-        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(self.block_size)
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            self.block_size
+        )
+        self.is_deepseek_v32 = (
+            hasattr(hf_config, "index_topk") if self.use_mla else False
+        )
 
         # Initialize profiler for this rank
         self.profiler = None
@@ -260,17 +266,21 @@ class ModelRunner:
     def is_deepseek_mla(self) -> bool:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
-        elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'):
+        elif self.hf_text_config.model_type in (
+            "deepseek_v2",
+            "deepseek_v3",
+            "deepseek_v32",
+            "deepseek_mtp",
+        ):
             return self.hf_text_config.kv_lora_rank is not None
-        elif self.hf_text_config.model_type == 'eagle':
+        elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
-            return self.hf_text_config.model.model_type in \
-                    ('deepseek_v2', 'deepseek_v3') \
+            return (
+                self.hf_text_config.model.model_type in ("deepseek_v2", "deepseek_v3")
                 and self.hf_text_config.kv_lora_rank is not None
+            )
         return False
-
 
     def _make_buffer(
         self, *size: Union[int, torch.SymInt], dtype: torch.dtype, numpy: bool = True
@@ -336,6 +346,7 @@ class ModelRunner:
         return True
 
     def warmup_model(self):
+        start_time = time.time()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = (
@@ -365,6 +376,9 @@ class ModelRunner:
         self.forward(dummy_batch)
         self.tokenID_processor.clean()
         torch.cuda.empty_cache()
+        logger.info(
+            f"{self.label}: warmup_model {time.time() - start_time:.2f} seconds with {num_seqs} reqs {total_tokens_num} tokens"
+        )
 
     def allocate_forward_vars(self):
         config = self.config
@@ -391,6 +405,16 @@ class ModelRunner:
             "kv_last_page_lens": CpuGpuBuffer(max_bs, **i32_kwargs),
             "outputs": torch.empty(max_bs, hidden_size, dtype=hidden_type),
         }
+        if self.is_deepseek_v32:
+            self.forward_vars["cu_seqlen_ke"] = CpuGpuBuffer(
+                max_num_batched_tokens, **i32_kwargs
+            )
+            self.forward_vars["cu_seqlen_ks"] = CpuGpuBuffer(
+                max_num_batched_tokens, **i32_kwargs
+            )
+            self.forward_vars["sparse_kv_indptr"] = CpuGpuBuffer(
+                max_bs + 1, **i32_kwargs
+            )
         self.forward_vars["cu_seqlens_q"].cpu.copy_(
             torch.arange(0, max_bs + 1, step=1, dtype=torch.int32)
         )
@@ -411,14 +435,22 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         torch.set_default_device("cpu")
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        isMLA = hf_config.architectures[0].startswith("DeepseekV")
-        if isMLA:
+        if self.use_mla:
             block_bytes = (
                 hf_config.num_hidden_layers
                 * self.block_size
                 * 576
                 * dtypes.d_dtypes[config.kv_cache_dtype].itemsize
             )
+            if self.is_deepseek_v32:
+                index_dim = hf_config.index_head_dim + 4
+                aligned_index_dim = ((index_dim + 15) // 16) * 16
+                block_bytes += (
+                    hf_config.num_hidden_layers
+                    * self.block_size
+                    * aligned_index_dim
+                    * dtypes.fp8.itemsize
+                )
         else:
             block_bytes = (
                 2
@@ -439,11 +471,8 @@ class ModelRunner:
         config = self.config
         config.num_kvcache_blocks = num_kvcache_blocks
         hf_config = config.hf_config
-        isMLA = hf_config.architectures[0].startswith("DeepseekV")
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        
-        # Allocate raw KV cache tensors
-        if isMLA:
+        if self.use_mla:
             self.kv_cache = torch.zeros(
                 hf_config.num_hidden_layers,
                 config.num_kvcache_blocks,
@@ -452,6 +481,19 @@ class ModelRunner:
                 dtype=dtypes.d_dtypes[config.kv_cache_dtype],
                 device="cuda",
             )
+            if self.is_deepseek_v32:
+                # Align last dimension to 16 bytes for fp8 (1 byte per element)
+                # to avoid unaligned memory access in torch inductor
+                index_dim = hf_config.index_head_dim + 4
+                aligned_index_dim = ((index_dim + 15) // 16) * 16
+                self.index_cache = torch.zeros(
+                    hf_config.num_hidden_layers,
+                    config.num_kvcache_blocks,
+                    self.block_size,
+                    aligned_index_dim,
+                    dtype=dtypes.fp8,
+                    device="cuda",
+                )
         else:
             self.kv_cache = torch.zeros(
                 2,
@@ -527,7 +569,16 @@ class ModelRunner:
                         1,
                         576,
                     )
-                    
+                    module.max_model_len = self.config.max_model_len
+                    if self.is_deepseek_v32 and module.indexer is not None:
+                        # Use aligned dimension to avoid memory copy in torch inductor
+                        module.indexer.k_cache.kv_cache[0] = self.index_cache[
+                            layer_id
+                        ].view(
+                            config.num_kvcache_blocks * self.block_size,
+                            1,
+                            aligned_index_dim,
+                        )
                     # Store in KVCacheTensor
                     kv_cache_tensor = KVCacheTensor(
                         layer_num=layer_id,
@@ -559,7 +610,6 @@ class ModelRunner:
     def prepare_prefill(self, batch: ScheduledBatch):
         return self.attn_metadata_builder.prepare_prefill(batch, self.forward_vars)
 
-
     def prepare_decode(self, batch: ScheduledBatch):
         scheduled_bs = batch.total_seqs_num_decode
         seqs = list(batch.seqs.values())
@@ -576,7 +626,10 @@ class ModelRunner:
 
     def prepare_intputs(self, batch: ScheduledBatch):
         is_prefill = batch.total_tokens_num_prefill > 0
-        bs = 0
+        bs = batch.total_seqs_num
+        num_scheduled_tokens = batch.num_scheduled_tokens
+        cu_seqlens_q, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+        self.forward_vars["cu_seqlens_q"].np[1 : bs + 1] = cu_seqlens_q
         if not is_prefill:
             scheduled_bs = batch.total_seqs_num_decode
             seqs = list(batch.seqs.values())
@@ -588,6 +641,7 @@ class ModelRunner:
                 else next(x for x in self.graph_bs if x >= scheduled_bs)
             )
             assert bs >= scheduled_bs, f"current decode {scheduled_bs=} > max graph_bs{bs}"
+            self.forward_vars["cu_seqlens_q"].np[scheduled_bs + 1 : bs + 1] = self.forward_vars["cu_seqlens_q"].np[scheduled_bs]
         attn_metadata, positions = self.attn_metadata_builder.build(batch, self.forward_vars, bs)
         context_bs = batch.total_seqs_num_prefill if is_prefill else batch.total_seqs_num_decode
 
@@ -603,13 +657,7 @@ class ModelRunner:
 
     def prepare_model(self, batch: ScheduledBatch):
         total_tokens_num = batch.total_tokens_num
-        assert total_tokens_num > 0
-        bs = batch.total_seqs_num
-        seqs = batch.seqs.values()
-
-        num_scheduled_tokens = batch.num_scheduled_tokens
-        cu_seqlens_q, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        self.forward_vars["cu_seqlens_q"].np[1 : bs + 1] = cu_seqlens_q
+        assert total_tokens_num > 0   
 
         input_ids = self.tokenID_processor.prepare_input_ids(batch)
         # print(f"input_ids: {input_ids}")
@@ -642,8 +690,9 @@ class ModelRunner:
         temperatures: torch.Tensor,
     ) -> dict[int, int]:
         sampled_tokens = self.sampler(logits, temperatures)
-        # print(f"{logits=}")
-        # print(f"{sampled_tokens=}")
+        # if self.rank == 0:
+        #     print(f"{logits=}")
+        #     print(f"{sampled_tokens=}")
         token_ids = self.tokenID_processor.prepare_sampled_ids(
             batch,
             sampled_tokens,
