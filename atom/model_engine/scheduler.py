@@ -1,4 +1,5 @@
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional, cast
@@ -160,6 +161,9 @@ class Scheduler:
                 seq.token_ids[-1] = token_id
             else:
                 seq.append_token(token_id)
+
+            if seq.num_completion_tokens == 1 and seq.first_token_time == 0.0:
+                seq.first_token_time = time.time()
 
             leave_reason = None
             # Check if sequence ends with any stop sequence

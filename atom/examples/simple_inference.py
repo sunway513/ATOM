@@ -47,22 +47,6 @@ def main():
     ]
     print("This is prompts:", prompts)
 
-    # # Calculate total token number of prompts
-    # prompt_token_ids = [llm.tokenizer.encode(prompt) for prompt in prompts]
-    # prompt_lens = [len(token_ids) for token_ids in prompt_token_ids]
-    # # Create warmup inputs with same shapes as all prompts
-    # # Generate random token IDs for each prompt length to match expected input shapes
-    # warmup_prompts = []
-    # for i, prompt_len in enumerate(prompt_lens):
-    #     warmup_prompt = torch.randint(
-    #         0, llm.tokenizer.vocab_size, size=(prompt_len,)
-    #     ).tolist()
-    #     warmup_prompts.append(warmup_prompt)
-    # # Run warmup with the same batch structure as the actual prompts (no profiling)
-    # _ = llm.generate(warmup_prompts, sampling_params)
-
-    # generate (with profiling)
-    # outputs_ = llm.generate(["Benchmark: "], SamplingParams())
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):

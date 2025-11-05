@@ -117,9 +117,7 @@ class EngineCore:
         engine: EngineCore = None
         try:
             engine = EngineCore(config, input_address, output_address)
-            engine.start_profiler()
             engine.busy_loop()
-            engine.stop_profiler()
         except Exception as e:
             logger.error(f"run_engine: exception: {e}", exc_info=True)
             raise e
@@ -181,6 +179,14 @@ class EngineCore:
                         req_ids = [req.id for req in reqs]
                         logger.debug(f"{self.label}: input get {request_type} {req_ids}")
                         self.input_queue.put_nowait(reqs)
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        # Handle utility commands like start_profile/stop_profile
+                        cmd = reqs.get("cmd") if isinstance(reqs, dict) else None
+                        logger.debug(f"{self.label}: input get UTILITY command: {cmd}")
+                        if cmd == "start_profile":
+                            self.start_profiler()
+                        elif cmd == "stop_profile":
+                            self.stop_profiler()
                     elif request_type == EngineCoreRequestType.SHUTDOWN:
                         logger.debug(f"{self.label}: input get {request_type}")
                         self.input_queue.put_nowait([get_exit_sequence()])

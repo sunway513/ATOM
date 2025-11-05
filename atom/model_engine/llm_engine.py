@@ -126,6 +126,14 @@ class LLMEngine:
             
             # Let other tasks run before trying again
             await asyncio.sleep(0)
+    
+    def start_profile(self):
+        self.core_mgr.send_utility_command("start_profile")
+        logger.info("Profiling started")
+    
+    def stop_profile(self):
+        self.core_mgr.send_utility_command("stop_profile")
+        logger.info("Profiling stopped. Trace files should be generated.")
 
 
 class InputOutputProcessor:
@@ -173,10 +181,21 @@ class InputOutputProcessor:
             self.requests.pop(req.id)
             output_str = self.tokenizer.decode(req.completion_token_ids)
             req.leave_time = time.time()
+            
+            # Calculate TTFT (Time To First Token) and TPOT (Time Per Output Token)
+            ttft = 0.0
+            tpot = 0.0
+            if req.first_token_time > 0:
+                ttft = req.first_token_time - req.arrive_time
+                # Calculate TPOT only if there are multiple output tokens
+                if req.num_completion_tokens > 1:
+                    tpot = (req.leave_time - req.first_token_time) / (req.num_completion_tokens - 1)
+            
             print(
                 f"Request {req.id} finished with reason {req.leave_reason}. "
                 f"Input tokens: {req.num_prompt_tokens}, output tokens: {req.num_completion_tokens}, "
-                f"latency: {req.leave_time - req.arrive_time:.2f}s"
+                f"latency: {req.leave_time - req.arrive_time:.2f}s, "
+                f"TTFT: {ttft:.3f}s, TPOT: {tpot:.3f}s"
             )
             outputs[req.id] = {
                 "text": output_str,
@@ -185,6 +204,8 @@ class InputOutputProcessor:
                 "finish_reason": req.leave_reason,
                 "num_tokens_input": req.num_prompt_tokens,
                 "num_tokens_output": req.num_completion_tokens,
+                "ttft": ttft,  # Time to first token in seconds
+                "tpot": tpot,  # Time per output token in seconds
             }
         return outputs
 

@@ -55,18 +55,40 @@ pip install .
 The default optimization level is 3 (running with torch compile). Supported models include **Qwen**, **Llama**, and **Mixtral**.
 
 ```bash
-python -m atom.bench.example --model meta-llama/Meta-Llama-3-8B
+python -m atom.examples.simple_inference --model meta-llama/Meta-Llama-3-8B
 ```
 
 > **Note:** First-time execution may take approximately 10 minutes for model compilation.
 
-### Performance Benchmarking
+### Performance profiling
 
-Run performance tests to compare ATOM against vLLM:
-
+Profile offline inference
 ```bash
-python -m atom.bench.one_batch --model Qwen/Qwen3-0.6B
+python -m atom.examples.profile_offline --model Qwen/Qwen3-0.6B
 ```
+Or profile offline with custom input length
+```bash
+python -m atom.examples.profile_offline --model Qwen/Qwen3-0.6B --random-input --input-length 1024 --output-length 32
+```
+
+Profile online inference, after starting the server
+```bash
+python -m atom.examples.profile_online 
+```
+Or profile online with custom input length
+```bash
+python -m atom.examples.profile_online --model Qwen/Qwen3-0.6B --random-input --input-length 1024 --output-length 32
+```
+
+Or directly send start profile and stop profile reuqest
+```bash
+curl -s -S -X POST http://127.0.0.1:8000/start_profile
+```
+```bash
+curl -s -S -X POST http://127.0.0.1:8000/stop_profile
+```
+
+### Performance Benchmarking
 
 Run online throughput benchmark:
 

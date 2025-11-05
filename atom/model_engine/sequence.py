@@ -48,6 +48,7 @@ class Sequence:
 
         # statistics fields
         self.arrive_time = 0.0
+        self.first_token_time = 0.0
         self.leave_time = 0.0
         self.leave_reason = ""
 

@@ -108,6 +108,13 @@ class CoreManager:
             [self.engine_core_identity, pickle.dumps((EngineCoreRequestType.ADD, seqs))],
             copy=False,
         )
+    
+    def send_utility_command(self, cmd: str):
+        logger.debug(f"{self.label}: Send utility command: {cmd}")
+        self.input_socket.send_multipart(
+            [self.engine_core_identity, pickle.dumps((EngineCoreRequestType.UTILITY, {"cmd": cmd}))],
+            copy=False,
+        )
 
     def _shutdown_engine_core(self):
         if self.engine_core_process is not None and self.engine_core_process.is_alive():
