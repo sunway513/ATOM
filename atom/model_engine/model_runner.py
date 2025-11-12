@@ -8,7 +8,7 @@ import torch
 import torch.profiler as torch_profiler
 import tqdm
 from aiter import destroy_dist_env, dtypes, init_dist_env
-from aiter.dist.parallel_state import graph_capture
+from aiter.dist.parallel_state import graph_capture, get_tp_group
 from atom.config import Config, set_current_atom_config, KVCacheTensor
 from atom.model_engine.scheduler import ScheduledBatch
 from atom.model_engine.sequence import Sequence
@@ -38,9 +38,9 @@ suppot_model_arch_dict = {
     "DeepseekV3ForCausalLM": DeepseekV2ForCausalLM,
     "DeepseekV32ForCausalLM": DeepseekV2ForCausalLM,
 }
-seed = 34567
-np.random.seed(seed)
-torch.cuda.manual_seed_all(seed)
+# seed = 34567
+# np.random.seed(seed)
+# torch.cuda.manual_seed_all(seed)
 
 
 class tokenIDProcessor:
@@ -703,9 +703,8 @@ class ModelRunner:
         temperatures: torch.Tensor,
     ) -> dict[int, int]:
         sampled_tokens = self.sampler(logits, temperatures)
-        # if self.rank == 0:
-        #     print(f"{logits=}")
-        #     print(f"{sampled_tokens=}")
+        if get_tp_group().world_size > 1 and self.tokenID_processor.is_deferred_out:
+            sampled_tokens = get_tp_group().broadcast(sampled_tokens, src=0)
         token_ids = self.tokenID_processor.prepare_sampled_ids(
             batch,
             sampled_tokens,

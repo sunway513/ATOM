@@ -34,8 +34,8 @@ from aiter import (
     gemm_a8w8_blockscale,
     get_hip_quant,
     indexer_k_quant_and_cache,
-    topk_per_row,
-    topk_per_row_decode,
+    top_k_per_row_prefill,
+    top_k_per_row_decode,
 )
 from aiter.dist.communication_op import tensor_model_parallel_all_reduce
 from aiter.dist.parallel_state import (
@@ -291,7 +291,7 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[
             num_decode_tokens:num_tokens, :topk_tokens
         ]
-        topk_per_row(
+        top_k_per_row_prefill(
             logits,
             cu_seqlen_ks,
             cu_seqlen_ke,
@@ -319,7 +319,7 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[
             :num_decode_tokens, :topk_tokens
         ]
-        topk_per_row_decode(
+        top_k_per_row_decode(
             logits,
             next_n,
             decode_metadata.context_lens,
