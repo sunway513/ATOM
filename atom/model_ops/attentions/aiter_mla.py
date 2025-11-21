@@ -1,0 +1,264 @@
+from dataclasses import dataclass
+from typing import Type, Optional
+
+from atom.config import KVCacheConfig, KVCacheTensor
+from atom.utils.forward_context import AttentionMetaData, Context
+from .backends import CommonAttentionBuilder, AttentionBackend
+import torch
+import numpy as np
+
+import numpy as np
+import torch
+from atom.model_engine.scheduler import ScheduledBatch
+from atom.model_ops.attention_mla import MLAAttention
+from aiter import get_mla_metadata_v1, get_mla_metadata_info_v1, dtypes
+from aiter.dist.parallel_state import get_tp_group
+from atom.utils import CpuGpuBuffer
+
+from .backends import AttentionBackend, CommonAttentionBuilder
+
+
+class AiterMLABackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "ROCM_AITER_MLA"
+
+    @staticmethod
+    def get_builder_cls() -> Type["AiterMLAMetadataBuilder"]:
+        return AiterMLAMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> Type["MLAAttention"]:
+        return MLAAttention
+
+
+class AiterMLAMetadataBuilder(CommonAttentionBuilder):
+
+    def __init__(self, model_runner):
+        super().__init__(
+            model_runner,
+        )
+        assert self.block_size == 1, "AITER MLA requires only block size 1."
+        config = model_runner.config
+        hf_config = config.hf_config
+        self.num_attention_heads = (
+            hf_config.num_attention_heads // get_tp_group().world_size
+        )
+        self.is_sparse = model_runner.is_deepseek_v32
+        self.index_topk = hf_config.index_topk if self.is_sparse else -1
+
+        (
+            (work_meta_data_size, work_meta_data_type),
+            (work_indptr_size, work_indptr_type),
+            (work_info_set_size, work_info_set_type),
+            (reduce_indptr_size, reduce_indptr_type),
+            (reduce_final_map_size, reduce_final_map_type),
+            (reduce_partial_map_size, reduce_partial_map_type),
+        ) = get_mla_metadata_info_v1(
+            self.max_bs,
+            1,
+            self.num_attention_heads,
+            torch.bfloat16,
+            dtypes.d_dtypes[config.kv_cache_dtype],
+            is_sparse=self.is_sparse,
+            fast_mode=True,
+        )
+        i32_kwargs = {"dtype": torch.int32, "device": self.device}
+
+        mla_metadata = {
+            # AITER MLA specific persistent buffers
+            "work_meta_data": torch.empty(
+                work_meta_data_size, dtype=work_meta_data_type, device=self.device
+            ),
+            "work_indptr": torch.empty(
+                work_indptr_size, dtype=work_indptr_type, device=self.device
+            ),
+            "work_info_set": torch.empty(
+                work_info_set_size, dtype=work_info_set_type, device=self.device
+            ),
+            "reduce_indptr": torch.empty(
+                reduce_indptr_size, dtype=reduce_indptr_type, device=self.device
+            ),
+            "reduce_final_map": torch.empty(
+                reduce_final_map_size, dtype=reduce_final_map_type, device=self.device
+            ),
+            "reduce_partial_map": torch.empty(
+                reduce_partial_map_size,
+                dtype=reduce_partial_map_type,
+                device=self.device,
+            ),
+            "kv_indptr": CpuGpuBuffer(self.max_bs + 1, **i32_kwargs),
+            "kv_indices": CpuGpuBuffer(
+                self.max_bs * self.max_num_blocks_per_seq, **i32_kwargs
+            ),
+            "kv_last_page_lens": CpuGpuBuffer(self.max_bs, **i32_kwargs),
+        }
+        mla_metadata["kv_last_page_lens"].cpu.fill_(1)
+        mla_metadata["kv_last_page_lens"].copy_to_gpu()
+        if self.is_sparse:
+            mla_metadata["cu_seqlen_ke"] = CpuGpuBuffer(
+                self.max_num_batched_tokens, **i32_kwargs
+            )
+            mla_metadata["cu_seqlen_ks"] = CpuGpuBuffer(
+                self.max_num_batched_tokens, **i32_kwargs
+            )
+            mla_metadata["sparse_kv_indptr"] = CpuGpuBuffer(
+                self.max_bs + 1, **i32_kwargs
+            )
+        self.model_runner.forward_vars.update(mla_metadata)
+
+    def set_mla_persistent_worker_buffers(self, bs: int):
+        split_params = {
+            "kv_granularity": max(self.block_size, 16),
+            "max_seqlen_qo": 1,
+            "uni_seqlen_qo": 1,
+            "fast_mode": 1,
+            "topk": -1,
+        }
+        var = self.model_runner.forward_vars
+        work_meta_data = var["work_meta_data"]
+        work_info_set = var["work_info_set"]
+        work_indptr = var["work_indptr"]
+        reduce_indptr = var["reduce_indptr"]
+        reduce_final_map = var["reduce_final_map"]
+        reduce_partial_map = var["reduce_partial_map"]
+        get_mla_metadata_v1(
+            var["cu_seqlens_q"].gpu[: bs + 1],
+            (
+                var["sparse_kv_indptr"].gpu[: bs + 1]
+                if self.is_sparse
+                else var["kv_indptr"].gpu[: bs + 1]
+            ),
+            self.num_attention_heads,
+            1,  # nhead_kv,
+            True,
+            work_meta_data,
+            work_info_set,
+            work_indptr,
+            reduce_indptr,
+            reduce_final_map,
+            reduce_partial_map,
+            **split_params,
+        )
+        return {
+            "work_meta_data": work_meta_data,
+            "work_info_set": work_info_set,
+            "work_indptr": work_indptr,
+            "reduce_indptr": reduce_indptr,
+            "reduce_final_map": reduce_final_map,
+            "reduce_partial_map": reduce_partial_map,
+        }
+
+    def prepare_prefill(self, batch: ScheduledBatch):
+        attn_metadata, positions = super().prepare_prefill(batch)
+        bs = batch.total_seqs_num_prefill
+        seqs = list(batch.seqs.values())
+        sum_scheduled_tokens = batch.total_tokens_num_prefill
+        var = self.model_runner.forward_vars
+        if self.is_sparse:
+            self.prepare_block_tables(seqs)
+            attn_metadata.block_tables = var["block_tables"].copy_to_gpu(bs)
+            var["cu_seqlen_ke"].np[:sum_scheduled_tokens] = (
+                np.arange(sum_scheduled_tokens, dtype=np.int32) + 1
+            )
+            counts = var["cu_seqlens_q"].np[1 : bs + 1] - var["cu_seqlens_q"].np[:bs]
+            var["cu_seqlen_ks"].np[:sum_scheduled_tokens] = np.repeat(
+                var["cu_seqlens_q"].np[:bs], counts
+            )
+            attn_metadata.cu_seqlen_ks = var["cu_seqlen_ks"].copy_to_gpu(
+                sum_scheduled_tokens
+            )
+            attn_metadata.cu_seqlen_ke = var["cu_seqlen_ke"].copy_to_gpu(
+                sum_scheduled_tokens
+            )
+        return attn_metadata, positions
+
+    def prepare_decode(self, batch: ScheduledBatch, bs: int):
+        scheduled_bs = batch.total_seqs_num_decode
+        seqs = list(batch.seqs.values())
+        dropout_p = 0.0
+        max_q_len = 1
+
+        context_lens = [seq.num_tokens for seq in seqs]
+        positions = context_lens
+        slot_mapping = [
+            seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+            for seq in seqs
+        ]
+
+        var = self.model_runner.forward_vars
+        sum_scheduled_tokens = batch.total_tokens_num_decode
+        var["slot_mapping"].np[:scheduled_bs] = slot_mapping
+        var["slot_mapping"].np[scheduled_bs:bs] = -1
+        var["positions"].np[:sum_scheduled_tokens] = positions
+        var["context_lens"].np[:scheduled_bs] = context_lens
+
+        sum_blocks = 0
+        for seq in seqs:
+            var["kv_indices"].np[
+                sum_blocks : sum_blocks + seq.num_blocks
+            ] = seq.block_table
+            sum_blocks += seq.num_blocks
+        kv_indptr = np.cumsum([seq.num_blocks for seq in seqs])
+        var["kv_indptr"].np[1 : scheduled_bs + 1] = kv_indptr
+        var["kv_indptr"].np[scheduled_bs + 1 : bs + 1] = sum_blocks
+        var["kv_last_page_lens"].np[:scheduled_bs] = [
+            seq.last_block_num_tokens for seq in seqs
+        ]
+        var["kv_last_page_lens"].np[scheduled_bs:bs] = 0
+        vars_used = [
+            ("slot_mapping", bs),  # TODO: MTP support
+            ("context_lens", bs),
+            ("cu_seqlens_q", bs + 1),
+            ("kv_indptr", bs + 1),
+            ("kv_indices", sum_blocks),
+            ("kv_last_page_lens", bs),
+        ]
+        if self.is_sparse:
+            self.prepare_block_tables(seqs)
+            vars_used.append(("block_tables", bs))
+            index_topk = self.index_topk
+            sparse_context_lens = np.clip(var["context_lens"].np[:bs], None, index_topk)
+            var["sparse_kv_indptr"].np[1 : bs + 1] = np.cumsum(
+                sparse_context_lens, dtype=np.int32
+            )
+            var["sparse_kv_indptr"].np[scheduled_bs : bs + 1] = var[
+                "sparse_kv_indptr"
+            ].np[scheduled_bs]
+            vars_used.append(("sparse_kv_indptr", bs + 1))
+
+        ctx = {el: var[el].copy_to_gpu(num) for el, num in vars_used}
+        ctx_mla_ps = self.set_mla_persistent_worker_buffers(bs)
+        ctx.update(ctx_mla_ps)
+        attn_metadata = AttentionMetaData(
+            dropout_p=dropout_p,
+            max_q_len=max_q_len,
+            **ctx,
+        )
+        positions = var["positions"].copy_to_gpu(sum_scheduled_tokens)
+        # if str(positions.device) == "cuda:0":
+        #     for el, var in ctx.items():
+        #         print(f"{el}: {var}")
+        return attn_metadata, positions
+
+    def build_for_cudagraph_capture(self, bs: int) -> AttentionMetaData:
+        var = self.model_runner.forward_vars
+        sparse_kv_indptr = var["sparse_kv_indptr"].gpu if self.is_sparse else None
+        ctx_mla_ps = self.set_mla_persistent_worker_buffers(bs)
+        attn_matadata = AttentionMetaData(
+            slot_mapping=var["slot_mapping"].gpu[:bs],
+            context_lens=var["context_lens"].gpu[:bs],
+            block_tables=var["block_tables"].gpu[:bs],
+            max_q_len=1,
+            cu_seqlens_q=var["cu_seqlens_q"].gpu[: bs + 1],
+            kv_indptr=var["kv_indptr"].gpu[: bs + 1],
+            kv_indices=var["kv_indices"].gpu[:],
+            kv_last_page_lens=var["kv_last_page_lens"].gpu[:bs],
+            sparse_kv_indptr=sparse_kv_indptr,
+            **ctx_mla_ps,
+        )
+        positions = var["positions"].copy_to_gpu(bs)
+        context = Context(
+            positions=positions, is_prefill=False, batch_size=bs, graph_bs=bs
+        )
+        return attn_matadata, context

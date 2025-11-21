@@ -1,0 +1,286 @@
+from collections import defaultdict
+from contextlib import contextmanager
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Set, Dict, Union
+from atom.config import Config, KVCacheTensor
+import torch
+from abc import ABC, abstractmethod
+from atom.config import Config, ParallelConfig
+
+def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
+                                      max_num_tokens: int,
+                                      chunk_idx: int) -> list[int]:
+    dp_size = len(num_tokens_across_dp_cpu)
+
+    local_size = [-1] * dp_size
+    for i in range(dp_size):
+        dp_tokens = num_tokens_across_dp_cpu[i]
+        local_size[i] = min(max_num_tokens,
+                            dp_tokens - (max_num_tokens * chunk_idx))
+        if local_size[i] <= 0:
+            local_size[i] = 1  # ensure lockstep even if done
+    return local_size
+
+
+@dataclass
+class DPMetadata:
+    max_tokens_across_dp_cpu: torch.Tensor
+    cu_tokens_across_dp_cpu: torch.Tensor
+    local_sizes: Optional[list[int]] = None
+
+    @staticmethod
+    def num_tokens_across_dp(num_tokens: int, dp_size: int,
+                             dp_rank: int) -> torch.Tensor:
+        """
+        Gather the num_tokens across all DP ranks and return results in a
+        CPU tensor of size dp_size.
+        """
+        num_tokens_across_dp = [0] * dp_size
+        num_tokens_across_dp[dp_rank] = num_tokens
+        num_tokens_tensor = torch.tensor(num_tokens_across_dp,
+                                         device="cpu",
+                                         dtype=torch.int32)
+        from aiter.dist.parallel_state import get_dp_group
+        import torch.distributed as dist
+        dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        return num_tokens_tensor
+
+    @staticmethod
+    def make(
+            parallel_config: ParallelConfig,
+            # attn_metadata: Any,
+            num_tokens: int,
+            num_tokens_across_dp: Optional[torch.Tensor] = None
+    ) -> "DPMetadata":
+
+        assert parallel_config.data_parallel_size > 1
+        dp_size = parallel_config.data_parallel_size
+        dp_rank = parallel_config.data_parallel_rank
+        batchsize = num_tokens
+
+        # If num_tokens_across_dp is None, it will be computed by all_reduce
+        # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
+        assert (num_tokens_across_dp is None
+                or num_tokens_across_dp[dp_rank] == batchsize)
+        if num_tokens_across_dp is None:
+            num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+                batchsize, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
+        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
+        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)
+
+    @contextmanager
+    def chunked_sizes(self, max_chunk_size_per_rank: int, chunk_idx: int):
+        """
+        Context manager to compute and temporarily set the per-rank local token
+        sizes for a specific chunk during chunked forward execution.
+        This is necessary to ensure each DP (data parallel) rank processes its
+        designated portion of tokens in lockstep with others, even when the
+        token counts are uneven or some ranks have completed their input early.
+        For chunked execution, we break up the total tokens on each rank into
+        multiple chunks (of at most `max_chunk_size_per_rank`), and for a given
+        `chunk_idx`, this context manager sets `self.local_sizes` to the number
+        of tokens to process in that chunk on each rank.
+        It uses cumulative sizes (`cu_tokens_across_dp_cpu`) to derive the
+        number of tokens per rank, and calls `_compute_chunked_local_num_tokens`
+        to determine the chunk-wise split.
+        `self.local_sizes` is only valid inside the context.
+        Args:
+            max_chunk_size_per_rank: The max number of tokens each rank is 
+                                     allowed to process in this chunk.
+            chunk_idx: The index of the chunk to compute sizes for.
+        """
+        cu_sizes = self.cu_tokens_across_dp_cpu
+        num_tokens_across_dp_cpu = [
+            (cu_sizes[i] -
+             cu_sizes[i - 1]).item() if i > 0 else cu_sizes[0].item()
+            for i in range(len(cu_sizes))
+        ]
+        self.local_sizes = _compute_chunked_local_num_tokens(
+            num_tokens_across_dp_cpu, max_chunk_size_per_rank, chunk_idx)
+        try:
+            yield self.local_sizes
+        finally:
+            self.local_sizes = None
+
+    def get_chunk_sizes_across_dp_rank(self) -> Optional[list[int]]:
+        return self.local_sizes
+
+@dataclass
+class Context:
+    # This context is used to store the basic context of the forward.
+    positions: torch.Tensor
+    is_prefill: bool = False
+    batch_size: int = 0
+    graph_bs: int = 0
+
+    def __init__(
+        self,
+        positions: torch.Tensor,
+        is_prefill: bool = False,
+        batch_size: int = 0,
+        graph_bs: int = 0,
+    ):
+        self.positions = positions
+        self.is_prefill = is_prefill
+        self.batch_size = batch_size
+        self.graph_bs = graph_bs
+
+
+@dataclass
+class AttentionMetaData:
+    """Attention metadata for prefill and decode batched together."""
+
+    cu_seqlens_q: Optional[torch.Tensor] = None
+    cu_seqlens_k: Optional[torch.Tensor] = None
+    max_seqlen_q: int = 0
+    max_seqlen_k: int = 0
+    min_seqlen_q: int = 0
+    slot_mapping: Optional[torch.Tensor] = None
+    context_lens: Optional[torch.Tensor] = None
+    block_tables: Optional[torch.Tensor] = None
+    dropout_p: float = 0.0
+
+    max_q_len: Optional[int] = None
+    kv_indptr: Optional[torch.Tensor] = None
+    kv_indices: Optional[torch.Tensor] = None
+    kv_last_page_lens: Optional[torch.Tensor] = None
+    cu_seqlen_ks: Optional[torch.Tensor] = None
+    cu_seqlen_ke: Optional[torch.Tensor] = None
+    sparse_kv_indptr: Optional[torch.Tensor] = None
+
+    work_meta_data: Optional[torch.Tensor] = None
+    work_indptr: Optional[torch.Tensor] = None
+    work_info_set: Optional[torch.Tensor] = None
+    reduce_indptr: Optional[torch.Tensor] = None
+    reduce_final_map: Optional[torch.Tensor] = None
+    reduce_partial_map: Optional[torch.Tensor] = None
+
+    def __init__(
+        self,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_k: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
+        max_seqlen_k: int = 0,
+        min_seqlen_q: int = 0,
+        slot_mapping: Optional[torch.Tensor] = None,
+        context_lens: Optional[torch.Tensor] = None,
+        block_tables: Optional[torch.Tensor] = None,
+        dropout_p: float = 0.0,
+        max_q_len: Optional[int] = None,
+        kv_indptr: Optional[torch.Tensor] = None,
+        kv_indices: Optional[torch.Tensor] = None,
+        kv_last_page_lens: Optional[torch.Tensor] = None,
+        cu_seqlen_ks: Optional[torch.Tensor] = None,
+        cu_seqlen_ke: Optional[torch.Tensor] = None,
+        sparse_kv_indptr: Optional[torch.Tensor] = None,
+        work_meta_data: Optional[torch.Tensor] = None,
+        work_indptr: Optional[torch.Tensor] = None,
+        work_info_set: Optional[torch.Tensor] = None,
+        reduce_indptr: Optional[torch.Tensor] = None,
+        reduce_final_map: Optional[torch.Tensor] = None,
+        reduce_partial_map: Optional[torch.Tensor] = None,
+    ):
+        self.cu_seqlens_q = cu_seqlens_q
+        self.cu_seqlens_k = cu_seqlens_k
+        self.max_seqlen_q = max_seqlen_q
+        self.max_seqlen_k = max_seqlen_k
+        self.min_seqlen_q = min_seqlen_q
+        self.slot_mapping = slot_mapping
+        self.context_lens = context_lens
+        self.block_tables = block_tables
+        self.dropout_p = dropout_p
+        self.max_q_len = max_q_len
+        self.kv_indptr = kv_indptr
+        self.kv_indices = kv_indices
+        self.kv_last_page_lens = kv_last_page_lens
+        self.cu_seqlen_ks = cu_seqlen_ks
+        self.cu_seqlen_ke = cu_seqlen_ke
+        self.sparse_kv_indptr = sparse_kv_indptr
+        self.work_meta_data = work_meta_data
+        self.work_indptr = work_indptr
+        self.work_info_set = work_info_set
+        self.reduce_indptr = reduce_indptr
+        self.reduce_final_map = reduce_final_map
+        self.reduce_partial_map = reduce_partial_map
+
+    def asdict_zerocopy(self, skip_fields: Optional[Set[str]] = None) -> Dict[str, Any]:
+        """Similar to dataclasses.asdict, but avoids deepcopying."""
+        if skip_fields is None:
+            skip_fields = set()
+        # Note that if we add dataclasses as fields, they will need
+        # similar handling.
+        return {
+            field.name: getattr(self, field.name)
+            for field in fields(self)
+            if field.name not in skip_fields
+        }
+
+
+@dataclass
+class ForwardContext:
+    # copy from vllm_config.compilation_config.static_forward_context
+    no_compile_layers: dict[int, Any] = field(default_factory=dict)
+
+    attn_metadata: Optional[
+        Union["AttentionMetaData", dict[str, "AttentionMetaData"]]
+    ] = None
+
+    kv_cache_data: dict[str, KVCacheTensor] = None
+
+    context: Optional[Context] = None
+
+    dp_metadata: Optional[DPMetadata] = None
+
+    def __post_init__(self):
+        if not hasattr(self, "no_compile_layers") or self.no_compile_layers is None:
+            self.no_compile_layers = {}
+        if self.attn_metadata is None:
+            self.attn_metadata = {}
+
+
+_forward_context: Optional[ForwardContext] = ForwardContext()
+_forward_kv_cache_context: Optional[ForwardContext] = ForwardContext()
+
+
+def get_forward_context() -> ForwardContext:
+    """Get the current forward context."""
+    assert _forward_context is not None, (
+        "Forward context is not set. "
+        "Please use `set_forward_context` to set the forward context."
+    )
+    return _forward_context
+
+
+def set_forward_context(
+    attn_metadata: AttentionMetaData, atom_config: Config, context: Context,
+    num_tokens: Optional[int] = None,
+    num_tokens_across_dp: Optional[torch.Tensor] = None,
+) -> None:
+    global _forward_context
+    dp_metadata: Optional[DPMetadata] = None
+    if atom_config.parallel_config.data_parallel_size > 1 and num_tokens is not None:
+        dp_metadata = DPMetadata.make(atom_config.parallel_config,
+                                      # attn_metadata,
+                                      num_tokens or 0,
+                                      num_tokens_across_dp)
+
+    _forward_context = ForwardContext(
+        attn_metadata=attn_metadata,
+        no_compile_layers=atom_config.compilation_config.static_forward_context,
+        kv_cache_data=_forward_kv_cache_context.kv_cache_data,
+        context=context,
+        dp_metadata=dp_metadata,
+    )    # _forward_context.attn_metadata = attn_metadata
+    # _forward_context.no_compile_layers = atom_config.compilation_config.static_forward_context
+    # _forward_context = ForwardContext(no_compile_layers=atom_config.compilation_config.static_forward_context, attn_metadata=attn_metadata)
+
+
+def reset_forward_context() -> None:
+    global _forward_context
+    _forward_context = ForwardContext()
+
+
+def set_kv_cache_data(kv_cache_data: dict[int, KVCacheTensor]) -> None:
+    global _forward_kv_cache_context
+    _forward_kv_cache_context.kv_cache_data = kv_cache_data
