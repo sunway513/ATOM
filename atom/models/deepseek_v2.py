@@ -86,6 +86,7 @@ from atom.utils import envs
 # from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
 
 ENABLE_DS_QKNORM_QUANT_FUSION = envs.ATOM_ENABLE_DS_QKNORM_QUANT_FUSION
+ENABLE_ALLREDUCE_RMSNORM_FUSION = envs.ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION
 
 # only for DS MLA attention
 def _fuse_rmsnorm_quant(
@@ -252,7 +253,7 @@ class DeepseekV2MoE(nn.Module):
                 # See DeepseekV2DecoderLayer for more details.
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not ENABLE_ALLREDUCE_RMSNORM_FUSION:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
@@ -592,6 +593,7 @@ class DeepseekV2MLAAttention(nn.Module):
                                         self.hidden_size,
                                         bias=False,
                                         quant_config=quant_config,
+                                        reduce_results=not ENABLE_ALLREDUCE_RMSNORM_FUSION,
                                         prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
@@ -657,6 +659,8 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.prefix = prefix
         self.quant_dtype = quant_config["quant_dtype"] if quant_config else None
+        self.fuse_qknorm_quant = ENABLE_DS_QKNORM_QUANT_FUSION and self.quant_dtype is not None
+
 
     def forward(
         self,
@@ -672,7 +676,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 dim=-1,
             )
             # fuse q_c norm + kv_c norm + quant of hidden_states_or_q_c
-            if ENABLE_DS_QKNORM_QUANT_FUSION:
+            if self.fuse_qknorm_quant:
                 (hidden_states_or_q_c,
                  hidden_states_or_q_c_scale), _, kv_c_normed, _ = _fuse_rmsnorm_quant(
                     q_c,
@@ -695,7 +699,7 @@ class DeepseekV2MLAAttention(nn.Module):
             hidden_states_or_q_c = hidden_states
             kv_c, k_pe = torch.split(self.kv_a_proj_with_mqa(hidden_states),
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        if not ENABLE_DS_QKNORM_QUANT_FUSION:
+        if not self.fuse_qknorm_quant:
             kv_c_normed = self.kv_a_layernorm(kv_c)
         if self.is_v32 and self.indexer is not None:
             _topk_indices = self.indexer(hidden_states, hidden_states_or_q_c, positions, self.rotary_emb)
@@ -704,7 +708,8 @@ class DeepseekV2MLAAttention(nn.Module):
                              kv_c_normed,
                              k_pe,
                              positions,
-                             None if not ENABLE_DS_QKNORM_QUANT_FUSION else hidden_states_or_q_c_scale,)
+                             None if not self.fuse_qknorm_quant else hidden_states_or_q_c_scale,)
+
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -764,12 +769,15 @@ class DeepseekV2DecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                reduce_results=not ENABLE_ALLREDUCE_RMSNORM_FUSION,
                 prefix=f"{prefix}.mlp",
             )
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION and self.layer_idx > 0)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION)
         self.routed_scaling_factor = config.routed_scaling_factor
 
     def forward(
@@ -867,7 +875,9 @@ class DeepseekV2Model(nn.Module):
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNorm(config.hidden_size,
+                                eps=config.rms_norm_eps,
+                                fused_allreduce=ENABLE_ALLREDUCE_RMSNORM_FUSION,)
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
