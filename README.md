@@ -47,9 +47,7 @@ docker run -it --network=host \
 
 ```bash
 pip install amd-aiter
-git clone https://github.com/ROCm/ATOM.git
-cd ./ATOM
-pip install .
+git clone https://github.com/ROCm/ATOM.git; cd ./ATOM; pip install .
 ```
 
 ## 💡 Usage
@@ -98,8 +96,8 @@ Run online throughput benchmark:
 
 start the server
 ```bash
-python -m atom.entrypoints.openai_server --model Qwen/Qwen3-0.6B --kv_cache_dtype fp8 
-python -m atom.entrypoints.openai_server --model deepseek-ai/DeepSeek-R1 --kv_cache_dtype fp8 -tp 8
+python -m atom.entrypoints.openai_server --kv_cache_dtype fp8  --model Qwen/Qwen3-0.6B
+python -m atom.entrypoints.openai_server --kv_cache_dtype fp8 -tp 8  --model deepseek-ai/DeepSeek-R1
 ```
 run benchmark
 ```bash
@@ -110,7 +108,7 @@ CONC=128
 PORT=8000
 RESULT_FILENAME=Deepseek-R1-result
  
-python benchmark_serving.py \
+python -m atom.benchmarks.benchmark_serving \
 --model=$MODEL --backend=vllm --base-url=http://localhost:$PORT \
 --dataset-name=random \
 --random-input-len=$ISL --random-output-len=$OSL \
