@@ -25,6 +25,9 @@ jobs:
           - model_name: "DeepSeek-R1-0528"
             model_path: "deepseek-ai/DeepSeek-R1-0528"
             extraArgs: "--kv_cache_dtype fp8 -tp 8"
+          - model_name: "gpt-oss-120b"
+            model_path: "openai/gpt-oss-120b"
+            extraArgs: "--kv_cache_dtype fp8"
     env:
       ATOM_BASE_IMAGE: rocm/pytorch:latest
       GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/ROCm/ATOM.git' }}
@@ -38,37 +41,16 @@ jobs:
         run: |
           docker pull ${{ env.ATOM_BASE_IMAGE }}
 
-      - name: Generate Dockerfile
-        run: |
-          cat <<EOF > Dockerfile.mod
-          FROM ${{ env.ATOM_BASE_IMAGE }}
-
-          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show aiter || true
-          RUN pip uninstall -y aiter
-          RUN pip install --upgrade "pybind11>=3.0.1"
-          RUN pip show pybind11
-          
-          RUN git clone https://github.com/ROCm/aiter.git /aiter-test && \
-            cd /aiter-test && \
-            git checkout main && \
-            git submodule sync && git submodule update --init --recursive && \
-            python3 setup.py develop
-
-          RUN echo "=== Installing ATOM ==="
-          RUN git clone ${{ env.GITHUB_REPO_URL }} /ATOM && \
-            cd /ATOM && \
-            git checkout ${{ env.GITHUB_COMMIT_SHA }} && \
-            pip install .
-          RUN echo "=== ATOM version AFTER installation ===" && pip show atom || true
-          RUN echo "=== Other dependencies versions ===" && pip list || true
-          EOF
-
-      - name: Show Dockerfile
-        run: cat Dockerfile.mod
-
       - name: Build Docker image
         run: |
-          docker build --network=host -t atom_test:ci -f Dockerfile.mod .
+          docker build --network=host \
+            -t atom_test:ci \
+            --build-arg BASE_IMAGE=${{ env.ATOM_BASE_IMAGE }} \
+            --build-arg PREBUILD_KERNELS=0 \
+            --build-arg GPU_ARCH=gfx950 \
+            --build-arg ATOM_REPO=${{ env.GITHUB_REPO_URL }} \
+            --build-arg ATOM_COMMIT=${{ env.GITHUB_COMMIT_SHA }} \
+            -f docker/Dockerfile .
 
       - name: Start CI container
         run: |
@@ -204,3 +186,4 @@ jobs:
           docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "rm -rf /workspace/atom/ /workspace/aiter/" || true
           docker stop atom_test || true
           docker rm atom_test || true
+          
