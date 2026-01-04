@@ -20,7 +20,11 @@ from .attention_mla import MLAModules
 from aiter.ops.triton.unified_attention import unified_attention
 from aiter.ops.triton.gluon.pa_decode_gluon import pa_decode_gluon
 from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+from aiter import fused_qk_norm_rope_cache_quant_shuffle
 
+from atom.utils import envs
+ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION = envs.ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION
+ATOM_ENABLE_QK_NORM_ROPE_FUSION = envs.ATOM_ENABLE_QK_NORM_ROPE_FUSION
 
 class Attention(nn.Module):
 
@@ -36,6 +40,8 @@ class Attention(nn.Module):
         sinks: Optional[nn.Parameter] = None,
         sliding_window: Optional[int] = None,
         rotary_emb: Optional[torch.nn.Module] = None,
+        q_norm: Optional[torch.nn.Module] = None,
+        k_norm: Optional[torch.nn.Module] = None,
         **kwargs,
     ):
         super().__init__()
@@ -57,9 +63,14 @@ class Attention(nn.Module):
         self.sinks = sinks
         self.sliding_window = sliding_window if sliding_window is not None else -1
         self.rotary_emb = rotary_emb
+        if ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION:
+            assert self.rotary_emb is not None, "rotary_emb must be provided when enabling QK_NORM_ROPE_CACHE_QUANT_FUSION for Qwen models."
+            assert self.q_norm is not None, "q_norm must be provided when enabling QK_NORM_ROPE_CACHE_QUANT_FUSION for Qwen models."
+            assert self.k_norm is not None, "k_norm must be provided when enabling QK_NORM_ROPE_CACHE_QUANT_FUSION for Qwen models."
         # kv cache layout
         self.flash_layout = False
-
+        self.q_norm = q_norm
+        self.k_norm = k_norm
 
     def forward(
         self,
@@ -67,7 +78,8 @@ class Attention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         position: torch.Tensor = None,
-        q_scale: torch.Tensor = None,
+        q_scale: torch.Tensor=None,
+        qkv: torch.Tensor = None,
     ):
 
         fwd_args: ForwardContext = get_forward_context()
@@ -84,18 +96,18 @@ class Attention(nn.Module):
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         
         # rope cache
-        q, k, v, k_cache, v_cache, k_scale, v_scale = self.rope_cache(q, k, v, position, fwd_args)           
+        q, k, v, k_cache, v_cache, k_scale, v_scale = self.rope_cache(q, k, v, qkv, position, fwd_args)
         
         attn_impl = self.dispatch_backend(fwd_args)
-                
+
         o = attn_impl(q, k, v, k_cache, v_cache, k_scale, v_scale, fwd_args)
-        
+
         o = o.view(-1, self.num_heads * self.head_dim)
 
         return o
     
     
-    def rope_cache(self, q, k, v, position, fwd_args: ForwardContext, flash_layout=False):
+    def rope_cache(self, q, k, v, qkv, position, fwd_args: ForwardContext, flash_layout=False):
         
         # if flash kv_cache layout, the shape of kv_cache is:
         #
@@ -116,13 +128,40 @@ class Attention(nn.Module):
         v_cache = kv_cache_data[f"layer_{self.layer_num}"].v_cache
         k_scale = kv_cache_data[f"layer_{self.layer_num}"].k_scale
         v_scale = kv_cache_data[f"layer_{self.layer_num}"].v_scale
-        
+
         use_triton_attn = (
             self.sliding_window != -1 or self.head_dim != 128
         )
         self.use_triton_attn = use_triton_attn
 
-        if use_triton_attn:
+        if ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION:
+            fused_qk_norm_rope_cache_quant_shuffle(
+                qkv,
+                num_heads_q=self.num_heads,
+                num_heads_k=self.num_kv_heads,
+                num_heads_v=self.num_kv_heads,
+                head_dim=self.head_dim,
+                eps=self.q_norm.eps,
+                qw=self.q_norm.weight,
+                kw=self.k_norm.weight,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                is_neox_style=self.rotary_emb.is_neox_style,
+                pos_ids=position,
+                k_cache=k_cache,
+                v_cache=v_cache,
+                slot_mapping=attn_metadata.slot_mapping,
+                kv_cache_dtype="auto" if self.kv_cache_dtype == "bf16" else self.kv_cache_dtype,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+
+            qkv = qkv.view(qkv.shape[0], 
+                           -1,
+                           self.head_dim)
+            q, k, v = qkv.split([self.num_heads,
+                                self.num_kv_heads,
+                                self.num_kv_heads], dim=1)
+        elif use_triton_attn or not ATOM_ENABLE_QK_NORM_ROPE_FUSION:
             if flash_layout:
                 k_cache = k_cache.view(
                     k_cache.shape[0], -1, self.num_kv_heads, self.head_dim
@@ -353,7 +392,7 @@ class Attention(nn.Module):
     def dispatch_backend(self, fwd_args: ForwardContext):
         
         ctx = fwd_args.context
-        
+
         if ctx.is_prefill:
             if self.use_triton_attn:
                 return self.prefill_attention_triton
@@ -363,4 +402,5 @@ class Attention(nn.Module):
             if self.use_triton_attn:
                 return self.paged_attention_triton
             else:
-                return self.paged_attention_asm
+                # Qwen only uses gluon pa decode when bs=64
+                return self.paged_attention_triton if ctx.batch_size == 64 else self.paged_attention_asm
