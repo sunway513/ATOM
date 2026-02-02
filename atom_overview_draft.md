@@ -20,7 +20,7 @@ ATOM is designed to bridge the gap between cutting-edge hardware capability and 
 By unifying the execution layer, ATOM helps customers move faster from POC to production with stable performance. It brings new hardware features to users immediately, making AMD Instinct GPUs a reliable choice for high-concurrency and MoE workloads
 
 
----
+
 
 ## Industry Context and Motivation
 
