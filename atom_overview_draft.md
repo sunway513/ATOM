@@ -8,10 +8,17 @@
 
 ## Executive Summary
 
-The rapid evolution of generative AI toward agentic, multi‑step, and MoE‑heavy workloads places unprecedented demands on inference infrastructure. Achieving low latency, high throughput, and predictable scaling requires tight hardware–software co‑design. rather than loosely coupled open‑source components.
+The rapid evolution of generative AI toward agentic workflows, multi-step reasoning, and Mixture-of-Experts (MoE) architectures has placed unprecedented demands on inference infrastructure. Achieving low latency and high throughput at scale now requires tight hardware-software co-design, moving beyond the limitations of loosely coupled, generic open-source components.
+ATOM is a unified inference engine purpose-built for AMD Instinct™ GPUs. Built on a minimalist, modular architecture centered on AITER routing, ATOM avoids the overhead of monolithic designs to provide a streamlined path from hardware to application.
 
-ATOM (AITER Optimized Model) is AMD’s unified, high‑performance inference engine for AMD Instinct™ GPUs. It provides a consistent, AMD‑optimized execution layer that integrates system‑level scheduling, compiler‑driven graph optimization, and kernel acceleration with scalable distributed inference. ATOM enables faster customer proof‑of‑concepts (POCs), reliable and consistent performance across frameworks, and rapid adoption of new hardware features such as FP8 and emerging FP4 precision.
-By unifying execution across popular open‑source inference frameworks, ATOM positions AMD Instinct GPUs as a production‑ready platform for modern reasoning, MoE, and high‑concurrency inference workloads.
+### A Dual-Purpose Architecture
+ATOM is designed to bridge the gap between cutting-edge hardware capability and community usability through two strategic roles:
+•	Standalone Optimization Platform: It serves as a "Proving Ground" for rapid iteration, allowing AMD to develop and validate internal system-level optimizations, compiler-driven graph enhancements, and kernel acceleration.
+•	Integrated Plugin Backend: It integrates as a high-performance backend for popular frameworks like vLLM and SGLang, ensuring that the broader AI community can access AMD-specific optimizations without changing their existing workflows.
+
+### Driving Production Readiness
+By unifying the execution layer, ATOM helps customers move faster from POC to production with stable performance. It brings new hardware features to users immediately, making AMD Instinct GPUs a reliable choice for high-concurrency and MoE workloads
+
 
 ---
 
