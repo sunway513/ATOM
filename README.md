@@ -50,6 +50,24 @@ pip install amd-aiter
 git clone https://github.com/ROCm/ATOM.git; cd ./ATOM; pip install .
 ```
 
+## 📚 Documentation
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | System overview, request lifecycle, component design | [Architecture Guide](docs/architecture_guide.md) |
+| Configuration | Config classes, CLI arguments, environment variables | [Configuration Guide](docs/configuration_guide.md) |
+| Model Support | Supported models, weight loading, adding new architectures | [Model Support Guide](docs/model_support_guide.md) |
+| Model Operations | AITER kernel integration, linear/attention/MoE/norm wrappers | [Model Ops Guide](docs/model_ops_guide.md) |
+| Scheduling & KV Cache | Batch scheduling, block allocation, prefix caching | [Scheduling Guide](docs/scheduling_kv_cache_guide.md) |
+| Compilation | torch.compile levels, CUDA graphs, piecewise compilation | [Compilation Guide](docs/compilation_cudagraph_guide.md) |
+| Distributed | Tensor/data/expert parallelism, multi-GPU deployment | [Distributed Guide](docs/distributed_guide.md) |
+| Serving & Benchmarks | OpenAI API server, benchmarking, profiling, speculative decoding | [Serving Guide](docs/serving_benchmarking_guide.md) |
+
+**Deployment Recipes:**
+
+- [Qwen3-235B-A22B](recipes/Qwen3-235b.md) -- TP8 + EP with FP8 KV cache
+- [Kimi-K2-Thinking](recipes/Kimi-K2-Thinking.md) -- MXFP4 MoE on 4 GPUs
+
 ## 💡 Usage
 
 ### Basic Example
