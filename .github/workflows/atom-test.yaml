@@ -22,11 +22,9 @@ jobs:
     needs: [pre-checks]
     if: ${{ needs.pre-checks.result == 'success' && (!github.event.pull_request || github.event.pull_request.draft == false) }}
     name: ATOM Test
-    concurrency:
-      group: atom-test-${{ matrix.runner }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - model_name: "Meta-Llama-3-8B-Instruct"
