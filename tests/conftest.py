@@ -68,7 +68,9 @@ if importlib.util.find_spec("xxhash") is None:
             if isinstance(data, (bytes, bytearray, memoryview)):
                 self._h.update(data)
             else:
-                self._h.update(bytes(data))
+                raise TypeError(
+                    f"expected bytes-like object, got {type(data).__name__}"
+                )
 
         def intdigest(self):
             return int.from_bytes(self._h.digest()[:8], "little")
@@ -82,7 +84,6 @@ from atom.sampling_params import SamplingParams  # noqa: E402
 from atom.model_engine.sequence import Sequence  # noqa: E402
 from atom.model_engine.block_manager import BlockManager  # noqa: E402
 from atom.model_engine.scheduler import Scheduler  # noqa: E402
-
 
 # ── 7. MockConfig ──────────────────────────────────────────────────────────
 

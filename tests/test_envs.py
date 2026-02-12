@@ -30,7 +30,7 @@ def _clean_atom_env(monkeypatch):
 
 
 def _get_envs():
-    """Return the envs module (lazy __getattr__ evaluates on each access)."""
+    """Return the envs module; lazy __getattr__ re-evaluates on each access."""
     import atom.utils.envs as envs
 
     return envs

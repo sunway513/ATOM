@@ -14,7 +14,6 @@ from atom.utils import (
 
 import pytest
 
-
 # ── IPv6 validation ────────────────────────────────────────────────────────
 
 

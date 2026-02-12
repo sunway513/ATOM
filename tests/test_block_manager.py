@@ -4,7 +4,6 @@
 from atom.model_engine.block_manager import BlockManager
 from conftest import MockConfig
 
-
 # ── compute_hash ───────────────────────────────────────────────────────────
 
 

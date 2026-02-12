@@ -6,7 +6,6 @@ from atom.model_engine.sequence import SequenceStatus, SequenceType
 from atom.sampling_params import SamplingParams
 from conftest import MockConfig
 
-
 # ── add / extend / query ───────────────────────────────────────────────────
 
 
