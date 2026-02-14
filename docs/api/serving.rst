@@ -1,16 +1,16 @@
 Serving API
 ===========
 
-LLM Class
----------
+LLMEngine Class
+---------------
 
 Main class for loading and serving models.
 
 .. code-block:: python
 
-   from atom import LLM
+   from atom import LLMEngine
 
-   llm = LLM(model="meta-llama/Llama-2-7b-hf")
+   llm = LLMEngine(model="meta-llama/Llama-2-7b-hf")
 
 **Parameters:**
 
@@ -28,21 +28,24 @@ generate()
 
 .. code-block:: python
 
-   outputs = llm.generate(prompts, max_tokens=50)
+   sampling_params = SamplingParams(max_tokens=50, temperature=0.8)
+   outputs = llm.generate(prompts, sampling_params)
 
 Generate text from prompts.
 
 **Parameters:**
 
-* **prompts** (*str | list[str]*) - Input prompts
-* **max_tokens** (*int*) - Maximum tokens to generate
-* **temperature** (*float*) - Sampling temperature. Default: 1.0
-* **top_p** (*float*) - Nucleus sampling threshold. Default: 1.0
-* **top_k** (*int*) - Top-k sampling. Default: -1 (disabled)
+* **prompts** (*list[str]*) - Input prompts (must be a list, even for single prompt)
+* **sampling_params** (*SamplingParams | list[SamplingParams]*) - Sampling configuration
 
 **Returns:**
 
-* **outputs** (*list[RequestOutput]*) - Generated outputs
+* **outputs** (*list[str]*) - Generated text strings
+
+.. note::
+   Unlike some APIs, ``generate()`` requires prompts to be a list and returns
+   a list of strings, not RequestOutput objects. Parameters like max_tokens
+   must be specified via SamplingParams.
 
 SamplingParams
 --------------
@@ -53,32 +56,38 @@ SamplingParams
 
    params = SamplingParams(
        temperature=0.8,
-       top_p=0.95,
-       max_tokens=100
+       max_tokens=100,
+       ignore_eos=False,
+       stop_strings=["</s>", "\n\n"]
    )
 
 Configuration for text generation.
 
 **Parameters:**
 
-* **temperature** (*float*) - Controls randomness
-* **top_p** (*float*) - Nucleus sampling threshold
-* **top_k** (*int*) - Top-k sampling
-* **max_tokens** (*int*) - Maximum tokens to generate
-* **presence_penalty** (*float*) - Penalty for token presence
-* **frequency_penalty** (*float*) - Penalty for token frequency
+* **temperature** (*float*) - Controls randomness. Default: 1.0
+* **max_tokens** (*int*) - Maximum tokens to generate. Default: 64
+* **ignore_eos** (*bool*) - Whether to ignore EOS token. Default: False
+* **stop_strings** (*list[str] | None*) - Strings that stop generation. Default: None
 
-RequestOutput
+.. note::
+   The following parameters are NOT currently supported (may be added in future):
+   top_p, top_k, presence_penalty, frequency_penalty
+
+Return Values
 -------------
 
-Output from generation request.
+The ``generate()`` method returns a list of strings (not RequestOutput objects).
 
-**Attributes:**
+.. code-block:: python
 
-* **prompt** (*str*) - Input prompt
-* **text** (*str*) - Generated text
-* **tokens** (*list[int]*) - Generated token IDs
-* **finished** (*bool*) - Whether generation completed
+   outputs = llm.generate(["Hello, world!"], sampling_params)
+   # outputs is list[str], e.g., ["Hello, world! How are you today?"]
+
+.. note::
+   Unlike some LLM serving frameworks, ATOM's generate() method returns
+   plain strings, not structured output objects. If you need token IDs
+   or other metadata, these are not currently exposed in the API.
 
 Example
 -------
