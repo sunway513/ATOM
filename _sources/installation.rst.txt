@@ -4,10 +4,10 @@ Installation
 Requirements
 ------------
 
-* Python 3.8 or later
-* ROCm 5.7 or later
+* Python 3.10 to 3.12
+* ROCm 6.0 or later
 * PyTorch with ROCm support
-* AMD Instinct GPU (MI200 or MI300 series)
+* AMD Instinct GPU (MI200 or MI300 series recommended)
 
 Installation Methods
 --------------------
@@ -65,8 +65,17 @@ Verify the installation:
 .. code-block:: python
 
    import atom
-   print(f"ATOM version: {atom.__version__}")
-   print(f"ROCm available: {atom.is_available()}")
+   import torch
+
+   # Check if ATOM modules loaded successfully
+   print("ATOM modules available:")
+   print(f"  - LLMEngine: {hasattr(atom, 'LLMEngine')}")
+   print(f"  - SamplingParams: {hasattr(atom, 'SamplingParams')}")
+
+   # Check ROCm availability via PyTorch
+   print(f"\nPyTorch version: {torch.__version__}")
+   print(f"ROCm available: {torch.cuda.is_available()}")
+   print(f"ROCm version: {torch.version.hip if hasattr(torch.version, 'hip') else 'N/A'}")
 
 Troubleshooting
 ---------------

@@ -439,7 +439,7 @@
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Serving API</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#llm-class">LLM Class</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#llmengine-class">LLMEngine Class</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#methods">Methods</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="#generate">generate()</a></li>
 </ul>
@@ -447,7 +447,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#samplingparams">SamplingParams</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#requestoutput">RequestOutput</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#return-values">Return Values</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#example">Example</a></li>
 </ul>
 </li>
@@ -489,12 +489,12 @@
              
   <section id="serving-api">
 <h1>Serving API<a class="headerlink" href="#serving-api" title="Link to this heading"></a></h1>
-<section id="llm-class">
-<h2>LLM Class<a class="headerlink" href="#llm-class" title="Link to this heading"></a></h2>
+<section id="llmengine-class">
+<h2>LLMEngine Class<a class="headerlink" href="#llmengine-class" title="Link to this heading"></a></h2>
 <p>Main class for loading and serving models.</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">atom</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">atom</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLMEngine</span>
 
-<span class="n">llm</span> <span class="o">=</span> <span class="n">LLM</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">)</span>
+<span class="n">llm</span> <span class="o">=</span> <span class="n">LLMEngine</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;meta-llama/Llama-2-7b-hf&quot;</span><span class="p">)</span>
 </pre></div>
 </div>
 <p><strong>Parameters:</strong></p>
@@ -509,22 +509,26 @@
 <h3>Methods<a class="headerlink" href="#methods" title="Link to this heading"></a></h3>
 <section id="generate">
 <h4>generate()<a class="headerlink" href="#generate" title="Link to this heading"></a></h4>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">max_tokens</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">sampling_params</span> <span class="o">=</span> <span class="n">SamplingParams</span><span class="p">(</span><span class="n">max_tokens</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span> <span class="n">temperature</span><span class="o">=</span><span class="mf">0.8</span><span class="p">)</span>
+<span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompts</span><span class="p">,</span> <span class="n">sampling_params</span><span class="p">)</span>
 </pre></div>
 </div>
 <p>Generate text from prompts.</p>
 <p><strong>Parameters:</strong></p>
 <ul class="simple">
-<li><p><strong>prompts</strong> (<em>str | list[str]</em>) - Input prompts</p></li>
-<li><p><strong>max_tokens</strong> (<em>int</em>) - Maximum tokens to generate</p></li>
-<li><p><strong>temperature</strong> (<em>float</em>) - Sampling temperature. Default: 1.0</p></li>
-<li><p><strong>top_p</strong> (<em>float</em>) - Nucleus sampling threshold. Default: 1.0</p></li>
-<li><p><strong>top_k</strong> (<em>int</em>) - Top-k sampling. Default: -1 (disabled)</p></li>
+<li><p><strong>prompts</strong> (<em>list[str]</em>) - Input prompts (must be a list, even for single prompt)</p></li>
+<li><p><strong>sampling_params</strong> (<em>SamplingParams | list[SamplingParams]</em>) - Sampling configuration</p></li>
 </ul>
 <p><strong>Returns:</strong></p>
 <ul class="simple">
-<li><p><strong>outputs</strong> (<em>list[RequestOutput]</em>) - Generated outputs</p></li>
+<li><p><strong>outputs</strong> (<em>list[str]</em>) - Generated text strings</p></li>
 </ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Unlike some APIs, <code class="docutils literal notranslate"><span class="pre">generate()</span></code> requires prompts to be a list and returns
+a list of strings, not RequestOutput objects. Parameters like max_tokens
+must be specified via SamplingParams.</p>
+</div>
 </section>
 </section>
 </section>
@@ -534,32 +538,39 @@
 
 <span class="n">params</span> <span class="o">=</span> <span class="n">SamplingParams</span><span class="p">(</span>
     <span class="n">temperature</span><span class="o">=</span><span class="mf">0.8</span><span class="p">,</span>
-    <span class="n">top_p</span><span class="o">=</span><span class="mf">0.95</span><span class="p">,</span>
-    <span class="n">max_tokens</span><span class="o">=</span><span class="mi">100</span>
+    <span class="n">max_tokens</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="n">ignore_eos</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">stop_strings</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;&lt;/s&gt;&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="se">\n\n</span><span class="s2">&quot;</span><span class="p">]</span>
 <span class="p">)</span>
 </pre></div>
 </div>
 <p>Configuration for text generation.</p>
 <p><strong>Parameters:</strong></p>
 <ul class="simple">
-<li><p><strong>temperature</strong> (<em>float</em>) - Controls randomness</p></li>
-<li><p><strong>top_p</strong> (<em>float</em>) - Nucleus sampling threshold</p></li>
-<li><p><strong>top_k</strong> (<em>int</em>) - Top-k sampling</p></li>
-<li><p><strong>max_tokens</strong> (<em>int</em>) - Maximum tokens to generate</p></li>
-<li><p><strong>presence_penalty</strong> (<em>float</em>) - Penalty for token presence</p></li>
-<li><p><strong>frequency_penalty</strong> (<em>float</em>) - Penalty for token frequency</p></li>
+<li><p><strong>temperature</strong> (<em>float</em>) - Controls randomness. Default: 1.0</p></li>
+<li><p><strong>max_tokens</strong> (<em>int</em>) - Maximum tokens to generate. Default: 64</p></li>
+<li><p><strong>ignore_eos</strong> (<em>bool</em>) - Whether to ignore EOS token. Default: False</p></li>
+<li><p><strong>stop_strings</strong> (<em>list[str] | None</em>) - Strings that stop generation. Default: None</p></li>
 </ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The following parameters are NOT currently supported (may be added in future):
+top_p, top_k, presence_penalty, frequency_penalty</p>
+</div>
 </section>
-<section id="requestoutput">
-<h2>RequestOutput<a class="headerlink" href="#requestoutput" title="Link to this heading"></a></h2>
-<p>Output from generation request.</p>
-<p><strong>Attributes:</strong></p>
-<ul class="simple">
-<li><p><strong>prompt</strong> (<em>str</em>) - Input prompt</p></li>
-<li><p><strong>text</strong> (<em>str</em>) - Generated text</p></li>
-<li><p><strong>tokens</strong> (<em>list[int]</em>) - Generated token IDs</p></li>
-<li><p><strong>finished</strong> (<em>bool</em>) - Whether generation completed</p></li>
-</ul>
+<section id="return-values">
+<h2>Return Values<a class="headerlink" href="#return-values" title="Link to this heading"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">generate()</span></code> method returns a list of strings (not RequestOutput objects).</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">outputs</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">([</span><span class="s2">&quot;Hello, world!&quot;</span><span class="p">],</span> <span class="n">sampling_params</span><span class="p">)</span>
+<span class="c1"># outputs is list[str], e.g., [&quot;Hello, world! How are you today?&quot;]</span>
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Unlike some LLM serving frameworks, ATOM’s generate() method returns
+plain strings, not structured output objects. If you need token IDs
+or other metadata, these are not currently exposed in the API.</p>
+</div>
 </section>
 <section id="example">
 <h2>Example<a class="headerlink" href="#example" title="Link to this heading"></a></h2>
