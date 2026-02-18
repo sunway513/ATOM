@@ -121,7 +121,6 @@ class LLMEngine:
 
     def stop_profile(self):
         self.core_mgr.send_utility_command("stop_profile")
-        logger.info("Profiling stopped. Trace files should be generated.")
 
     def print_mtp_statistics(self):
         self.core_mgr.send_utility_command("get_mtp_stats")
@@ -171,8 +170,9 @@ class InputOutputProcessor:
         )
         seq.arrive_time = time.time()
         self.requests[seq.id] = seq
-        print(
-            f"Request {seq.id} arrived, input tokens: {len(tokens)}, pending requests: {len(self.requests)}"
+        logger.info(
+            f"Request {seq.id} arrived, input tokens: {len(tokens)}, pending requests: {len(self.requests)} "
+            # f"<{prompt_or_tokens=}>"
         )
         return seq
 
@@ -197,7 +197,7 @@ class InputOutputProcessor:
                         req.num_completion_tokens - 1
                     )
 
-            print(
+            logger.info(
                 f"Request {req.id} finished with reason {req.leave_reason}. "
                 f"Input tokens: {req.num_prompt_tokens}, output tokens: {req.num_completion_tokens}, "
                 f"latency: {req.leave_time - req.arrive_time:.2f}s, "

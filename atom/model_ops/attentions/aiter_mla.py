@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
-import itertools
 import logging
 from typing import Type
 
 import numpy as np
 import torch
-import triton
 from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
 from aiter.dist.parallel_state import get_tp_group
 from atom.model_engine.scheduler import ScheduledBatch
@@ -22,6 +20,10 @@ from atom.utils.forward_context import AttentionMetaData, Context
 from .backends import AttentionBackend, CommonAttentionBuilder
 
 logger = logging.getLogger("atom")
+
+
+def cdiv(a, b):
+    return (a + b - 1) // b
 
 
 class AiterMLABackend(AttentionBackend):
@@ -231,27 +233,17 @@ class AiterMLAMetadataBuilder(CommonAttentionBuilder):
         scheduled_bs = batch.total_seqs_num_decode
         dropout_p = 0.0
         max_seqlen_q = batch.num_spec_step + 1
-        # Get mapped_bonus_list (already mapped to current batch order in prepare_input_ids)
-        bonus_list = self.model_runner.tokenID_processor.mapped_bonus_list
 
         var = self.model_runner.forward_vars
-        context_lens = batch.context_lens
+        context_lens = np.asarray(batch.context_lens, dtype=np.int32)
         block_tables = batch.block_tables
-        positions = [
-            pos
-            for seq_len in context_lens
-            for pos in range(seq_len - max_seqlen_q, seq_len)
-        ]
         if max_seqlen_q > 1:
-            if bonus_list is not None:
-                context_lens = [
-                    c + b - batch.num_spec_step
-                    for c, b in zip(context_lens, bonus_list)
-                ]
-                block_tables = [
-                    block_table[: triton.cdiv(seq_len, self.model_runner.block_size)]
-                    for block_table, seq_len in zip(block_tables, context_lens)
-                ]
+            # Get num_rejected (already mapped to current batch order in prepare_input_ids)
+            num_rejected = self.model_runner.tokenID_processor.num_rejected
+            if num_rejected is not None:
+                context_lens -= num_rejected
+                num_blocks = cdiv(context_lens, self.model_runner.block_size)
+                block_tables = [bt[:n] for bt, n in zip(block_tables, num_blocks)]
 
             slot_mapping = [
                 block_table[pos // self.model_runner.block_size]
@@ -267,6 +259,9 @@ class AiterMLAMetadataBuilder(CommonAttentionBuilder):
                     block_tables, batch.last_block_num_tokens
                 )
             ]
+        positions = np.tile(
+            np.arange(max_seqlen_q, dtype=np.int32), scheduled_bs
+        ) + np.repeat(context_lens - max_seqlen_q, max_seqlen_q)
 
         sum_scheduled_tokens = batch.total_tokens_num_decode
         var["slot_mapping"].np[: bs * max_seqlen_q] = -1
@@ -276,19 +271,18 @@ class AiterMLAMetadataBuilder(CommonAttentionBuilder):
         var["context_lens"].np[:scheduled_bs] = context_lens
         # var["context_lens"].np[scheduled_bs:bs] = 0
 
-        num_blocks_per_seq = [triton.cdiv(ctx, self.block_size) for ctx in context_lens]
+        num_blocks_per_seq = cdiv(context_lens, self.block_size)
         kv_indptr = np.cumsum(num_blocks_per_seq)
         sum_blocks = kv_indptr[-1]
-        sum_blocks_before_converted = sum(
-            [triton.cdiv(i, self.block_ratio) for i in num_blocks_per_seq]
-        )
+        sum_blocks_before_converted = cdiv(num_blocks_per_seq, self.block_ratio).sum()
 
         def prepare_kv_indices():
-            var["kv_indices"].np[:sum_blocks_before_converted] = np.fromiter(
-                itertools.chain.from_iterable(block_tables),
-                dtype=np.int32,
-                count=sum_blocks_before_converted,
-            )
+            dst = var["kv_indices"].np
+            offset = 0
+            for bt in block_tables:
+                n = len(bt)
+                dst[offset : offset + n] = bt
+                offset += n
 
         prepare_kv_indices()
         var["kv_indptr"].np[1 : scheduled_bs + 1] = kv_indptr
@@ -346,12 +340,13 @@ class AiterMLAMetadataBuilder(CommonAttentionBuilder):
         )
         positions = var["positions"].copy_to_gpu(sum_scheduled_tokens)
 
-        # if str(positions.device)=='cuda:0':
-        #     for el, var in ctx.items():
-        #         if 'work_' in el or 'reduce_' in el:
-        #             continue
-        #         logger.info(f"{el}: {var}")
-        #     logger.info(f"{positions=}")
+        # if str(positions.device) == "cuda:0":
+        #     logger.info(f"context_lens: {ctx['context_lens']}")
+        #     # logger.info(f"{positions=}")
+        #     # for el, var in ctx.items():
+        #     #     if "work_" in el or "reduce_" in el or "kv_" in el:
+        #     #         continue
+        #     #     logger.info(f"{el}: {var}")
         return attn_metadata, positions
 
     def build_for_cudagraph_capture(self, bs: int) -> AttentionMetaData:

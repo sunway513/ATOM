@@ -127,7 +127,6 @@ class SpecDecodeMetadata:
     cu_num_draft_tokens: torch.Tensor
     target_logits_indices: torch.Tensor
     bonus_logits_indices: torch.Tensor
-    logits_indices: torch.Tensor
 
 
 @dataclass
@@ -253,6 +252,39 @@ class AttentionMetaData:
             for field in fields(self)
             if field.name not in skip_fields
         }
+
+
+@dataclass
+class GDNAttentionMetadata:
+    num_prefills: int
+    num_prefill_tokens: int
+    num_decodes: int
+    num_decode_tokens: int
+    num_spec_decodes: int
+    num_spec_decode_tokens: int
+    num_actual_tokens: int
+
+    has_initial_state: torch.Tensor | None = None
+
+    spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
+    non_spec_query_start_loc: torch.Tensor | None = (
+        None  # shape: [batch - num_spec_decodes + 1,]
+    )
+
+    spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
+    non_spec_state_indices_tensor: torch.Tensor | None = (
+        None  # shape: [batch - num_spec_decodes,]
+    )
+    spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
+    spec_token_indx: torch.Tensor | None = None
+    non_spec_token_indx: torch.Tensor | None = None
+
+    num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+
+    # The following attributes are for triton implementation of causal_conv1d
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
 
 
 @dataclass
