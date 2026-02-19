@@ -1,0 +1,90 @@
+# Dockerfile.wheels — Build/download all wheels for ATOM clean install
+#
+# Produces /wheels/ containing:
+#   torch, torchvision, torchaudio  (pulled from PyTorch nightly)
+#   triton 3.5.x                   (built from ROCm/triton source)
+#   triton_kernels                  (built from ROCm/triton source)
+#   amd_aiter                       (built with ENABLE_CK=0 + pre-compiled Triton kernels)
+#
+# Usage (standalone — extract wheels to host):
+#   docker build -f docker/Dockerfile.wheels -t atom:wheels .
+#   docker run --rm atom:wheels tar cf - /wheels | tar xf - -C /home/pensun/dist --strip-components=1
+#
+# Usage (multi-stage — pipe directly into Dockerfile.clean):
+#   DOCKER_BUILDKIT=1 docker build \
+#     --build-context wheels=docker-image://atom:wheels \
+#     -f docker/Dockerfile.clean -t atom:clean .
+
+ARG BASE_IMAGE="rocm/dev-ubuntu-24.04:7.2-complete"
+FROM ${BASE_IMAGE}
+
+ARG GPU_ARCH="gfx942;gfx950"
+ARG AITER_REPO="https://github.com/sunway513/aiter.git"
+ARG AITER_BRANCH="feat/prebuild-triton"
+ARG MAX_JOBS=""
+ARG PREBUILD_TRITON=1
+
+ENV GPU_ARCH_LIST=${GPU_ARCH}
+ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── 1. System packages + build tools ────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build \
+        python3-pip python3-dev python3-venv \
+        ibverbs-utils libpci-dev locales \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --break-system-packages --ignore-installed \
+        pip setuptools wheel build
+
+RUN mkdir -p /wheels
+
+# ── 2. Pull PyTorch ROCm 7.2 nightly wheels ─────────────────────────
+RUN pip3 download --no-deps --dest /wheels \
+        torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/nightly/rocm7.2
+
+# ── 3. Build Triton 3.5.x from ROCm fork ────────────────────────────
+RUN git clone --depth=1 --branch release/internal/3.5.x \
+        https://github.com/ROCm/triton.git /build/triton
+
+RUN cd /build/triton \
+    && pip3 install --break-system-packages -r python/requirements.txt \
+    && pip3 install --break-system-packages filecheck \
+    && MAX_JOBS=${MAX_JOBS:-64} pip3 wheel \
+        --no-build-isolation --no-deps -w /wheels . \
+    && ls -lh /wheels/triton-*.whl
+
+# Build triton_kernels wheel
+RUN cd /build/triton/python/triton_kernels \
+    && pip3 wheel --no-deps -w /wheels . \
+    && ls -lh /wheels/triton_kernels-*.whl
+
+# ── 4. Install torch + triton (needed for AITER Triton precompilation)
+RUN pip3 install --break-system-packages --no-deps \
+        /wheels/torch-*.whl /wheels/triton-3.5*.whl \
+    && pip3 install --break-system-packages \
+        filelock typing-extensions sympy networkx jinja2 fsspec numpy
+
+# ── 5. Build AITER wheel (ENABLE_CK=0, pre-compiled Triton kernels) ─
+RUN git clone --depth=1 --branch ${AITER_BRANCH} ${AITER_REPO} /build/aiter
+
+# Set AITER build env for all subsequent commands in this layer
+RUN cd /build/aiter \
+    && pip3 install --break-system-packages -r requirements.txt \
+    && export ENABLE_CK=0 PREBUILD_TRITON=${PREBUILD_TRITON} \
+              PREBUILD_TRITON_ARCHS="gfx942,gfx950" \
+              MAX_JOBS=${MAX_JOBS} GPU_ARCHS=${GPU_ARCH_LIST} \
+    && pip3 install --break-system-packages --no-build-isolation -e . \
+    && python3 -c "import aiter; print('editable install OK')" \
+    && echo "install" > aiter/install_mode \
+    && python3 setup.py bdist_wheel \
+    && cp dist/amd_aiter-*.whl /wheels/ \
+    && ls -lh /wheels/amd_aiter-*.whl
+
+# ── 6. Summary ──────────────────────────────────────────────────────
+RUN echo "=== Wheel inventory ===" && ls -lhS /wheels/*.whl && echo "=== Done ==="
+
+WORKDIR /wheels
+CMD ["ls", "-lhS", "/wheels/"]

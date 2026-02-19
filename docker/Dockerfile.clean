@@ -1,77 +1,63 @@
-# Dockerfile.clean — Minimal ATOM build from public sources
+# Dockerfile.clean — Wheel-only ATOM/AITER build (zero source compilation)
 #
-# Base: rocm/dev-ubuntu-22.04:7.2-complete (full ROCm runtime)
-# PyTorch: nightly wheel from pytorch.org (ROCm 7.2)
-# Triton: ROCm fork 3.5.x (replaces PyTorch's bundled 3.6.0)
-# AITER: Triton-only build (ENABLE_CK=0, no CK/ASM submodules)
-# Validation: ATOM unit tests (115 GPU-free tests)
+# Base: rocm/dev-ubuntu-24.04:7.2-complete (Python 3.12, full ROCm runtime)
+# All packages installed from pre-built wheels — no git clones, no compiles.
 #
-# Usage:
-#   docker build -f docker/Dockerfile.clean -t atom:clean .
-#   docker run --rm atom:clean pytest /app/ATOM/tests/ -v
+# Option A — from pre-built wheels directory:
+#   cd /home/pensun/ATOM
+#   DOCKER_BUILDKIT=1 docker build \
+#     --build-context wheels=/home/pensun/dist \
+#     -f docker/Dockerfile.clean -t atom:clean .
+#
+# Option B — multi-stage from Dockerfile.wheels builder image:
+#   docker build -f docker/Dockerfile.wheels -t atom:wheels .
+#   DOCKER_BUILDKIT=1 docker build \
+#     --build-context wheels=docker-image://atom:wheels \
+#     -f docker/Dockerfile.clean -t atom:clean .
+#
+# Run:
+#   docker run --rm --device=/dev/kfd --device=/dev/dri \
+#     -v /data2/models:/models atom:clean bash
 
-ARG BASE_IMAGE="rocm/dev-ubuntu-22.04:7.2-complete"
+ARG BASE_IMAGE="rocm/dev-ubuntu-24.04:7.2-complete"
 FROM ${BASE_IMAGE}
 
-ARG GPU_ARCH="gfx942;gfx950"
-ARG AITER_REPO="https://github.com/sunway513/aiter.git"
-ARG AITER_BRANCH="build/enable-ck-option"
-ARG MAX_JOBS=""
-ARG PREBUILD_KERNELS=1
-
-ENV GPU_ARCH_LIST=${GPU_ARCH}
-ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ── 1. System packages ──────────────────────────────────────────────
+# ── 1. System packages (minimal — no build tools needed) ─────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git cmake ninja-build \
-        python3-pip python3-dev python3-venv \
-        ibverbs-utils libpci-dev libdw1 locales \
+        git python3-pip python3-dev \
+        ibverbs-utils libpci-dev locales \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --upgrade pip setuptools wheel
+RUN pip3 install --break-system-packages --ignore-installed pip setuptools wheel
 
-# ── 2. PyTorch nightly (ROCm 7.2 wheel from pytorch.org) ───────────
-RUN pip3 install --pre torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/nightly/rocm7.2 \
-    && python3 -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'ROCm: {torch.version.hip}')"
+# ── 2. Install all pre-built wheels ────────────────────────────────────
+# Uses bind-mount to avoid a 60+ GB COPY layer from the wheels image.
+# Works with both Option A (flat directory) and Option B (docker-image://).
+RUN --mount=type=bind,from=wheels,source=/,target=/mnt/wheels \
+    mkdir -p /tmp/wheels \
+    && find /mnt/wheels -name '*.whl' -exec cp {} /tmp/wheels/ \; \
+    && ls -lhS /tmp/wheels/*.whl \
+    && pip3 install --break-system-packages --no-deps \
+        /tmp/wheels/torch-*.whl \
+        /tmp/wheels/torchvision-*.whl \
+        /tmp/wheels/torchaudio-*.whl \
+        /tmp/wheels/triton-*.whl \
+        /tmp/wheels/triton_kernels-*.whl \
+    && pip3 install --break-system-packages \
+        filelock typing-extensions sympy networkx jinja2 fsspec numpy pillow \
+    && pip3 install --break-system-packages \
+        /tmp/wheels/amd_aiter-*.whl \
+    && rm -rf /tmp/wheels \
+    && python3 -c "import torch; print(f'PyTorch {torch.__version__}, ROCm: {torch.version.hip}')" \
+    && python3 -c "import triton; print(f'Triton {triton.__version__}')" \
+    && python3 -c "import aiter; print('AITER OK')"
 
-# ── 3. ROCm Triton 3.5.x + triton_kernels ────────────────────────
-# PyTorch nightly bundles Triton 3.6.0 which is incompatible with AITER kernels.
-# Replace it with the ROCm Triton 3.5.x fork (matches AITER's Triton dialect).
-RUN git clone --depth=1 --branch release/internal/3.5.x \
-        https://github.com/ROCm/triton.git /app/triton-src
-RUN pip3 uninstall -y triton pytorch-triton-rocm 2>/dev/null; \
-    cd /app/triton-src \
-    && pip3 install -r python/requirements.txt \
-    && pip3 install filecheck \
-    && MAX_JOBS=${MAX_JOBS:-64} pip3 --retries=10 --default-timeout=60 install . \
-    && python3 -c "import triton; print(f'Triton {triton.__version__}')"
-# triton_kernels for MXFP4 MoE on gfx94x
-RUN pip3 install --no-deps -e /app/triton-src/python/triton_kernels/ \
-    && python3 -c "from triton_kernels.matmul_ogs import PrecisionConfig; print('triton_kernels OK')"
-
-# ── 4. AITER — Triton-only build (ENABLE_CK=0) ────────────────────
-RUN git clone --depth=1 --branch ${AITER_BRANCH} ${AITER_REPO} /app/aiter \
-    && cd /app/aiter \
-    # Fix: numpy.bool_ from tensor comparisons is rejected by Triton constexpr
-    # conditionals. Cast to native Python bool.
-    && sed -i 's/ALL_DECODE = max_seqlen_q == 1/ALL_DECODE = bool(max_seqlen_q == 1)/' \
-       aiter/ops/triton/attention/unified_attention.py \
-       aiter/ops/triton/attention/unified_attention_sparse_mla.py \
-    && pip3 install -r requirements.txt \
-    && ENABLE_CK=0 MAX_JOBS=${MAX_JOBS} PREBUILD_KERNELS=${PREBUILD_KERNELS} \
-       GPU_ARCHS=${GPU_ARCH_LIST} python3 setup.py develop \
-    && pip3 show amd-aiter
-
-# ── 5. ATOM (from local build context) ─────────────────────────────
+# ── 7. ATOM (from build context — pure Python, instant install) ──────
 COPY . /app/ATOM
-RUN cd /app/ATOM && pip3 install -e . && pip3 show atom
-
-# ── 6. Validation — run ATOM unit tests ────────────────────────────
-RUN cd /app/ATOM && python3 -m pytest tests/ -v --tb=short 2>&1 | tee /app/test_results.txt; \
-    echo "=== ATOM UT exit code: $? ==="
+RUN cd /app/ATOM && pip3 install --break-system-packages -e . \
+    && python3 -c "import atom; print('ATOM OK')"
 
 WORKDIR /app/ATOM
 CMD ["/bin/bash"]
