@@ -1,6 +1,12 @@
 name: Checks
 
 on:
+  # Run directly on PRs and pushes (works on forks without GPU runners)
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Also callable from atom-test.yaml
   workflow_call:
     inputs:
       black:
@@ -15,9 +21,27 @@ on:
         default: true
 
 jobs:
+  unit-tests:
+    name: Unit Tests (no GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          pip install pytest torch --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -e . --no-deps
+          pip install numpy psutil zmq xxhash transformers
+      - name: Run unit tests
+        run: pytest tests/ -m "not gpu" -v --tb=short
+
   black:
     name: Check Code Style with Black
-    if: inputs.black
+    if: ${{ inputs.black != false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -27,7 +51,7 @@ jobs:
 
   ruff:
     name: Check Code Style with Ruff
-    if: inputs.ruff
+    if: ${{ inputs.ruff != false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
