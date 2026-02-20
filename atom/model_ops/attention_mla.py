@@ -130,6 +130,9 @@ class MLAAttention(nn.Module):
             else None
         )
         self.layer_num = layer_num
+        self.use_triton_mla_decode = envs.ATOM_USE_TRITON_MLA_DECODE
+        if self.use_triton_mla_decode:
+            logger.info("Using Triton MLA decode (ATOM_USE_TRITON_MLA_DECODE=1)")
 
     def process_weights_after_loading(self):
         if is_rocm_aiter_fp4bmm_enabled():
@@ -503,6 +506,72 @@ class MLAAttention(nn.Module):
         o = torch.empty(
             B, self.num_heads, self.kv_lora_rank, dtype=self.dtype, device=q.device
         )
+
+        if self.use_triton_mla_decode:
+            from aiter.ops.triton.attention.mla_decode_rope import (
+                decode_attention_fwd_grouped_rope,
+            )
+
+            head_dim = q.shape[-1]  # kv_lora_rank + qk_rope_head_dim
+
+            # Reshape KV cache: separate k_buffer and v_buffer for Triton kernel
+            kv_flat = kv_c_and_k_pe_cache.reshape(-1, head_dim)
+            k_buffer = kv_flat.unsqueeze(1)  # (total_tokens, 1, head_dim)
+            # Non-contiguous view is OK — kernel uses stride(0) for pointer offsets
+            v_buffer = kv_flat[:, : self.kv_lora_rank].unsqueeze(
+                1
+            )  # (total_tokens, 1, kv_lora_rank)
+
+            # Handle sparse attention (same indptr/indices logic as ASM path)
+            paged_kv_indptr = attn_metadata.kv_indptr
+            paged_kv_indices = attn_metadata.kv_indices
+            if self.topk_indices_buffer is not None:
+                paged_kv_indptr = attn_metadata.sparse_kv_indptr
+                paged_kv_indices = triton_convert_req_index_to_global_index(
+                    attn_metadata.cu_seqlens_q,
+                    attn_metadata.kv_indptr,
+                    paged_kv_indptr,
+                    attn_metadata.kv_indices,
+                    self.topk_indices_buffer[:B],
+                    NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
+                )
+
+            # Determine num_kv_splits (split-K parallelization)
+            total_kv = paged_kv_indices.shape[0]
+            avg_seq_len = total_kv // max(B, 1)
+            num_kv_splits = min(16, max(2, avg_seq_len // 256))
+
+            # Allocate intermediate logits buffer
+            attn_logits = torch.empty(
+                B,
+                self.num_heads,
+                num_kv_splits,
+                self.kv_lora_rank + 1,
+                dtype=q.dtype,
+                device=q.device,
+            )
+
+            decode_attention_fwd_grouped_rope(
+                q=q,
+                k_buffer=k_buffer,
+                v_buffer=v_buffer,
+                o=o,
+                kv_indptr=paged_kv_indptr,
+                kv_indices=paged_kv_indices,
+                k_pe_tokens=None,  # RoPE already pre-applied
+                kv_lora_rank=self.kv_lora_rank,
+                rotary_dim=self.qk_rope_head_dim,
+                cos_sin_cache=None,  # Not used when use_rope=False
+                positions=None,  # Not used when use_rope=False
+                attn_logits=attn_logits,
+                num_kv_splits=num_kv_splits,
+                sm_scale=self.scale,
+                logit_cap=0.0,
+                use_rope=False,  # Q and K already have RoPE applied
+                is_neox_style=False,
+            )
+
+            return self._v_up_proj_and_o_proj(o)
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
         paged_kv_indptr = attn_metadata.kv_indptr
