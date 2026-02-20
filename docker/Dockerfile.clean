@@ -28,6 +28,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git python3-pip python3-dev \
         ibverbs-utils libpci-dev locales \
+        openmpi-bin libopenmpi-dev libdw1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages --ignore-installed pip setuptools wheel
@@ -48,13 +49,18 @@ RUN --mount=type=bind,from=wheels,source=/,target=/mnt/wheels \
     && pip3 install --break-system-packages \
         filelock typing-extensions sympy networkx jinja2 fsspec numpy pillow \
     && pip3 install --break-system-packages \
+        /tmp/wheels/mori-*.whl \
+        /tmp/wheels/flydsl-*.whl \
+    && pip3 install --break-system-packages \
         /tmp/wheels/amd_aiter-*.whl \
     && rm -rf /tmp/wheels \
     && python3 -c "import torch; print(f'PyTorch {torch.__version__}, ROCm: {torch.version.hip}')" \
     && python3 -c "import triton; print(f'Triton {triton.__version__}')" \
-    && python3 -c "import aiter; print('AITER OK')"
+    && python3 -c "import aiter; print('AITER OK')" \
+    && python3 -c "import flydsl; print('FlyDSL OK')" \
+    && pip3 show mori && echo "MORI wheel installed OK"
 
-# ── 7. ATOM (from build context — pure Python, instant install) ──────
+# ── 3. ATOM (from build context — pure Python, instant install) ──────
 COPY . /app/ATOM
 RUN cd /app/ATOM && pip3 install --break-system-packages -e . \
     && python3 -c "import atom; print('ATOM OK')"
