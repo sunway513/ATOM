@@ -20,6 +20,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     "ATOM_USE_TRITON_GEMM": lambda: os.getenv("ATOM_USE_TRITON_GEMM", "0") == "1",
+    "ATOM_USE_TRITON_MLA_DECODE": lambda: os.getenv("ATOM_USE_TRITON_MLA_DECODE", "0")
+    == "1",
     "ATOM_USE_TRITON_MXFP4_BMM": lambda: os.getenv("ATOM_USE_TRITON_MXFP4_BMM", "0")
     == "1",
     "ATOM_ENABLE_DS_INPUT_RMSNORM_QUANT_FUSION": lambda: os.getenv(
@@ -42,6 +44,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "ATOM_LLAMA_ENABLE_AITER_TRITON_FUSED_SILU_MUL_QUANT", "1"
     )
     == "1",
+    "ATOM_USE_FLYDSL_MOE": lambda: os.getenv("ATOM_USE_FLYDSL_MOE", "0") == "1",
 }
 
 
