@@ -449,7 +449,8 @@ class MLAAttention(nn.Module):
             max_q_len = 1
 
         if kv_c_and_k_pe_cache.numel() > 0:
-            if self.kv_cache_dtype.startswith("fp8"):
+            if self.kv_cache_dtype.startswith("fp8") and max_q_len == 1:
+                # mla_decode_fwd supports fp8 scales but only max_seqlen_q=1
                 mla_decode_fwd(
                     q,
                     kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
@@ -466,9 +467,16 @@ class MLAAttention(nn.Module):
                     kv_scale=self._k_scale,
                 )
             else:
+                # mla_prefill_fwd supports arbitrary max_seqlen_q but no fp8 scales
+                q_for_prefill = q.to(self.dtype) if q.dtype != self.dtype else q
+                kv_for_prefill = (
+                    kv_c_and_k_pe_cache.to(self.dtype)
+                    if kv_c_and_k_pe_cache.dtype != self.dtype
+                    else kv_c_and_k_pe_cache
+                )
                 mla_prefill_fwd(
-                    q,
-                    kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
+                    q_for_prefill,
+                    kv_for_prefill.view(-1, 1, 1, q.shape[-1]),
                     o,
                     paged_cu_seqlens_q,
                     paged_kv_indptr,
