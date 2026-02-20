@@ -63,6 +63,9 @@ def _has_ck_moe_sorting() -> bool:
         return False
 
 
+from atom.model_ops.flydsl_moe import _has_flydsl_moe
+
+
 def _per_token_group_quant_fp8(x, group_size, fp8_dtype):
     """Quantize input tensor to FP8 with per-token-group scaling.
 
@@ -120,7 +123,7 @@ def _triton_fp8_moe(
     E = w13.shape[0]
     inter_dim_2 = w13.shape[1]  # 2 * inter_dim
     inter_dim = inter_dim_2 // 2
-    # When fused shared experts are enabled, topk_ids has M*(top_k+1) elements
+    # actual_top_k may differ from top_k when shared experts are fused
     actual_top_k = topk_ids.numel() // M
 
     if block_quant:
@@ -1180,13 +1183,20 @@ class CompressedTensorsFp8MoEMethod(FusedMoEMethodBase):
                 self.block_n = 1
                 self.block_k = 32
 
-        # Detect CK MOE availability; fall back to Triton MOE if unavailable
-        self.use_triton_moe = not _has_ck_moe_sorting()
-        if self.use_triton_moe:
-            _moe_logger.info(
-                "CK MOE sorting not available, using Triton MOE kernels "
-                "for CompressedTensors FP8"
-            )
+        # Detect CK MOE availability; fall back to FlyDSL or Triton
+        self.use_flydsl_moe = False
+        self.use_triton_moe = False
+        if not _has_ck_moe_sorting():
+            if not self.block_quant and _has_flydsl_moe():
+                self.use_flydsl_moe = True
+                _moe_logger.info(
+                    "CK unavailable, using FlyDSL MOE for CompressedTensors FP8"
+                )
+            else:
+                self.use_triton_moe = True
+                _moe_logger.info(
+                    "CK unavailable, using Triton MOE for CompressedTensors FP8"
+                )
 
     def create_weights(
         self,
@@ -1427,7 +1437,7 @@ class CompressedTensorsFp8MoEMethod(FusedMoEMethodBase):
                 max_w13_scales, requires_grad=False
             )
 
-        # Shuffle weights for asm moe (moved from inference to load time for better performance)
+        # Shuffle weights for asm/FlyDSL moe (moved from inference to load time)
         # Skip shuffle when using Triton path (Triton expects standard row-major)
         if not self.use_triton_moe:
             if w13.dtype in [
@@ -1508,6 +1518,23 @@ class CompressedTensorsFp8MoEMethod(FusedMoEMethodBase):
         a1_scale = getattr(layer, "w13_input_scale", None)
         a2_scale = getattr(layer, "w2_input_scale", None)
 
+        # FlyDSL MOE fallback when CK is not available
+        if self.use_flydsl_moe:
+            from atom.model_ops.flydsl_moe import flydsl_fp8_moe
+
+            return flydsl_fp8_moe(
+                x=x,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                top_k=top_k,
+                block_quant=self.block_quant,
+                quant_type=self.quant_type,
+            )
+
         # Triton MOE fallback when CK is not available
         if self.use_triton_moe:
             return _triton_fp8_moe(
@@ -1587,12 +1614,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.need_normalize_e4m3fn_to_e4m3fnuz = (
             self.quant_dtype == torch.float8_e4m3fnuz
         )
-        # Detect CK MOE availability; fall back to Triton MOE if unavailable
-        self.use_triton_moe = not _has_ck_moe_sorting()
-        if self.use_triton_moe:
-            _moe_logger.info(
-                "CK MOE sorting not available, using Triton MOE kernels for FP8"
-            )
+        # Detect CK MOE availability; fall back to FlyDSL or Triton
+        self.use_flydsl_moe = False
+        self.use_triton_moe = False
+        if not _has_ck_moe_sorting():
+            if not self.block_quant and _has_flydsl_moe():
+                self.use_flydsl_moe = True
+                _moe_logger.info("CK unavailable, using FlyDSL MOE for FP8")
+            else:
+                self.use_triton_moe = True
+                _moe_logger.info("CK unavailable, using Triton MOE for FP8")
 
     def create_weights(
         self,
@@ -1880,6 +1911,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             num_fused_shared_experts=layer.num_fused_shared_experts,
             routed_scaling_factor=layer.routed_scaling_factor,
         )
+        # FlyDSL MOE fallback when CK is not available
+        if self.use_flydsl_moe:
+            from atom.model_ops.flydsl_moe import flydsl_fp8_moe
+
+            return flydsl_fp8_moe(
+                x=x,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                top_k=top_k,
+                block_quant=self.block_quant,
+                quant_type=self.quant_type,
+            )
+
         # Triton MOE fallback when CK is not available
         if self.use_triton_moe:
             return _triton_fp8_moe(
@@ -1894,6 +1942,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_quant=self.block_quant,
                 quant_type=self.quant_type,
             )
+
         # per_Tensor not support num_local_tokens so not use mori
         if self.quant_type == QuantType.per_Tensor or self.fused_experts is None:
             return torch.ops.aiter.rocm_aiter_fused_moe(
