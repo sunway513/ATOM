@@ -120,6 +120,8 @@ def _triton_fp8_moe(
     E = w13.shape[0]
     inter_dim_2 = w13.shape[1]  # 2 * inter_dim
     inter_dim = inter_dim_2 // 2
+    # actual_top_k may differ from top_k when shared experts are fused
+    actual_top_k = topk_ids.numel() // M
 
     if block_quant:
         if quant_type == QuantType.per_1x128:
@@ -157,7 +159,9 @@ def _triton_fp8_moe(
         a_fp8 = x
         a_scale = None
 
-    intermediate = torch.zeros(M * top_k, inter_dim, dtype=x.dtype, device=x.device)
+    intermediate = torch.zeros(
+        M * actual_top_k, inter_dim, dtype=x.dtype, device=x.device
+    )
 
     fused_moe_silu(
         A=a_fp8,
@@ -172,7 +176,7 @@ def _triton_fp8_moe(
         expert_ids=expert_ids,
         num_tokens_post_padded=num_tokens_post_pad,
         mul_routed_weight=False,
-        top_k=top_k,
+        top_k=actual_top_k,
         compute_type=compute_type,
         use_fp8_w8a8=True,
         use_int8_w8a16=False,
@@ -184,8 +188,8 @@ def _triton_fp8_moe(
     # --- Stage 3: GEMM2 (intermediate @ w2^T) ---
     # Reshape for GEMM2: treat each (token, expert_k) as independent token
     # with top_k=1 so the kernel indexes A correctly (A // top_k = A // 1 = A)
-    gemm2_topk_ids = topk_ids.reshape(M * top_k, 1)
-    gemm2_topk_weights = topk_weights.reshape(M * top_k, 1)
+    gemm2_topk_ids = topk_ids.reshape(M * actual_top_k, 1)
+    gemm2_topk_weights = topk_weights.reshape(M * actual_top_k, 1)
 
     # Re-sort for GEMM2 with the reshaped topk_ids
     gemm2_max_padded = gemm2_topk_ids.numel() + E * (block_size_m - 1)
@@ -214,7 +218,9 @@ def _triton_fp8_moe(
         inter_fp8 = intermediate
         inter_scale = None
 
-    output = torch.zeros(M * top_k, 1, hidden_dim, dtype=x.dtype, device=x.device)
+    output = torch.zeros(
+        M * actual_top_k, 1, hidden_dim, dtype=x.dtype, device=x.device
+    )
 
     triton_fused_moe(
         A=inter_fp8,
@@ -239,7 +245,7 @@ def _triton_fp8_moe(
     )
 
     # Reduce: sum across top_k experts per token
-    result = output.squeeze(1).view(M, top_k, hidden_dim).sum(dim=1)
+    result = output.squeeze(1).view(M, actual_top_k, hidden_dim).sum(dim=1)
     return result
 
 
@@ -581,6 +587,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
 
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+        if not _has_ck_moe_sorting():
+            _moe_logger.warning(
+                "CK MOE sorting not available. Unquantized MOE will "
+                "rely on AITER-level Triton sorting fallback. "
+                "2-stage CK kernels may also be unavailable."
+            )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -829,6 +844,20 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.quant_type == QuantType.per_1x32
         )
         self.use_triton = get_gfx().startswith("gfx94")
+        if not self.use_triton and not _has_ck_moe_sorting():
+            from atom.model_ops.utils import has_triton_kernels
+
+            if has_triton_kernels():
+                self.use_triton = True
+                _moe_logger.info(
+                    "CK MOE sorting not available, "
+                    "using Triton MOE kernels for MXFP4"
+                )
+            else:
+                _moe_logger.warning(
+                    "CK MOE sorting not available and triton_kernels "
+                    "not installed, relying on AITER-level CK-free fallback"
+                )
         if self.use_triton:
             from atom.model_ops.utils import has_triton_kernels
 
