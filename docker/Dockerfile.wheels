@@ -115,6 +115,22 @@ RUN cd /build/FlyDSL \
     && cp dist/flydsl-*.whl /wheels/ \
     && ls -lh /wheels/flydsl-*.whl
 
+# Dereference symlinks in _mlir so that editable installs work without
+# the MLIR source tree.  The build creates symlinks from the _mlir Python
+# files (ir.py, dialects/*.py, etc.) into /build/llvm-project/…, which
+# won't exist in the clean runtime image.
+RUN cd /build/FlyDSL \
+    && _mlir=".flir/build/python_packages/flydsl/_mlir" \
+    && tmp_resolved="/tmp/_mlir_resolved" \
+    && cp -rL "$_mlir" "$tmp_resolved" \
+    && rm -rf "$_mlir" \
+    && mv "$tmp_resolved" "$_mlir"
+
+# Export the FlyDSL source tree (with resolved _mlir, kernels, tests)
+# to /flydsl_src/ so Dockerfile.clean can optionally COPY it for dev use.
+RUN cp -r /build/FlyDSL /flydsl_src \
+    && rm -rf /flydsl_src/.git
+
 # ── 7. Build MORI wheel ─────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openmpi-bin libopenmpi-dev cython3 libdw1 \

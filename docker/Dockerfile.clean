@@ -50,17 +50,28 @@ RUN --mount=type=bind,from=wheels,source=/,target=/mnt/wheels \
         filelock typing-extensions sympy networkx jinja2 fsspec numpy pillow \
     && pip3 install --break-system-packages \
         /tmp/wheels/mori-*.whl \
-        /tmp/wheels/flydsl-*.whl \
     && pip3 install --break-system-packages \
         /tmp/wheels/amd_aiter-*.whl \
     && rm -rf /tmp/wheels \
     && python3 -c "import torch; print(f'PyTorch {torch.__version__}, ROCm: {torch.version.hip}')" \
     && python3 -c "import triton; print(f'Triton {triton.__version__}')" \
     && python3 -c "import aiter; print('AITER OK')" \
-    && python3 -c "import flydsl; print('FlyDSL OK')" \
     && pip3 show mori && echo "MORI wheel installed OK"
 
-# ── 3. ATOM (from build context — pure Python, instant install) ──────
+# ── 3. FlyDSL source (kernels, tests — for dev/profiling) ────────────
+# The wheel installs the flydsl package, but having the source tree
+# gives access to kernels/ and tests/ for benchmarking and profiling.
+# The _mlir symlinks are pre-resolved in Dockerfile.wheels so editable
+# installs work without the MLIR source tree.
+RUN --mount=type=bind,from=wheels,source=/flydsl_src,target=/mnt/flydsl_src \
+    mkdir -p /app \
+    && cp -r /mnt/flydsl_src /app/FlyDSL \
+    && cd /app/FlyDSL \
+    && FLIR_REBUILD=0 pip3 install --break-system-packages -e . \
+    && python3 -c "import flydsl; print('FlyDSL editable OK')" \
+    && python3 -c "from kernels.softmax_kernel import build_softmax_module; print('FlyDSL kernels OK')"
+
+# ── 4. ATOM (from build context — pure Python, instant install) ──────
 COPY . /app/ATOM
 RUN cd /app/ATOM && pip3 install --break-system-packages -e . \
     && python3 -c "import atom; print('ATOM OK')"
