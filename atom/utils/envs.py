@@ -45,6 +45,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     == "1",
     "ATOM_USE_FLYDSL_MOE": lambda: os.getenv("ATOM_USE_FLYDSL_MOE", "0") == "1",
+    "ATOM_CK_FREE": lambda: os.getenv("ATOM_CK_FREE", "0") == "1",
 }
 
 

@@ -43,6 +43,7 @@ from atom.model_ops.utils import (
     per_tensor_dequantize,
     shuffle_weights,
 )
+from atom.utils import envs
 from atom.utils.custom_register import direct_register_custom_op
 from atom.utils.forward_context import get_forward_context
 from torch import nn
@@ -840,7 +841,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         from atom.model_ops.utils import has_triton_kernels
 
         self.use_triton = get_gfx() in ("gfx942", "gfx950") and has_triton_kernels()
-        if not self.use_triton and not _has_ck_moe_sorting():
+        if not self.use_triton and (not _has_ck_moe_sorting() or envs.ATOM_CK_FREE):
             if has_triton_kernels():
                 self.use_triton = True
                 _moe_logger.info(
@@ -1191,7 +1192,7 @@ class CompressedTensorsFp8MoEMethod(FusedMoEMethodBase):
         # Detect CK MOE availability; fall back to FlyDSL or Triton if unavailable
         self.use_flydsl_moe = False
         self.use_triton_moe = False
-        if not _has_ck_moe_sorting():
+        if not _has_ck_moe_sorting() or envs.ATOM_CK_FREE:
             if not self.block_quant and _has_flydsl_moe():
                 self.use_flydsl_moe = True
                 _moe_logger.info(
@@ -1622,7 +1623,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Detect CK MOE availability; fall back to FlyDSL or Triton if unavailable
         self.use_flydsl_moe = False
         self.use_triton_moe = False
-        if not _has_ck_moe_sorting():
+        if not _has_ck_moe_sorting() or envs.ATOM_CK_FREE:
             if not self.block_quant and _has_flydsl_moe():
                 self.use_flydsl_moe = True
                 _moe_logger.info("CK unavailable, using FlyDSL MOE for FP8")
