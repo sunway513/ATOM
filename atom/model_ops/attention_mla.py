@@ -130,9 +130,13 @@ class MLAAttention(nn.Module):
             else None
         )
         self.layer_num = layer_num
-        self.use_triton_mla_decode = envs.ATOM_USE_TRITON_MLA_DECODE
+        self.use_triton_mla_decode = (
+            envs.ATOM_USE_TRITON_MLA_DECODE or envs.ATOM_CK_FREE
+        )
         if self.use_triton_mla_decode:
-            logger.info("Using Triton MLA decode (ATOM_USE_TRITON_MLA_DECODE=1)")
+            logger.info(
+                "Using Triton MLA decode (ATOM_USE_TRITON_MLA_DECODE=1 or ATOM_CK_FREE=1)"
+            )
 
     def process_weights_after_loading(self):
         if is_rocm_aiter_fp4bmm_enabled():

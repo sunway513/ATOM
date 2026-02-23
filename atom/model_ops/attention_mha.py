@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
 from typing import Optional
 
 import aiter
@@ -49,7 +50,7 @@ class Attention(nn.Module):
             if self.kv_cache_dtype == "fp8"
             else 1.0
         )
-        self.kv_scale = torch.tensor(self.kv_scale_float, dtype=torch.float32)
+        self.kv_scale = torch.tensor(self.kv_scale_float, dtype=torch.float32).cuda()
         self.sinks = sinks
         self.sliding_window = sliding_window if sliding_window is not None else -1
         self.rotary_emb = rotary_emb
@@ -100,8 +101,11 @@ class Attention(nn.Module):
         k_scale = kv_cache_data[f"layer_{self.layer_num}"].k_scale
         v_scale = kv_cache_data[f"layer_{self.layer_num}"].v_scale
 
-        use_triton_attn = self.sliding_window != -1 or self.head_dim != 128
-        self.use_triton_attn = use_triton_attn
+        # PA dispatch decision (independent of cache update strategy)
+        use_asm_pa = self.sliding_window == -1 and self.head_dim == 128
+        if os.environ.get("AITER_FORCE_TRITON_ATTN", "0") == "1":
+            use_asm_pa = False
+        self.use_triton_attn = not use_asm_pa
 
         if (
             self.rotary_emb is not None
@@ -134,8 +138,9 @@ class Attention(nn.Module):
             q, k, v = qkv.split(
                 [self.num_heads, self.num_kv_heads, self.num_kv_heads], dim=1
             )
-        elif use_triton_attn and self.rotary_emb is not None:
-            k_scale = v_scale = self.kv_scale
+        elif self.rotary_emb is not None:
+            # Always use Triton fused rope+cache (fast, no module_cache JIT)
+            triton_scale = self.kv_scale
 
             q, k, k_cache, v_cache = fused_qk_rope_reshape_and_cache(
                 q,
@@ -147,8 +152,8 @@ class Attention(nn.Module):
                 position,
                 self.rotary_emb.cos_cache,
                 self.rotary_emb.sin_cache,
-                k_scale,
-                v_scale,
+                triton_scale,
+                triton_scale,
                 self.rotary_emb.is_neox_style,
                 flash_layout=False,
                 apply_scale=self.kv_cache_dtype.startswith("fp8"),
@@ -157,14 +162,30 @@ class Attention(nn.Module):
                 k_out=k,
                 output_zeros=False,
             )
+
+            # Set scales for the PA backend
+            if use_asm_pa:
+                if self.kv_cache_dtype == "bf16":
+                    # bf16 cache: no dequant needed
+                    k_scale = None
+                    v_scale = None
+                else:
+                    # fp8 cache: Triton fused cache applied per-tensor scale
+                    # inline. Fill per-token scale buffers with the uniform
+                    # per-tensor value so ASM PA can dequant correctly.
+                    slots = attn_metadata.slot_mapping.clamp(min=0)
+                    block_size = k_cache.shape[3]
+                    block_indices = slots // block_size
+                    block_offsets = slots % block_size
+                    # k_scale/v_scale from kv_cache_data: [blocks, heads, block_size]
+                    k_scale[block_indices, :, block_offsets] = self.kv_scale
+                    v_scale[block_indices, :, block_offsets] = self.kv_scale
+            else:
+                # Triton PA uses per-tensor scale directly
+                k_scale = triton_scale
+                v_scale = triton_scale
         else:
-            # for asm paged attention
-            asm_layout = True
-            if use_triton_attn:
-                asm_layout = False
-            if self.rotary_emb is not None:
-                assert position is not None
-                q, k = self.rotary_emb(position, q, k)
+            # Non-rope fallback (models without rotary embedding)
             if self.q_norm is not None:
                 q = self.q_norm(q)
             if self.k_norm is not None:
@@ -178,7 +199,7 @@ class Attention(nn.Module):
                     k_scale,
                     v_scale,
                     attn_metadata.slot_mapping,
-                    asm_layout=asm_layout,
+                    asm_layout=use_asm_pa,
                 )
             else:
                 aiter.reshape_and_cache(
@@ -190,7 +211,7 @@ class Attention(nn.Module):
                     kv_cache_dtype="auto",
                     k_scale=None,
                     v_scale=None,
-                    asm_layout=asm_layout,
+                    asm_layout=use_asm_pa,
                 )
 
         return q, k, v, k_cache, v_cache, k_scale, v_scale
