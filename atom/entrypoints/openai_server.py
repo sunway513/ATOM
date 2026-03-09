@@ -27,6 +27,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from transformers import AutoTokenizer
 
+from atom.model_engine.llm_engine import _load_tokenizer
+
 # Configure logging
 logger = logging.getLogger("atom")
 
@@ -901,9 +903,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading tokenizer from {args.model}...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, trust_remote_code=args.trust_remote_code
-    )
+    tokenizer = _load_tokenizer(args.model, args.trust_remote_code)
     model_name = args.model
 
     print(f"Initializing engine with model {args.model}...")
