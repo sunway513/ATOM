@@ -17,6 +17,7 @@ from .attention_mla import MLAModules
 
 from atom.plugin.prepare import is_plugin_mode, is_vllm
 from atom.plugin.attention_mha import PagedAttentionImplDecoratorForPluginMode
+from atom.utils.decorators import mark_trace
 
 
 @PagedAttentionImplDecoratorForPluginMode
@@ -110,6 +111,7 @@ class PagedAttentionImpl(nn.Module):
 
         return o
 
+    @mark_trace(prefix="rope_cache", torch_compile=False)
     def rope_cache(self, q, k, v, qkv, position, fwd_ctx: ForwardContext):
         attn_metadata = fwd_ctx.attn_metadata
         kv_cache_data = fwd_ctx.kv_cache_data
@@ -214,6 +216,7 @@ class PagedAttentionImpl(nn.Module):
 
         return q, k, v, k_cache, v_cache, k_scale, v_scale
 
+    @mark_trace(prefix="paged_attention_triton", torch_compile=False)
     def paged_attention_triton(
         self, q, k, v, k_cache, v_cache, k_scale, v_scale, fwd_ctx: ForwardContext
     ):
@@ -290,6 +293,7 @@ class PagedAttentionImpl(nn.Module):
 
         return o
 
+    @mark_trace(prefix="paged_attention_asm", torch_compile=False)
     def paged_attention_asm(
         self, q, k, v, k_cache, v_cache, k_scale, v_scale, fwd_ctx: ForwardContext
     ):
@@ -312,6 +316,7 @@ class PagedAttentionImpl(nn.Module):
 
         return o
 
+    @mark_trace(prefix="paged_attention_persistent_asm", torch_compile=False)
     def paged_attention_persistent_asm(
         self, q, k, v, k_cache, v_cache, k_scale, v_scale, fwd_ctx: ForwardContext
     ):
@@ -341,6 +346,7 @@ class PagedAttentionImpl(nn.Module):
 
         return output
 
+    @mark_trace(prefix="prefill_attention", torch_compile=False)
     def prefill_attention(
         self, q, k, v, k_cache, v_cache, k_scale, v_scale, fwd_ctx: ForwardContext
     ):

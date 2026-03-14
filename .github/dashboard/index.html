@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ATOM Benchmark Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0d1117; color: #c9d1d9; padding: 24px;
+    }
+    .container { max-width: 1400px; margin: 0 auto; }
+    header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      border-bottom: 1px solid #30363d; padding-bottom: 16px; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+    }
+    h1 { font-size: 22px; color: #f0f6fc; font-weight: 600; }
+    h1 span { color: #58a6ff; }
+    .meta { font-size: 12px; color: #8b949e; margin-top: 4px; }
+    .meta a { color: #58a6ff; text-decoration: none; }
+    .meta a:hover { text-decoration: underline; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid #30363d; margin-bottom: 20px; }
+    .tab {
+      padding: 8px 16px; font-size: 13px; color: #8b949e; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.2s;
+    }
+    .tab:hover { color: #c9d1d9; }
+    .tab.active { color: #f0f6fc; border-bottom-color: #f78166; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Chart grid */
+    .chart-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+    .chart-card {
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px;
+    }
+    .chart-card canvas { min-height: 350px; }
+    .chart-card.hero canvas { min-height: 500px; }
+    .chart-card h3 {
+      font-size: 14px; color: #8b949e; margin-bottom: 12px;
+      font-weight: 500; letter-spacing: 0.3px;
+    }
+    @media (min-width: 1200px) {
+      .chart-grid { grid-template-columns: repeat(2, 1fr); }
+      .chart-card.hero { grid-column: 1 / -1; }
+    }
+
+    /* Summary table */
+    .summary-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 20px; }
+    .summary-table th {
+      text-align: left; padding: 8px 12px; border-bottom: 2px solid #30363d;
+      color: #8b949e; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .summary-table td {
+      padding: 8px 12px; border-bottom: 1px solid #21262d; color: #c9d1d9;
+    }
+    .summary-table tr:hover td { background: #161b22; }
+    .summary-table .num { font-family: "SF Mono", "Fira Code", monospace; text-align: right; }
+    .summary-table .model { color: #58a6ff; font-weight: 500; }
+    .summary-table a { color: #58a6ff; text-decoration: none; }
+    .summary-table a:hover { text-decoration: underline; }
+
+    footer {
+      margin-top: 24px; padding-top: 12px; border-top: 1px solid #30363d;
+      display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: #484f58;
+    }
+    footer a { color: #58a6ff; text-decoration: none; }
+    button {
+      background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+      border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 11px;
+    }
+    button:hover { background: #30363d; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1><span>ATOM</span> Benchmark Dashboard</h1>
+      <div class="meta">
+        <span id="last-update"></span> · <a id="repo-link" target="_blank"></a>
+      </div>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="overview">Overview</div>
+    <div class="tab" data-tab="tradeoff">Throughput vs Latency</div>
+    <div class="tab" data-tab="throughput">Throughput</div>
+    <div class="tab" data-tab="latency">Latency</div>
+    <div class="tab" data-tab="historical">Historical</div>
+  </div>
+
+  <!-- Overview Tab: Summary Table -->
+  <div class="tab-content active" id="tab-overview">
+    <table class="summary-table" id="summary-table">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>ISL/OSL</th>
+          <th>Concurrency</th>
+          <th class="num">Output Throughput</th>
+          <th class="num">Total Throughput</th>
+          <th class="num">Mean TTFT</th>
+          <th class="num">Mean TPOT</th>
+          <th>Commit</th>
+          <th>Run</th>
+        </tr>
+      </thead>
+      <tbody id="summary-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Throughput vs Latency Tab -->
+  <div class="tab-content" id="tab-tradeoff">
+    <div class="chart-grid" id="tradeoff-charts"></div>
+  </div>
+
+  <!-- Throughput Tab -->
+  <div class="tab-content" id="tab-throughput">
+    <div class="chart-grid" id="throughput-charts"></div>
+  </div>
+
+  <!-- Latency Tab -->
+  <div class="tab-content" id="tab-latency">
+    <div class="chart-grid" id="latency-charts"></div>
+  </div>
+
+  <!-- Historical Tab: All metrics over time -->
+  <div class="tab-content" id="tab-historical">
+    <div class="chart-grid" id="historical-charts"></div>
+  </div>
+
+  <footer>
+    <button id="dl-btn">Download JSON</button>
+    <span>Powered by <a href="https://github.com/benchmark-action/github-action-benchmark" target="_blank">github-action-benchmark</a> · ATOM Inference Engine</span>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.2/Chart.min.js"></script>
+<script src="data.js"></script>
+<script>
+'use strict';
+(function() {
+  // Generate stable color from string hash so same config always gets same color across charts
+  function strHash(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  }
+  function hslColor(str, saturation, lightness) {
+    const hue = strHash(str) % 360;
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+  }
+  function getColor(name) {
+    const h = strHash(name) % 360;
+    return `hsl(${h}, 70%, 60%)`;
+  }
+  function getColorAlpha(name, alpha) {
+    const h = strHash(name) % 360;
+    return `hsla(${h}, 70%, 60%, ${alpha})`;
+  }
+
+  Chart.defaults.global.defaultFontColor = '#8b949e';
+  Chart.defaults.global.defaultFontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+
+  // --- Tab switching ---
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // --- Parse data ---
+  const data = window.BENCHMARK_DATA;
+  document.getElementById('last-update').textContent = 'Updated ' + new Date(data.lastUpdate).toLocaleString();
+  const link = document.getElementById('repo-link');
+  link.href = data.repoUrl;
+  link.textContent = data.repoUrl.replace('https://github.com/', '');
+  document.getElementById('dl-btn').onclick = () => {
+    const a = document.createElement('a');
+    a.href = 'data:application/json,' + encodeURIComponent(JSON.stringify(data, null, 2));
+    a.download = 'benchmark_data.json'; a.click();
+  };
+
+  // Collect all bench data grouped by name
+  const benchMap = new Map();
+  for (const [, runs] of Object.entries(data.entries)) {
+    for (const run of runs) {
+      for (const bench of run.benches) {
+        if (!benchMap.has(bench.name)) benchMap.set(bench.name, []);
+        benchMap.get(bench.name).push({ commit: run.commit, date: run.date, bench });
+      }
+    }
+  }
+
+  // --- Overview: Summary Table (latest run) ---
+  const latestRun = Object.values(data.entries).flat().sort((a, b) => b.date - a.date)[0];
+  if (latestRun) {
+    const tbody = document.getElementById('summary-body');
+    // Group benches by config (strip metric suffix)
+    const configMap = {};
+    for (const b of latestRun.benches) {
+      const m = b.name.match(/^(.+)\s+(throughput|TPOT|TTFT|ITL|E2EL|Total Tput)\s*\((.+)\)$/);
+      if (!m) continue;
+      const [, config, metric] = m;
+      if (!configMap[config]) configMap[config] = {};
+      configMap[config][metric] = b.value;
+      configMap[config]._extra = b.extra || '';
+    }
+
+    for (const [config, metrics] of Object.entries(configMap)) {
+      // Parse config: "DeepSeek-R1-0528-mtp3 1024/1024 c=128"
+      const parts = config.match(/^(\S+)\s+(\d+)\/(\d+)\s+c=(\d+)$/);
+      if (!parts) continue;
+      const [, model, isl, osl, conc] = parts;
+
+      const runMatch = (metrics._extra || '').match(/Run:\s*(https:\/\/\S+)/);
+      const runUrl = runMatch ? runMatch[1] : '';
+      const commitUrl = latestRun.commit.url || '';
+      const commitId = latestRun.commit.id ? latestRun.commit.id.slice(0, 7) : '';
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="model">${model}</td>
+        <td>${isl}/${osl}</td>
+        <td class="num">${conc}</td>
+        <td class="num">${metrics.throughput ? metrics.throughput.toFixed(1) + ' tok/s' : '-'}</td>
+        <td class="num">${metrics['Total Tput'] ? metrics['Total Tput'].toFixed(1) + ' tok/s' : '-'}</td>
+        <td class="num">${metrics.TTFT ? metrics.TTFT.toFixed(1) + ' ms' : '-'}</td>
+        <td class="num">${metrics.TPOT ? metrics.TPOT.toFixed(2) + ' ms' : '-'}</td>
+        <td><a href="${commitUrl}" target="_blank">${commitId}</a></td>
+        <td>${runUrl ? '<a href="' + runUrl + '" target="_blank">view</a>' : '-'}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // --- Charts helper ---
+  // Build ordered x-axis labels from all runs sorted by date
+  const allRuns = Object.values(data.entries).flat().sort((a, b) => a.date - b.date);
+  // Deduplicate by commit id, keep chronological order
+  const seen = new Set();
+  const orderedLabels = [];
+  const commitDateMap = {};
+  for (const r of allRuns) {
+    const cid = r.commit.id.slice(0, 7);
+    if (!seen.has(cid)) {
+      seen.add(cid);
+      orderedLabels.push(cid);
+      commitDateMap[cid] = r.date;
+    }
+  }
+
+  function makeChart(container, title, seriesMap, unit) {
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    card.innerHTML = '<h3>' + title + '</h3>';
+    const canvas = document.createElement('canvas');
+    card.appendChild(canvas);
+    container.appendChild(card);
+
+    // Align each series data to the global ordered labels
+    const datasets = [];
+    for (const [config, points] of Object.entries(seriesMap)) {
+      const color = getColor(config);
+      // Map commit -> value for this series
+      const pointMap = {};
+      for (const p of points) {
+        pointMap[p.commit.id.slice(0, 7)] = p;
+      }
+      // Build data array aligned to orderedLabels (null for missing)
+      const chartData = orderedLabels.map(cid => pointMap[cid] ? pointMap[cid].bench.value : null);
+      datasets.push({
+        label: config, data: chartData,
+        borderColor: color, backgroundColor: getColorAlpha(config, 0.12),
+        borderWidth: 2, pointRadius: 4, pointHoverRadius: 6,
+        fill: false, spanGaps: true,
+        _pointMap: pointMap
+      });
+    }
+
+    new Chart(canvas, {
+      type: 'line',
+      data: { labels: orderedLabels, datasets },
+      options: {
+        responsive: true,
+        legend: { labels: { fontColor: '#c9d1d9', fontSize: 11, boxWidth: 12 } },
+        scales: {
+          xAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: 'Commit', fontColor: '#8b949e' }, ticks: { fontColor: '#8b949e' } }],
+          yAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: unit, fontColor: '#8b949e' }, ticks: { beginAtZero: false, fontColor: '#8b949e' } }]
+        },
+        tooltips: {
+          backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1,
+          titleFontColor: '#f0f6fc', bodyFontColor: '#c9d1d9',
+          callbacks: {
+            title: (items) => {
+              const cid = orderedLabels[items[0].index];
+              return cid + ' · ' + new Date(commitDateMap[cid]).toLocaleString();
+            },
+            afterTitle: (items) => {
+              const cid = orderedLabels[items[0].index];
+              const ds = datasets[items[0].datasetIndex];
+              const p = ds._pointMap[cid];
+              return p ? p.commit.message.split('\n')[0] : '';
+            },
+            label: (item) => ' ' + datasets[item.datasetIndex].label + ': ' + item.value + ' ' + unit,
+            afterLabel: (item) => {
+              const cid = orderedLabels[item.index];
+              const ds = datasets[item.datasetIndex];
+              const p = ds._pointMap[cid];
+              return (p && p.bench.extra) ? '\n' + p.bench.extra : '';
+            }
+          }
+        },
+        onClick: (_e, elems) => {
+          if (!elems.length) return;
+          const cid = orderedLabels[elems[0]._index];
+          const ds = datasets[elems[0]._datasetIndex];
+          const p = ds._pointMap[cid];
+          if (!p) return;
+          const extra = p.bench.extra || '';
+          const rm = extra.match(/Run:\s*(https:\/\/\S+)/);
+          window.open(rm ? rm[1] : p.commit.url, '_blank');
+        }
+      }
+    });
+  }
+
+  // --- Group by metric type ---
+  const groups = {};
+  for (const [name, points] of benchMap) {
+    const m = name.match(/^(.+)\s+(throughput|TPOT|TTFT|ITL|E2EL|Total Tput)\s*\((.+)\)$/);
+    if (!m) continue;
+    const [, config, metric, unit] = m;
+    const key = metric + '|' + unit;
+    if (!groups[key]) groups[key] = {};
+    groups[key][config] = points;
+  }
+
+  // --- Helper: group series by model ---
+  // Input: { "Model ISL/OSL c=N": [points] }
+  // Output: { "Model": { "ISL/OSL c=N": [points] } }
+  function groupByModel(seriesMap) {
+    const modelGroups = {};
+    for (const [config, points] of Object.entries(seriesMap)) {
+      // config = "DeepSeek-R1-0528-mtp3 1024/1024 c=128"
+      const parts = config.match(/^(\S+)\s+(.+)$/);
+      if (!parts) continue;
+      const [, model, rest] = parts;
+      if (!modelGroups[model]) modelGroups[model] = {};
+      modelGroups[model][rest] = points;
+    }
+    return modelGroups;
+  }
+
+  // --- Throughput tab ---
+  const tputContainer = document.getElementById('throughput-charts');
+  if (groups['throughput|tok/s']) {
+    const byModel = groupByModel(groups['throughput|tok/s']);
+    for (const [model, series] of Object.entries(byModel)) {
+      makeChart(tputContainer, model + ' — Output Throughput', series, 'tok/s');
+    }
+  }
+  if (groups['Total Tput|tok/s']) {
+    const byModel = groupByModel(groups['Total Tput|tok/s']);
+    for (const [model, series] of Object.entries(byModel)) {
+      makeChart(tputContainer, model + ' — Total Throughput', series, 'tok/s');
+    }
+  }
+
+  // --- Latency tab ---
+  const latContainer = document.getElementById('latency-charts');
+  for (const [key, seriesAll] of Object.entries(groups)) {
+    const [metric, unit] = key.split('|');
+    if (metric === 'throughput' || metric === 'Total Tput' || metric === '_gpu_count') continue;
+    const metricTitle = { TPOT: 'Time Per Output Token', TTFT: 'Time To First Token', ITL: 'Inter-Token Latency', E2EL: 'End-to-End Latency' }[metric] || metric;
+    const byModel = groupByModel(seriesAll);
+    for (const [model, series] of Object.entries(byModel)) {
+      makeChart(latContainer, model + ' — ' + metricTitle, series, unit);
+    }
+  }
+
+  // --- Throughput vs Latency tab (scatter, like InferenceX) ---
+  // For the latest run, plot output throughput (x) vs TPOT (y) across concurrency levels
+  // Each model+ISL/OSL combo is a separate series, points are different concurrency levels
+  (function() {
+    const container = document.getElementById('tradeoff-charts');
+    if (!latestRun) return;
+
+    // Parse all benches from latest run into structured data
+    // bench name format: "Model ISL/OSL c=CONC metric (unit)"
+    const configs = {};  // key: "Model ISL/OSL" -> { conc -> { throughput, tpot, ttft, ... } }
+    for (const b of latestRun.benches) {
+      const m = b.name.match(/^(.+\s+\d+\/\d+)\s+c=(\d+)\s+(\w[\w\s]*)\((.+)\)$/);
+      if (!m) continue;
+      const [, modelConfig, conc, metric] = m;
+      if (!configs[modelConfig]) configs[modelConfig] = {};
+      if (!configs[modelConfig][conc]) configs[modelConfig][conc] = {};
+      configs[modelConfig][conc][metric.trim()] = b.value;
+    }
+
+    // Build scatter datasets: x=throughput, y=TPOT
+    function makeScatter(title, xMetric, yMetric, xLabel, yLabel) {
+      const datasets = [];
+      for (const [modelConfig, concMap] of Object.entries(configs)) {
+        const points = [];
+        const concLabels = [];
+        for (const [conc, metrics] of Object.entries(concMap).sort((a,b) => +a[0] - +b[0])) {
+          if (metrics[xMetric] && metrics[yMetric]) {
+            points.push({ x: metrics[xMetric], y: metrics[yMetric] });
+            concLabels.push(conc);
+          }
+        }
+        if (points.length === 0) continue;
+        const color = getColor(modelConfig);
+        datasets.push({
+          label: modelConfig,
+          data: points,
+          borderColor: color,
+          backgroundColor: getColorAlpha(modelConfig, 0.25),
+          borderWidth: 2,
+          pointRadius: 5,
+          pointHoverRadius: 7,
+          showLine: true,
+          fill: false,
+          _concLabels: concLabels
+        });
+      }
+      if (datasets.length === 0) return;
+
+      const card = document.createElement('div');
+      card.className = 'chart-card';
+      card.innerHTML = '<h3>' + title + '</h3>';
+      const canvas = document.createElement('canvas');
+      card.appendChild(canvas);
+      container.appendChild(card);
+
+      new Chart(canvas, {
+        type: 'scatter',
+        data: { datasets },
+        options: {
+          responsive: true,
+          legend: { labels: { fontColor: '#c9d1d9', fontSize: 11, boxWidth: 12 } },
+          scales: {
+            xAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: xLabel, fontColor: '#8b949e' }, ticks: { fontColor: '#8b949e' } }],
+            yAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: yLabel, fontColor: '#8b949e' }, ticks: { fontColor: '#8b949e' } }]
+          },
+          tooltips: {
+            backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1,
+            titleFontColor: '#f0f6fc', bodyFontColor: '#c9d1d9',
+            callbacks: {
+              title: (items) => {
+                const ds = datasets[items[0].datasetIndex];
+                return ds.label;
+              },
+              label: (item) => {
+                const ds = datasets[item.datasetIndex];
+                const conc = ds._concLabels[item.index] || '?';
+                return ` c=${conc}: ${xLabel}=${item.xLabel}, ${yLabel}=${item.yLabel}`;
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // Interactive (tok/s/user) = 1000 / TPOT(ms)
+    // Build derived metric and plot
+    function makeInteractiveVsThroughput() {
+      const datasets = [];
+      for (const [modelConfig, concMap] of Object.entries(configs)) {
+        const points = [];
+        const concLabels = [];
+        for (const [conc, metrics] of Object.entries(concMap).sort((a,b) => +a[0] - +b[0])) {
+          const totalTput = metrics['Total Tput'];
+          const tpot = metrics['TPOT'];
+          const gpuCount = metrics['_gpu_count'] || 8;
+          if (totalTput && tpot && tpot > 0) {
+            points.push({ x: 1000 / tpot, y: totalTput / gpuCount });
+            concLabels.push(conc);
+          }
+        }
+        if (points.length === 0) continue;
+        const color = getColor(modelConfig);
+        datasets.push({
+          label: modelConfig,
+          data: points,
+          borderColor: color,
+          backgroundColor: getColorAlpha(modelConfig, 0.25),
+          borderWidth: 2,
+          pointRadius: 6,
+          pointHoverRadius: 8,
+          showLine: true,
+          fill: false,
+          _concLabels: concLabels
+        });
+      }
+      if (datasets.length === 0) return;
+
+      const card = document.createElement('div');
+      card.className = 'chart-card hero';
+      card.innerHTML = '<h3>Interactive Performance vs Token Throughput</h3>';
+      const canvas = document.createElement('canvas');
+      card.appendChild(canvas);
+      container.appendChild(card);
+
+      new Chart(canvas, {
+        type: 'scatter',
+        data: { datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          legend: { labels: { fontColor: '#c9d1d9', fontSize: 12, boxWidth: 12 } },
+          scales: {
+            xAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: 'Interactive (tok/s/user)', fontColor: '#c9d1d9', fontSize: 13 }, ticks: { fontColor: '#8b949e' } }],
+            yAxes: [{ gridLines: { color: '#21262d' }, scaleLabel: { display: true, labelString: 'Token Throughput (tok/s/gpu)', fontColor: '#c9d1d9', fontSize: 13 }, ticks: { fontColor: '#8b949e' } }]
+          },
+          tooltips: {
+            backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1,
+            titleFontColor: '#f0f6fc', bodyFontColor: '#c9d1d9',
+            callbacks: {
+              title: (items) => datasets[items[0].datasetIndex].label,
+              label: (item) => {
+                const ds = datasets[item.datasetIndex];
+                const conc = ds._concLabels[item.index] || '?';
+                return ` c=${conc}: ${(+item.xLabel).toFixed(1)} tok/s/user, ${(+item.yLabel).toFixed(0)} tok/s/gpu`;
+              }
+            }
+          }
+        }
+      });
+    }
+
+    makeInteractiveVsThroughput();
+  })();
+
+  // --- Historical tab: all metrics, grouped by model ---
+  const histContainer = document.getElementById('historical-charts');
+  for (const [key, seriesAll] of Object.entries(groups)) {
+    const [metric, unit] = key.split('|');
+    if (metric === '_gpu_count') continue;
+    const metricTitle = { throughput: 'Output Throughput', 'Total Tput': 'Total Throughput', TPOT: 'Time Per Output Token', TTFT: 'Time To First Token', ITL: 'Inter-Token Latency', E2EL: 'End-to-End Latency' }[metric] || metric;
+    const byModel = groupByModel(seriesAll);
+    for (const [model, series] of Object.entries(byModel)) {
+      makeChart(histContainer, model + ' — ' + metricTitle, series, unit);
+    }
+  }
+})();
+</script>
+</body>
+</html>
