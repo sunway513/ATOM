@@ -14,6 +14,10 @@ on:
         description: "Benchmark DeepSeek-R1-0528"
         type: boolean
         default: true
+      glm-5-fp8:
+        description: "Benchmark GLM-5-FP8"
+        type: boolean
+        default: true
       gpt-oss-120b:
         description: "Benchmark gpt-oss-120b"
         type: boolean
@@ -25,6 +29,10 @@ on:
         description: "Image to use for the benchmark"
         type: string
         default: "rocm/atom-dev:latest"
+      enable_profiler:
+        description: "Enable torch profiler to collect trace for performance debugging"
+        type: boolean
+        default: false
       param_lists:
         description: |
           "Benchmark parameter lists. 
@@ -75,289 +83,628 @@ jobs:
         run: |
           echo "Matrix JSON: ${{ steps.parse-param-lists.outputs.matrix_json }}"
 
-  deepseek-r1-0528-benchmark:
-    if: ${{ github.event_name == 'schedule' || inputs.deepseek-r1-0528 }}
-    name: DeepSeek-R1-0528 Benchmark (input=${{ matrix.config.input_length }}, output=${{ matrix.config.output_length }}, conc=${{ matrix.config.concurrency }}, ratio=${{ matrix.config.random_range_ratio }})
+  benchmark:
+    name: ${{ matrix.model.display }} (isl=${{ matrix.config.input_length }} osl=${{ matrix.config.output_length }} c=${{ matrix.config.concurrency }})
     needs: [parse-param-lists]
+    if: always() && needs.parse-param-lists.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         config: ${{ fromJson(needs.parse-param-lists.outputs.matrix_json) }}
-    
+        model:
+          - display: "DeepSeek-R1-0528"
+            path: "deepseek-ai/DeepSeek-R1-0528"
+            prefix: "deepseek-r1-0528"
+            args: "--kv_cache_dtype fp8 -tp 8"
+            bench_args: ""
+            suffix: ""
+            runner: "atom-mi355-8gpu.predownload"
+            env_vars: ""
+          - display: "DeepSeek-R1-0528 MTP3"
+            path: "deepseek-ai/DeepSeek-R1-0528"
+            prefix: "deepseek-r1-0528"
+            args: "--kv_cache_dtype fp8 -tp 8 --method mtp --num-speculative-tokens 3"
+            bench_args: "--use-chat-template"
+            suffix: "-mtp3"
+            runner: "atom-mi355-8gpu.predownload"
+            env_vars: ""
+          - display: "GLM-5-FP8"
+            path: "zai-org/GLM-5-FP8"
+            prefix: "glm-5-fp8"
+            args: "--kv_cache_dtype fp8 -tp 8"
+            bench_args: ""
+            suffix: ""
+            runner: "atom-mi355-8gpu.predownload"
+            env_vars: ""
+          - display: "gpt-oss-120b"
+            path: "openai/gpt-oss-120b"
+            prefix: "gpt-oss-120b"
+            args: "--kv_cache_dtype fp8"
+            bench_args: ""
+            suffix: ""
+            runner: "atom-mi355-8gpu.predownload"
+            env_vars: ""
+        exclude:
+          # Skip low-concurrency MTP runs to limit CI time
+          - model: { suffix: "-mtp3" }
+            config: { concurrency: 1 }
+          - model: { suffix: "-mtp3" }
+            config: { concurrency: 2 }
+
+    runs-on: ${{ matrix.model.runner }}
+
     env:
-      MODEL_PATH: "deepseek-ai/DeepSeek-R1-0528"
-      ARGS: "--kv_cache_dtype fp8 -tp 8"
+      MODEL_PATH: ${{ matrix.model.path }}
+      ARGS: ${{ matrix.model.args }}
       ISL: ${{ matrix.config.input_length }}
       OSL: ${{ matrix.config.output_length }}
       CONC: ${{ matrix.config.concurrency }}
       RANDOM_RANGE_RATIO: ${{ matrix.config.random_range_ratio }}
-      RESULT_FILENAME: deepseek-r1-0528-${{ matrix.config.input_length }}-${{ matrix.config.output_length }}-${{ matrix.config.concurrency }}-${{ matrix.config.random_range_ratio }}
+      RESULT_FILENAME: ${{ matrix.model.prefix }}${{ matrix.model.suffix }}-${{ matrix.config.input_length }}-${{ matrix.config.output_length }}-${{ matrix.config.concurrency }}-${{ matrix.config.random_range_ratio }}
 
-    runs-on: atom-mi355-8gpu.predownload
     steps:
+      - name: Check if model is enabled
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            # Map model prefix to workflow input
+            case "${{ matrix.model.prefix }}" in
+              deepseek-r1-0528) echo "enabled=${{ inputs.deepseek-r1-0528 || 'true' }}" >> $GITHUB_OUTPUT ;;
+              glm-5-fp8) echo "enabled=${{ inputs.glm-5-fp8 || 'true' }}" >> $GITHUB_OUTPUT ;;
+              gpt-oss-120b) echo "enabled=${{ inputs.gpt-oss-120b || 'true' }}" >> $GITHUB_OUTPUT ;;
+              *) echo "enabled=true" >> $GITHUB_OUTPUT ;;
+            esac
+          fi
+
       - name: Kill all Docker containers
+        if: steps.check.outputs.enabled == 'true'
         run: |
           echo "=== Cleaning up containers on $(hostname) ==="
           containers=$(docker ps -q)
           if [ -n "$containers" ]; then
             docker kill $containers || true
           fi
-          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "ls -la /workspace/ && rm -rf /workspace/*" || true
+          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "ls -la /workspace/ && find /workspace -mindepth 1 -delete" || true
 
-      - name: Show Docker containers
-        run: docker ps -a
-
-      - name: Show ROCm memory usage
-        run: rocm-smi --showmemuse
-
-      - name: Show ROCm GPU processes
-        run: rocm-smi --showpidgpus
+      - name: Show ROCm status
+        if: steps.check.outputs.enabled == 'true'
+        run: docker ps -a && rocm-smi --showmemuse && rocm-smi --showpidgpus
 
       - name: Checkout ATOM repo
-        uses: actions/checkout@v4
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@v6
 
       - name: Start CI container
+        if: steps.check.outputs.enabled == 'true'
         run: |
-          echo "Clean up containers..."
           docker ps -aq -f name=atom-benchmark | xargs -r docker stop | xargs -r docker rm
+          DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo "--device /dev/dri")
+          MODEL_MOUNT=""
+          [ -d "/models" ] && MODEL_MOUNT="-v /models:/models"
 
-          if [ -f "/etc/podinfo/gha-render-devices" ]; then
-            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
-          else
-            DEVICE_FLAG="--device /dev/dri"
-          fi
-
-          if [ -d "/models" ]; then
-            MODEL_MOUNT="-v /models:/models"
-          else
-            echo "Warning: /models directory not found on runner; skipping /models mount and disabling model pre-download optimization."
-            MODEL_MOUNT=""
+          # Build env var flags from model config
+          ENV_FLAGS=""
+          if [ -n "${{ matrix.model.env_vars }}" ]; then
+            for ev in ${{ matrix.model.env_vars }}; do
+              ENV_FLAGS="$ENV_FLAGS -e $ev"
+            done
           fi
 
           docker run -dt --device=/dev/kfd $DEVICE_FLAG \
-          -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
-          $MODEL_MOUNT \
-          -w /workspace \
-          --ipc=host --group-add video \
-          --shm-size=16G \
-          --privileged \
-          --cap-add=SYS_PTRACE \
-          -e HF_TOKEN="${HF_TOKEN:-}" \
-          --security-opt seccomp=unconfined \
-          --ulimit memlock=-1 \
-          --ulimit stack=67108864 \
-          -e ISL=${{ env.ISL }} \
-          -e OSL=${{ env.OSL }} \
-          -e CONC=${{ env.CONC }} \
-          -e RANDOM_RANGE_RATIO=${{ env.RANDOM_RANGE_RATIO }} \
-          -v "${{ github.workspace }}:/workspace" \
-          -w /workspace \
-          --name atom-benchmark \
-          ${{ inputs.image || 'rocm/atom-dev:latest' }}
-
+            -v "${GITHUB_WORKSPACE:-$PWD}":/workspace $MODEL_MOUNT \
+            -w /workspace --ipc=host --group-add video \
+            --shm-size=16G --privileged --cap-add=SYS_PTRACE \
+            -e HF_TOKEN="${HF_TOKEN:-}" \
+            --security-opt seccomp=unconfined \
+            --ulimit memlock=-1 --ulimit stack=67108864 --pull always \
+            -e ATOM_DISABLE_MMAP=true \
+            -e ISL=${{ env.ISL }} -e OSL=${{ env.OSL }} \
+            -e CONC=${{ env.CONC }} -e RANDOM_RANGE_RATIO=${{ env.RANDOM_RANGE_RATIO }} \
+            -e ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} \
+            $ENV_FLAGS \
+            --name atom-benchmark \
+            ${{ inputs.image || 'rocm/atom-dev:latest' }}
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
       - name: Download models
+        if: steps.check.outputs.enabled == 'true'
         run: |
           if [ -d "/models" ]; then
-            echo "/models directory found, downloading model to /models/${{ env.MODEL_PATH }}"
-            if ! docker exec -e HF_TOKEN=${{ secrets.AMD_HF_TOKEN }} atom-benchmark bash -lc "hf download ${{ env.MODEL_PATH }} --local-dir /models/${{ env.MODEL_PATH }}"; then
-              echo "Model download failed for '${{ env.MODEL_PATH }}'. Aborting."
-              exit 1
-            fi
-          else
-            echo "/models directory not found, skipping model download"
+            docker exec -e HF_TOKEN=${{ secrets.AMD_HF_TOKEN }} atom-benchmark bash -lc \
+              "hf download ${{ env.MODEL_PATH }} --local-dir /models/${{ env.MODEL_PATH }}" || exit 1
           fi
 
       - name: Run benchmark
+        if: steps.check.outputs.enabled == 'true'
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          echo ""
-          echo "========== Launching ATOM server =========="
-          if [ -d "/models" ]; then
-            model_path="/models/${{ env.MODEL_PATH }}"
-          else
-            model_path="${{ env.MODEL_PATH }}"
-          fi
-          # Run launch and benchmark in a single exec so the server process is not killed when the first shell exits
-          docker exec atom-benchmark bash -lc "
-            .github/scripts/atom_test.sh launch $model_path ${{ env.ARGS }} ${{ inputs.extra_args || '' }}
-            echo '========== Running benchmark test =========='
-            RESULT_FILENAME=${{ env.RESULT_FILENAME }} .github/scripts/atom_test.sh benchmark $model_path
-            ls -all .
+          if [ -d "/models" ]; then model_path="/models/${{ env.MODEL_PATH }}"
+          else model_path="${{ env.MODEL_PATH }}"; fi
+
+          docker exec atom-benchmark bash -lc "set -euo pipefail
+            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} \
+              .github/scripts/atom_test.sh launch $model_path ${{ env.ARGS }} ${{ inputs.extra_args || '' }}
+            echo '========== Running benchmark =========='
+            ENABLE_TORCH_PROFILER=${{ inputs.enable_profiler && '1' || '0' }} \
+              RESULT_FILENAME=${{ env.RESULT_FILENAME }} \
+              SERVER_ARGS='${{ env.ARGS }}' \
+              BENCH_EXTRA_ARGS='${{ matrix.model.bench_args }}' \
+              .github/scripts/atom_test.sh benchmark $model_path
           "
 
+      - name: Copy profiler traces
+        if: steps.check.outputs.enabled == 'true' && inputs.enable_profiler
+        run: docker cp atom-benchmark:/app/trace ./profiler-traces 2>/dev/null || true
+
+      - name: Upload profiler traces
+        if: steps.check.outputs.enabled == 'true' && inputs.enable_profiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: profiler-traces-${{ env.RESULT_FILENAME }}
+          path: profiler-traces/
+
       - name: Upload benchmark result
-        uses: actions/upload-artifact@v4
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.RESULT_FILENAME }}
           path: ${{ env.RESULT_FILENAME }}.json
 
       - name: Clean Up
-        if: always()
+        if: always() && steps.check.outputs.enabled == 'true'
         run: |
-          # TODO: run a separate container for cleanup of the workspace due to permission issue to remove some pyc files under __pycache__ whose owners are root.
-          # We should use non-root user to run the test to avoid this issue.
-          set -x
-          echo "========== Cleaning up workspace =========="
-          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged ${{ inputs.image || 'rocm/atom-dev:latest' }} bash -lc "rm -rf /workspace/atom/ /workspace/aiter/ /workspace/bench_serving/" || true
-          docker stop atom-benchmark || true
-          docker rm atom-benchmark || true
-
-  gpt-oss-120b-benchmark:
-    if: ${{ github.event_name == 'schedule' || inputs.gpt-oss-120b }}
-    name: GPT-OSS-120b Benchmark (input=${{ matrix.config.input_length }}, output=${{ matrix.config.output_length }}, conc=${{ matrix.config.concurrency }}, ratio=${{ matrix.config.random_range_ratio }})
-    needs: [parse-param-lists]
-    strategy:
-      fail-fast: false
-      matrix:
-        config: ${{ fromJson(needs.parse-param-lists.outputs.matrix_json) }}
-    
-    env:
-      MODEL_PATH: "openai/gpt-oss-120b"
-      ARGS: "--kv_cache_dtype fp8"
-      ISL: ${{ matrix.config.input_length }}
-      OSL: ${{ matrix.config.output_length }}
-      CONC: ${{ matrix.config.concurrency }}
-      RANDOM_RANGE_RATIO: ${{ matrix.config.random_range_ratio }}
-      RESULT_FILENAME: gpt-oss-120b-${{ matrix.config.input_length }}-${{ matrix.config.output_length }}-${{ matrix.config.concurrency }}-${{ matrix.config.random_range_ratio }}
-
-    runs-on: atom-mi355-8gpu.predownload
-    steps:
-      - name: Kill all Docker containers
-        run: |
-          echo "=== Cleaning up containers on $(hostname) ==="
-          containers=$(docker ps -q)
-          if [ -n "$containers" ]; then
-            docker kill $containers || true
-          fi
-          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "ls -la /workspace/ && rm -rf /workspace/*" || true
-
-      - name: Show Docker containers
-        run: docker ps -a
-
-      - name: Show ROCm memory usage
-        run: rocm-smi --showmemuse
-
-      - name: Show ROCm GPU processes
-        run: rocm-smi --showpidgpus
-
-      - name: Checkout ATOM repo
-        uses: actions/checkout@v4
-
-      - name: Start CI container
-        run: |
-          echo "Clean up containers..."
-          docker ps -aq -f name=atom-benchmark | xargs -r docker stop | xargs -r docker rm
-
-          if [ -f "/etc/podinfo/gha-render-devices" ]; then
-            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
-          else
-            DEVICE_FLAG="--device /dev/dri"
-          fi
-
-          if [ -d "/models" ]; then
-            MODEL_MOUNT="-v /models:/models"
-          else
-            echo "Warning: /models directory not found on runner; skipping /models mount and disabling model pre-download optimization."
-            MODEL_MOUNT=""
-          fi
-
-          docker run -dt --device=/dev/kfd $DEVICE_FLAG \
-          -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
-          $MODEL_MOUNT \
-          -w /workspace \
-          --ipc=host --group-add video \
-          --shm-size=16G \
-          --privileged \
-          --cap-add=SYS_PTRACE \
-          -e HF_TOKEN="${HF_TOKEN:-}" \
-          --security-opt seccomp=unconfined \
-          --ulimit memlock=-1 \
-          --ulimit stack=67108864 \
-          -e ISL=${{ env.ISL }} \
-          -e OSL=${{ env.OSL }} \
-          -e CONC=${{ env.CONC }} \
-          -e RANDOM_RANGE_RATIO=${{ env.RANDOM_RANGE_RATIO }} \
-          -e ATOM_GPT_OSS_MODEL=1 \
-          -v "${{ github.workspace }}:/workspace" \
-          -w /workspace \
-          --name atom-benchmark \
-          ${{ inputs.image || 'rocm/atom-dev:latest' }}
-
-        env:
-          GITHUB_WORKSPACE: ${{ github.workspace }}
-
-      - name: Download models
-        run: |
-          if [ -d "/models" ]; then
-            echo "/models directory found, downloading model to /models/${{ env.MODEL_PATH }}"
-            if ! docker exec -e HF_TOKEN=${{ secrets.AMD_HF_TOKEN }} atom-benchmark bash -lc "hf download ${{ env.MODEL_PATH }} --local-dir /models/${{ env.MODEL_PATH }}"; then
-              echo "Model download failed for '${{ env.MODEL_PATH }}'. Aborting."
-              exit 1
-            fi
-          else
-            echo "/models directory not found, skipping model download"
-          fi
-
-      - name: Run benchmark
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          echo ""
-          echo "========== Launching ATOM server =========="
-          if [ -d "/models" ]; then
-            model_path="/models/${{ env.MODEL_PATH }}"
-          else
-            model_path="${{ env.MODEL_PATH }}"
-          fi
-          # Run launch and benchmark in a single exec so the server process is not killed when the first shell exits
-          docker exec atom-benchmark bash -lc "
-            .github/scripts/atom_test.sh launch $model_path ${{ env.ARGS }} ${{ inputs.extra_args || '' }}
-            echo '========== Running benchmark test =========='
-            RESULT_FILENAME=${{ env.RESULT_FILENAME }} .github/scripts/atom_test.sh benchmark $model_path
-            ls -all .
-          "
-      
-      - name: Upload benchmark result
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.RESULT_FILENAME }}
-          path: ${{ env.RESULT_FILENAME }}.json
-
-      - name: Clean Up
-        if: always()
-        run: |
-          # TODO: run a separate container for cleanup of the workspace due to permission issue to remove some pyc files under __pycache__ whose owners are root.
-          # We should use non-root user to run the test to avoid this issue.
-          set -x
-          echo "========== Cleaning up workspace =========="
-          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged ${{ inputs.image || 'rocm/atom-dev:latest' }} bash -lc "rm -rf /workspace/atom/ /workspace/aiter/ /workspace/bench_serving/" || true
+          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged \
+            ${{ inputs.image || 'rocm/atom-dev:latest' }} bash -lc "rm -rf /workspace/atom/ /workspace/aiter/ /workspace/bench_serving/" || true
           docker stop atom-benchmark || true
           docker rm atom-benchmark || true
 
   summarize-benchmark-result:
     if: always()
     name: Summarize benchmark result
-    needs: [deepseek-r1-0528-benchmark, gpt-oss-120b-benchmark]
+    needs: [benchmark]
     runs-on: ubuntu-latest
+    outputs:
+      has_regression: ${{ steps.check-regression.outputs.has_regression }}
     steps:
       - name: Checkout ATOM repo
-        uses: actions/checkout@v4
-        
+        uses: actions/checkout@v6
+
       - name: Download all benchmark results
-        uses: actions/download-artifact@v4
-        with: 
+        uses: actions/download-artifact@v8
+        with:
           pattern: '*'
           merge-multiple: true
           path: .
-      
+
+      - name: Download baseline from previous nightly run
+        id: baseline
+        run: |
+          PREV_RUN_ID=$(gh run list \
+            --workflow="ATOM Benchmark" \
+            --branch=main \
+            --event=schedule \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')
+
+          if [ -n "$PREV_RUN_ID" ] && [ "$PREV_RUN_ID" != "${{ github.run_id }}" ]; then
+            echo "Downloading baseline from run #$PREV_RUN_ID"
+            mkdir -p /tmp/baseline
+            gh run download "$PREV_RUN_ID" --dir /tmp/baseline || echo "::warning::Failed to download baseline artifacts"
+            BASELINE_COUNT=$(find /tmp/baseline -name '*.json' | wc -l)
+            echo "Downloaded $BASELINE_COUNT baseline files"
+            echo "baseline_dir=/tmp/baseline" >> $GITHUB_OUTPUT
+          else
+            echo "No previous successful nightly run found"
+            echo "baseline_dir=" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: List all benchmark results
         run: |
-          ls -all .
-      
+          echo "=== Current results ==="
+          ls -la *.json 2>/dev/null || echo "No JSON files in current dir"
+          if [ -d "/tmp/baseline" ]; then
+            echo "=== Baseline results ==="
+            find /tmp/baseline -name '*.json' | head -20
+          fi
+
       - name: Summarize benchmark result
+        id: check-regression
         run: |
-          .github/scripts/summarize.py . >> $GITHUB_STEP_SUMMARY
+          BASELINE_ARG=""
+          if [ -n "${{ steps.baseline.outputs.baseline_dir }}" ]; then
+            BASELINE_ARG="--baseline-dir ${{ steps.baseline.outputs.baseline_dir }}"
+          fi
+          .github/scripts/summarize.py . $BASELINE_ARG \
+            --output-json regression_report.json \
+            >> $GITHUB_STEP_SUMMARY || true
+
+          # Check if regression was detected (exit code 2)
+          if [ -f regression_report.json ]; then
+            REG_COUNT=$(python3 -c "import json; print(json.load(open('regression_report.json'))['regression_count'])")
+            if [ "$REG_COUNT" -gt 0 ]; then
+              echo "has_regression=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_regression=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_regression=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload regression report
+        if: steps.check-regression.outputs.has_regression == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-report
+          path: regression_report.json
+
+      - name: Transform results for benchmark dashboard
+        run: |
+          python3 -c "
+          import json, glob, re
+          run_url = f'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          entries = []
+          for f in sorted(glob.glob('*.json')):
+              if f == 'regression_report.json':
+                  continue
+              try:
+                  d = json.load(open(f))
+              except (json.JSONDecodeError, OSError):
+                  continue
+              if 'output_throughput' not in d:
+                  continue
+              model = d.get('model_id', '').split('/')[-1]
+              m = re.search(r'-(mtp\d*)-', f)
+              if m:
+                  model = f'{model}-{m.group(1)}'
+              isl = d.get('random_input_len', 0)
+              osl = d.get('random_output_len', 0)
+              conc = d.get('max_concurrency', 0)
+              label = f'{model} {isl}/{osl} c={conc}'
+              extra = f'Run: {run_url}'
+              entries.append({'name': f'{label} throughput (tok/s)', 'unit': 'tok/s',
+                              'value': round(d['output_throughput'], 2), 'extra': extra})
+              entries.append({'name': f'{label} Total Tput (tok/s)', 'unit': 'tok/s',
+                              'value': round(d.get('total_token_throughput', 0), 2), 'extra': extra})
+              entries.append({'name': f'{label} TTFT (ms)', 'unit': 'ms',
+                              'value': round(d.get('mean_ttft_ms', 0), 2), 'extra': extra})
+              entries.append({'name': f'{label} TPOT (ms)', 'unit': 'ms',
+                              'value': round(d.get('mean_tpot_ms', 0), 2), 'extra': extra})
+              tp = d.get('tensor_parallel_size', 1)
+              entries.append({'name': f'{label} _gpu_count', 'unit': '',
+                              'value': int(tp)})
+          json.dump(entries, open('benchmark-action-input.json', 'w'), indent=2)
+          print(f'Generated {len(entries)} entries for benchmark dashboard')
+          "
+
+      - name: Store benchmark result to dashboard
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: customBiggerIsBetter
+          output-file-path: benchmark-action-input.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: benchmark-dashboard
+          auto-push: false
+          alert-threshold: "80%"
+          comment-on-alert: true
+          fail-on-alert: false
+          max-items-in-chart: 90
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy custom dashboard to gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          CURRENT_SHA=$(git rev-parse HEAD)
+          # Save dashboard template before switching branches
+          cp .github/dashboard/index.html /tmp/dashboard_index.html
+          git fetch origin gh-pages
+          git checkout gh-pages
+          # Replace auto-generated index.html with custom dashboard
+          cp /tmp/dashboard_index.html benchmark-dashboard/index.html
+          git add benchmark-dashboard/
+          git diff --cached --quiet || git commit -m "Update benchmark data and dashboard"
+          git push origin gh-pages
+          git checkout "$CURRENT_SHA"
+
+  regression-analysis:
+    if: always() && needs.summarize-benchmark-result.outputs.has_regression == 'true'
+    name: Regression Analysis (profiler trace collection)
+    needs: [summarize-benchmark-result]
+    runs-on: atom-mi355-8gpu.predownload
+    steps:
+      - name: Kill all Docker containers
+        run: |
+          echo "=== Cleaning up containers on $(hostname) ==="
+          containers=$(docker ps -q)
+          if [ -n "$containers" ]; then
+            docker kill $containers || true
+          fi
+          docker run --rm -v "${GITHUB_WORKSPACE:-$PWD}":/workspace -w /workspace --privileged rocm/pytorch:latest bash -lc "find /workspace -mindepth 1 -delete" || true
+
+      - name: Checkout ATOM repo
+        uses: actions/checkout@v6
+
+      - name: Download regression report
+        uses: actions/download-artifact@v8
+        with:
+          name: regression-report
+
+      - name: Docker Login
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+
+      - name: Start CI container
+        run: |
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+          MODEL_MOUNT=""
+          if [ -d "/models" ]; then
+            MODEL_MOUNT="-v /models:/models"
+          fi
+          docker run -dt --device=/dev/kfd $DEVICE_FLAG \
+            -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
+            $MODEL_MOUNT \
+            -w /workspace \
+            --ipc=host --group-add video \
+            --shm-size=16G --privileged \
+            --cap-add=SYS_PTRACE \
+            -e HF_TOKEN="${HF_TOKEN:-}" \
+            --security-opt seccomp=unconfined \
+            --ulimit memlock=-1 --ulimit stack=67108864 \
+            -e ATOM_DISABLE_MMAP=true \
+            --name atom-regression \
+            rocm/atom-dev:latest
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Download models for regressed configs
+        run: |
+          # Extract unique model HF paths from regression report
+          python3 -c "
+          import json, re
+          report = json.load(open('regression_report.json'))
+          # Model display names like 'DeepSeek-R1-0528' or 'DeepSeek-R1-0528-mtp3'
+          # Map back to HF paths (strip variant suffix)
+          models = set()
+          for r in report.get('regressions', []):
+              name = re.sub(r'-mtp\d*$', '', r.get('model', ''))
+              models.add(name)
+          for m in models:
+              print(m)
+          " | while read MODEL_NAME; do
+            echo "Downloading $MODEL_NAME..."
+            if [ -d "/models" ]; then
+              # Try common HF orgs
+              for org in deepseek-ai openai zai-org amd; do
+                docker exec -e HF_TOKEN=${{ secrets.AMD_HF_TOKEN }} atom-regression bash -lc \
+                  "hf download ${org}/${MODEL_NAME} --local-dir /models/${org}/${MODEL_NAME}" 2>/dev/null && break || true
+              done
+            fi
+          done
+
+      - name: Re-run regressed configs with profiler
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+
+          # Pick the top 3 most regressed configs, grouped by variant (server args differ)
+          python3 -c "
+          import json, sys
+          report = json.load(open('regression_report.json'))
+          regressions = report.get('regressions', [])
+          if not regressions:
+              print('No regressions to analyze')
+              sys.exit(0)
+          regressions.sort(key=lambda r: min(
+              r['metrics'].get('output_throughput', {}).get('pct', 0),
+              -r['metrics'].get('mean_tpot_ms', {}).get('pct', 0)
+          ))
+          for r in regressions[:3]:
+              is_mtp = 'mtp' in r.get('model', '').lower()
+              print(f\"Regressed: {r['model']} {r['isl']}/{r['osl']} c={r['conc']} mtp={is_mtp}\")
+          json.dump(regressions[:3], open('regressed_configs.json', 'w'))
+          "
+
+          # Group regressed configs by model+variant and profile each group
+          python3 << 'PYEOF'
+          import json, re
+          configs = json.load(open('regressed_configs.json'))
+          # Group by base model name (strip mtp suffix) + mtp flag
+          groups = {}
+          for c in configs:
+              model = c.get('model', '')
+              is_mtp = 'mtp' in model.lower()
+              base_model = re.sub(r'-mtp\d*$', '', model)
+              key = f"{base_model}|{'mtp' if is_mtp else 'base'}"
+              if key not in groups:
+                  groups[key] = {
+                      "base_model": base_model,
+                      "server_args": "--method mtp --num-speculative-tokens 3" if is_mtp else "",
+                      "bench_args": "--use-chat-template" if is_mtp else "",
+                      "configs": []
+                  }
+              groups[key]["configs"].append(c)
+          result = list(groups.values())
+          json.dump(result, open('regression_groups.json', 'w'))
+          print(f"Groups: {len(result)}")
+          for g in result:
+              print(f"  {g['base_model']} ({len(g['configs'])} configs, server_args: {g['server_args'] or 'default'})")
+          PYEOF
+
+          # For each group: find model path, launch server, profile, stop
+          python3 -c "
+          import json
+          for g in json.load(open('regression_groups.json')):
+              bm = g['base_model']
+              sa = g['server_args']
+              ba = g['bench_args']
+              configs = ' '.join(f\"{c['isl']},{c['osl']},{c['conc']}\" for c in g['configs'])
+              print(f\"{bm}|{sa}|{ba}|{configs}\")
+          " | while IFS='|' read BASE_MODEL SERVER_ARGS BENCH_ARGS CONFIG_LIST; do
+            echo "========== Model: $BASE_MODEL  Server args: ${SERVER_ARGS:-default} =========="
+            # Find model path on runner
+            if [ -d "/models" ]; then
+              MODEL_PATH=$(find /models -maxdepth 2 -type d -name "$BASE_MODEL" | head -1)
+              [ -z "$MODEL_PATH" ] && MODEL_PATH="$BASE_MODEL"
+            else
+              MODEL_PATH="$BASE_MODEL"
+            fi
+            ARGS="--kv_cache_dtype fp8 -tp 8 --torch-profiler-dir /app/trace --mark-trace ${SERVER_ARGS}"
+            docker exec atom-regression bash -lc "set -euo pipefail
+              pkill -f 'atom.entrypoints' || true; sleep 3
+              .github/scripts/atom_test.sh launch $MODEL_PATH $ARGS
+            "
+
+            for cfg in $CONFIG_LIST; do
+              IFS=',' read ISL OSL CONC <<< "$cfg"
+              echo "========== Profiling ISL=$ISL OSL=$OSL CONC=$CONC =========="
+              NUM_PROMPTS=$((CONC * 2))
+              docker exec atom-regression bash -lc "
+                python -m atom.benchmarks.benchmark_serving \
+                  --model=$MODEL_PATH --backend=vllm --base-url=http://localhost:8000 \
+                  --dataset-name=random \
+                  --random-input-len=$ISL --random-output-len=$OSL \
+                  --random-range-ratio=0.8 \
+                  --max-concurrency=$CONC \
+                  --num-prompts=$NUM_PROMPTS \
+                  --trust-remote-code --num-warmups=1 \
+                  --request-rate=inf --ignore-eos \
+                  --profile $BENCH_ARGS
+              "
+            done
+          done
+
+          # Wait for trace gzip compression to complete
+          echo "Waiting for trace files to finish writing..."
+          for i in $(seq 1 60); do
+            TMP_COUNT=$(docker exec atom-regression bash -lc "find /app/trace -name '*.tmp' 2>/dev/null | wc -l")
+            if [ "$TMP_COUNT" -eq 0 ]; then
+              echo "Trace files ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Stop server
+          docker exec atom-regression bash -lc "pkill -f 'atom.entrypoints' || true; sleep 5"
+
+      - name: Copy profiler traces from container
+        if: always()
+        run: |
+          docker cp atom-regression:/app/trace ./regression-traces 2>/dev/null || echo "No traces found"
+          ls -lhR ./regression-traces/ 2>/dev/null || true
+
+      - name: Analyze traces with parse_trace.py + summary
+        if: always()
+        run: |
+          mkdir -p regression-analysis
+          pip install -q openpyxl 2>/dev/null || true
+          for rank_dir in regression-traces/rank_*/; do
+            rank=$(basename "$rank_dir")
+            RUN_TRACE=$(find "$rank_dir" -name "*.pt.trace.json.gz" ! -name "capture_graph_*" | sort | tail -1)
+            if [ -n "$RUN_TRACE" ]; then
+              echo "=== Analyzing $rank: $RUN_TRACE ==="
+              # Kernel breakdown XLSX
+              cd regression-analysis
+              python ../tools/parse_trace.py "../$RUN_TRACE" --layer 3 2>&1 | tee "${rank}_analysis.log" || true
+              for f in prefill_breakdown.xlsx decode_breakdown.xlsx; do
+                [ -f "$f" ] && mv "$f" "${rank}_${f}"
+              done
+              cd ..
+              # Performance summary report (only rank_0)
+              if [ "$rank" = "rank_0" ]; then
+                python tools/analyze_trace_summary.py "$RUN_TRACE" \
+                  --output regression-analysis/performance_summary.md 2>&1 || true
+                echo "=== Performance Summary ==="
+                cat regression-analysis/performance_summary.md
+              fi
+            fi
+          done
+          ls -la regression-analysis/ 2>/dev/null || true
+
+      - name: Upload regression traces and analysis
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-traces-${{ github.run_id }}
+          path: |
+            regression-traces/
+            regression-analysis/
+
+      - name: Create GitHub Issue with regression report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync('regression_report.json', 'utf8'));
+            } catch (e) {
+              console.log('No regression report found, skipping issue creation');
+              return;
+            }
+            if (!report.regressions || report.regressions.length === 0) return;
+
+            const regs = report.regressions.map(r => {
+              const throughput = r.metrics.output_throughput || {};
+              const tpot = r.metrics.mean_tpot_ms || {};
+              return `| ${r.model} | ${r.isl}/${r.osl} | ${r.conc} | ${throughput.current?.toFixed(1) || 'N/A'} | ${throughput.baseline?.toFixed(1) || 'N/A'} | ${throughput.pct?.toFixed(1) || 'N/A'}% | ${tpot.current?.toFixed(2) || 'N/A'} | ${tpot.baseline?.toFixed(2) || 'N/A'} | ${tpot.pct?.toFixed(1) || 'N/A'}% |`;
+            }).join('\n');
+
+            const body = `## Performance Regression Detected
+
+            **Commit:** \`${context.sha.substring(0, 8)}\`
+            **Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+            **Date:** ${report.timestamp}
+
+            ### Regressed Configurations
+
+            | Model | ISL/OSL | Conc | Tput (cur) | Tput (base) | Δ% | TPOT (cur) | TPOT (base) | Δ% |
+            |-------|---------|------|-----------|------------|-----|-----------|------------|-----|
+            ${regs}
+
+            ### Performance Summary
+
+            \`\`\`
+            ${(() => {
+              try { return require('fs').readFileSync('regression-analysis/performance_summary.md', 'utf8'); }
+              catch(e) { return 'Summary not available'; }
+            })()}
+            \`\`\`
+
+            ### Profiler Traces
+
+            Download from [workflow artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).
+            Open in [Perfetto UI](https://ui.perfetto.dev/) or Chrome \`chrome://tracing\` for analysis.
+
+            ### Next Steps
+            1. Download \`regression-traces-${context.runId}\` artifact
+            2. Open trace files in Perfetto UI
+            3. Compare kernel durations against previous traces
+            4. Identify bottleneck changes
+            `.replace(/^            /gm, '');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Perf Regression] ${report.regressions.length} config(s) regressed @ ${context.sha.substring(0, 8)}`,
+              body: body,
+              labels: ['performance', 'regression']
+            });
+
+      - name: Clean Up
+        if: always()
+        run: |
+          docker stop atom-regression || true
+          docker rm atom-regression || true

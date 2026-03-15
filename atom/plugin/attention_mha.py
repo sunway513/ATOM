@@ -134,9 +134,13 @@ class PagedAttentionImplPluginModeMethods:
                 [self.num_heads, self.num_kv_heads, self.num_kv_heads], dim=1
             )
         elif use_triton_attn and self.rotary_emb is not None:
-            k_scale = v_scale = self.kv_scale
 
-            q, k, k_cache, v_cache = fused_qk_rope_reshape_and_cache(
+            k_scale = v_scale = self.one_scale
+            qkv = qkv.view(qkv.shape[0], -1, self.head_dim)
+            q, k, v = qkv.split(
+                [self.num_heads, self.num_kv_heads, self.num_kv_heads], dim=1
+            )
+            q, k, _k_cache, _v_cache = fused_qk_rope_reshape_and_cache(
                 q,
                 k,
                 v,
@@ -229,24 +233,28 @@ class PagedAttentionImplPluginModeMethods:
         )
 
         per_tensor = False
-        if k_scale is not None:
-            per_tensor = k_scale.numel() == 1
-            if not per_tensor:
-                k_scale = k_scale.unsqueeze(-1)
-                v_scale = v_scale.unsqueeze(-1)
+        if k_scale is not None and k_scale.numel() > 1:
+            k_scale = k_scale.unsqueeze(-1)
+            v_scale = v_scale.unsqueeze(-1)
         compute_type = (
             torch.bfloat16
             if self.kv_cache_dtype == "bf16" or per_tensor
             else aiter.dtypes.fp8
         )
 
+        num_decode_seqs = q.shape[0]
+        seq_lens_decode = attn_metadata.plugin_metadata.seq_lens[:num_decode_seqs]
+        block_tables_decode = attn_metadata.plugin_metadata.block_table[
+            :num_decode_seqs
+        ]
+
         torch.ops.aiter.pa_decode_gluon(
             o,
             q,
             k_cache,
             v_cache,
-            attn_metadata.plugin_metadata.seq_lens,
-            attn_metadata.block_tables,
+            seq_lens_decode,
+            block_tables_decode,
             self.scale,
             1,  # query_lenth
             max_context_partition_num,
@@ -356,13 +364,14 @@ class PagedAttentionImplPluginModeMethods:
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=swa_cu_seqlens,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=swa_max_seqlens,
+            max_seqlen_k=swa_max_seqlens,  # need to confirm
             min_seqlen_q=1,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
             window_size=sliding_window,
             alibi_slopes=self.alibi_slopes,
+            sink_ptr=self.sinks,
             return_lse=False,
             out=output,
         )
@@ -408,11 +417,12 @@ class PagedAttentionImplPluginModeMethods:
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_q,
+            max_seqlen_k=max_seqlen_q,  # need to confirm
             min_seqlen_q=min_seqlen_q,
             dropout_p=0.0,
             softmax_scale=self.scale,
             causal=True,
+            sink_ptr=self.sinks,
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
         )
@@ -460,6 +470,7 @@ class PagedAttentionImplPluginModeMethods:
                 softmax_scale=self.scale,
                 causal=False,
                 window_size=(-1, -1, 0),
+                sink_ptr=self.sinks,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
             )
@@ -557,8 +568,20 @@ class PagedAttentionImplPluginModeMethods:
             # update the layer kv scale tensor
             self.k_scale = self.kv_scale[0]
             self.v_scale = self.kv_scale[1]
+            self.one_scale = torch.ones((1,), dtype=torch.float32, device=self.device)
             layer.k_scale = self.k_scale
             layer.v_scale = self.v_scale
+
+        # as vLLM cuda graph capture padding mechanism, here split the qkvo with
+        # the actual tokens
+        query = query[:num_actual_tokens]
+        qkv = qkv[:num_actual_tokens]
+        position = position[:num_actual_tokens]
+        if key is not None:
+            key = key[:num_actual_tokens]
+        if value is not None:
+            value = value[:num_actual_tokens]
+        output_actual_tokens = output[:num_actual_tokens]
 
         # rope and cache flush fusion. ATOM always use shuffle layout for kv cache
         result = self.rope_cache_plugin_mode(
@@ -575,15 +598,6 @@ class PagedAttentionImplPluginModeMethods:
             flash_layout=False,
         )
         query, key, value, k_cache, v_cache, k_scale, v_scale = result
-
-        # as vLLM cuda graph capture padding mechanism, here split the qkvo with
-        # the actual tokens
-        query = query[:num_actual_tokens]
-        if key is not None:
-            key = key[:num_actual_tokens]
-        if value is not None:
-            value = value[:num_actual_tokens]
-        output_actual_tokens = output[:num_actual_tokens]
 
         num_decodes = attn_metadata.plugin_metadata.num_decodes
         num_prefills = attn_metadata.plugin_metadata.num_prefills
@@ -635,6 +649,12 @@ class PagedAttentionImplPluginModeMethods:
             extend_keys = key[extend_tokens_slice]
             extend_values = value[extend_tokens_slice]
             extend_outputs = output[extend_tokens_slice]
+            extend_block_table = attn_metadata.plugin_metadata.block_table[
+                extend_tokens_slice
+            ]
+            extend_slot_mapping = attn_metadata.plugin_metadata.slot_mapping[
+                extend_tokens_slice
+            ]
             self.extend_forward(
                 attn_metadata=attn_metadata,
                 query=extend_querys,
@@ -647,12 +667,8 @@ class PagedAttentionImplPluginModeMethods:
                 max_seqlen_q=attn_metadata.plugin_metadata.extend_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.plugin_metadata.extend_metadata.max_seq_len,
                 min_seqlen_q=1,
-                block_table=attn_metadata.plugin_metadata.block_table[
-                    num_decodes : num_decodes + num_extends
-                ],
-                slot_mapping=attn_metadata.plugin_metadata.slot_mapping[
-                    num_decodes : num_decodes + num_extends
-                ],
+                block_table=extend_block_table,
+                slot_mapping=extend_slot_mapping,
                 k_scale=k_scale,
                 v_scale=v_scale,
             )

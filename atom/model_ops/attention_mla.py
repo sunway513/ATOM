@@ -5,11 +5,10 @@ import logging
 from dataclasses import dataclass
 from functools import partial as functools_partial
 from typing import Optional
-import triton
-import triton.language as tl
-
 
 import torch
+import triton
+import triton.language as tl
 from aiter import (
     QuantType,
     concat_and_cache_mla,
@@ -24,6 +23,8 @@ from atom.config import get_current_atom_config
 from atom.model_ops.linear import use_triton_gemm
 from atom.model_ops.utils import get_and_maybe_dequant_weights
 from atom.utils import envs
+from atom.utils.decorators import mark_trace
+
 from atom.utils.forward_context import (
     AttentionMetaData,
     ForwardContext,
@@ -35,9 +36,25 @@ from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched
     batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as _aiter_triton_fp8_bmm,
 )
 
+
+from atom.plugin import is_plugin_mode
+
+from atom.plugin.attention_mla import MLAAttentionImplDecoratorForPluginMode
+
+concat_and_cache_mla = mark_trace(
+    concat_and_cache_mla, prefix="kv_cache", torch_compile=False
+)
+fused_qk_rope_concat_and_cache_mla = mark_trace(
+    fused_qk_rope_concat_and_cache_mla, prefix="rope_and_kv_cache", torch_compile=False
+)
+mla_prefill_fwd = mark_trace(mla_prefill_fwd, prefix="mla_prefill", torch_compile=False)
+mla_decode_fwd = mark_trace(mla_decode_fwd, prefix="mla_decode", torch_compile=False)
+
 # torch.set_printoptions(threshold=10_000)
 
 logger = logging.getLogger("atom")
+
+_MLA_MIN_HEADS = 16  # AITER MLA kernels require at least 16 attention heads
 
 if use_triton_gemm():
     try:
@@ -92,6 +109,7 @@ def dynamic_per_batched_tensor_quant(
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
+@MLAAttentionImplDecoratorForPluginMode
 class MLAAttention(nn.Module):
     def __init__(
         self,
@@ -112,6 +130,18 @@ class MLAAttention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype if kv_cache_dtype == "fp8" else "auto"
         self.dtype = dtype
+
+        self.padded_num_heads = max(num_heads, _MLA_MIN_HEADS)
+        self.head_repeat_factor = self.padded_num_heads // num_heads
+        if self.head_repeat_factor > 1:
+            assert self.padded_num_heads % num_heads == 0, (
+                f"Padded head count ({self.padded_num_heads}) must be divisible "
+                f"by num_heads ({num_heads}) for head repeat"
+            )
+            logger.info(
+                f"MLA head repeat enabled: {num_heads} -> {self.padded_num_heads} "
+                f"(repeat factor {self.head_repeat_factor})"
+            )
 
         self.q_lora_rank = mla_modules.q_lora_rank
         self.kv_lora_rank = mla_modules.kv_lora_rank
@@ -146,7 +176,7 @@ class MLAAttention(nn.Module):
             self.W_K_scale = self.W_K_scale.transpose(-2, -1).contiguous()
             self.W_V = self.W_V.transpose(-2, -1).contiguous()
             self.W_V_scale = self.W_V_scale.transpose(-2, -1).contiguous()
-        else:  # is_rocm_aiter_fp8bmm_enabled():
+        else:  # is_rocm_aiter_fp8bmm_enabled()
             kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
             assert kv_b_proj_weight.shape == (
                 self.kv_lora_rank,
@@ -175,6 +205,7 @@ class MLAAttention(nn.Module):
                 W_V, dtype=dtypes.fp8
             )
 
+    @mark_trace(prefix="v_up_proj_and_o_proj", torch_compile=False)
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -209,6 +240,7 @@ class MLAAttention(nn.Module):
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
         return self.o_proj(x)
 
+    @mark_trace(prefix="q_proj_and_k_up_proj", torch_compile=False)
     def _q_proj_and_k_up_proj(self, x, x_scale=None):
         q_nope, q_pe = (
             self.q_proj(x, x_scale)
@@ -424,8 +456,15 @@ class MLAAttention(nn.Module):
         assert attn_metadata is not None
         B = q.shape[0]
 
+        if self.head_repeat_factor > 1:
+            q = q.repeat_interleave(self.head_repeat_factor, dim=1)
+
         o = torch.empty(
-            B, self.num_heads, self.kv_lora_rank, dtype=self.dtype, device=q.device
+            B,
+            self.padded_num_heads,
+            self.kv_lora_rank,
+            dtype=self.dtype,
+            device=q.device,
         )
 
         paged_cu_seqlens_q = attn_metadata.cu_seqlens_q
@@ -480,6 +519,9 @@ class MLAAttention(nn.Module):
                     None,
                 )
 
+        if self.head_repeat_factor > 1:
+            o = o[:, :: self.head_repeat_factor, :].contiguous()
+
         return self._v_up_proj_and_o_proj(o)
 
     def _forward_decode(
@@ -492,8 +534,15 @@ class MLAAttention(nn.Module):
         assert attn_metadata is not None
         B = q.shape[0]
 
+        if self.head_repeat_factor > 1:
+            q = q.repeat_interleave(self.head_repeat_factor, dim=1)
+
         o = torch.empty(
-            B, self.num_heads, self.kv_lora_rank, dtype=self.dtype, device=q.device
+            B,
+            self.padded_num_heads,
+            self.kv_lora_rank,
+            dtype=self.dtype,
+            device=q.device,
         )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
@@ -555,16 +604,18 @@ class MLAAttention(nn.Module):
             kv_scale=self._k_scale,
         )
 
+        if self.head_repeat_factor > 1:
+            o = o[:, :: self.head_repeat_factor, :].contiguous()
+
         return self._v_up_proj_and_o_proj(o)
 
-    def forward(
+    def forward_impl_server_mode(
         self,
-        q: torch.Tensor,  # query in unified attn
+        q: torch.Tensor,
         k_nope: torch.Tensor,
         k_rope: torch.Tensor,
-        positions: torch.Tensor,
-        q_scale: Optional[torch.Tensor],
-        qkv: Optional[torch.Tensor],
+        positions: torch.Tensor = None,
+        q_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # kv_cache = self.kv_cache
         forward_context: ForwardContext = get_forward_context()
@@ -575,10 +626,9 @@ class MLAAttention(nn.Module):
             and attn_metadata.max_seqlen_k > self.topk_indices_buffer.shape[1]
         )
         if forward_context.context.is_dummy_run:
-            # dummy run: skip real attention and return
             output_shape = list(q.shape)
-            output_shape[-1] = 7168
             atom_config = get_current_atom_config()
+            output_shape[-1] = atom_config.hf_config.hidden_size
             output_dtype = atom_config.torch_dtype
             output = torch.empty(output_shape, dtype=output_dtype, device=q.device)
             return output
@@ -614,9 +664,7 @@ class MLAAttention(nn.Module):
                     self.num_heads,
                     self.kv_lora_rank + self.qk_rope_head_dim,
                 ),
-                dtype=(
-                    dtypes.fp8 if self.kv_cache_dtype.startswith("fp8") else self.dtype
-                ),
+                dtype=attn_metadata.dtype_q,
                 device=q_nope.device,
             )
             if kv_cache.numel() > 0:
@@ -646,6 +694,41 @@ class MLAAttention(nn.Module):
                 output = self._forward_decode(q_out, kv_cache, attn_metadata)
 
         return output
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,  # query in unified attn
+        k_nope: torch.Tensor,
+        k_rope: torch.Tensor,
+        kv_cache: torch.Tensor = None,
+        attn_metadata=None,
+        positions: torch.Tensor = None,
+        q_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        if is_plugin_mode():
+            # forward impl method are added by the decorator
+            # MLAAttentionImplDecoratorForPluginMode
+            return self.forward_impl_plugin_mode(
+                layer=layer,
+                q=query,
+                k_c_normed=k_nope,
+                k_pe=k_rope,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+        else:
+            # only for server mode, keep the original method
+            return self.forward_impl_server_mode(
+                q=query,
+                k_nope=k_nope,
+                k_rope=k_rope,
+                positions=positions,
+                q_scale=q_scale,
+            )
 
 
 @triton.jit
