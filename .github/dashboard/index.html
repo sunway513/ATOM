@@ -120,7 +120,10 @@
        ============================================================ */
     .perf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
     .table-watermark { position: relative; }
-    .perf-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border); color: var(--text-tertiary); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; position: sticky; top: var(--header-h, 52px); background: var(--bg-secondary); z-index: 10; }
+    .perf-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border); color: var(--text-tertiary); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; background: var(--bg-secondary); }
+    .floating-header { position: fixed; z-index: 40; background: var(--bg-secondary); border-bottom: 2px solid var(--border); overflow: hidden; display: none; }
+    .floating-header table { border-collapse: collapse; }
+    .floating-header th { text-align: left; padding: 8px 10px; color: var(--text-tertiary); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
     .perf-table th.num { text-align: right; }
     .perf-table td { padding: 7px 10px; border-bottom: 1px solid var(--border-light); }
     .perf-table td.num { text-align: right; font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; }
@@ -208,7 +211,7 @@
       .kpi-card .kpi-value { font-size: 22px; }
       .filter-bar { width: 100%; }
       .tabs { overflow-x: auto; }
-      .perf-table { display: block; overflow-x: auto; }
+      .table-watermark { overflow-x: auto; }
       .detail-box { grid-template-columns: 1fr; }
     }
     @media (max-width: 480px) {
@@ -257,8 +260,8 @@
 <!-- Popover -->
 <div class="popover-overlay" id="popover-overlay"><div class="popover" id="popover"></div></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-datalabels/2.2.0/chartjs-plugin-datalabels.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-datalabels/2.2.0/chartjs-plugin-datalabels.min.js" integrity="sha384-y49Zu59jZHJL/PLKgZPv3k2WI9c0Yp3pWB76V8OBVCb0QBKS8l4Ff3YslzHVX76Y" crossorigin="anonymous"></script>
 <script src="data.js"></script>
 <script>
 'use strict';
@@ -776,7 +779,7 @@ function renderActiveTab() {
     case 'trends': renderTrendsTab(); break;
     case 'data': renderDataTab(); break;
   }
-  requestAnimationFrame(updateHeaderHeight);
+  requestAnimationFrame(setupFloatingHeader);
 }
 
 /* ================================================================
@@ -1060,9 +1063,31 @@ function renderTradeoffTab() {
         _concLabels: indices.map(i => s.concLabels[i]), _configKeys: indices.map(i => s.configKeys[i])
       });
     }
+    heroDS.sort((a, b) => a.label.localeCompare(b.label));
+    const heroConcPlugin = {
+      id: 'heroConcLabels_' + safeId,
+      afterDatasetsDraw(chart) {
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.font = '8px -apple-system, sans-serif';
+        const focus = chart._legendFocusIndex;
+        chart.data.datasets.forEach((ds, di) => {
+          if (!ds._concLabels) return;
+          const meta = chart.getDatasetMeta(di);
+          ctx.globalAlpha = (focus != null && focus !== di) ? 0.12 : 1;
+          ctx.fillStyle = ds.borderColor;
+          meta.data.forEach((pt, pi) => {
+            if (ds.data[pi] == null) return;
+            ctx.fillText('c' + ds._concLabels[pi], pt.x + 5, pt.y - 5);
+          });
+        });
+        ctx.restore();
+      }
+    };
     if (heroDS.length) {
       new Chart(document.getElementById('hero-' + safeId), {
         type: 'scatter', data: { datasets: heroDS },
+        plugins: [heroConcPlugin],
         options: {
           responsive: true, maintainAspectRatio: false,
           layout: { padding: { top: 8, right: 12 } },
@@ -1132,7 +1157,7 @@ function buildSimpleScatter(canvasId, configs, xMetric, yMetric, xLabel, yLabel)
             const ds = datasets[item.datasetIndex];
             return ` c=${ds._concLabels[item.dataIndex] || '?'}: ${xLabel.split(' ')[0]}=${(+item.parsed.x).toFixed(1)}, ${yLabel.split(' ')[0]}=${(+item.parsed.y).toFixed(2)}`;
           },
-          afterBody: () => '\nClick to view details →'
+          afterBody: () => '\nClick for details'
         }}
       },
       scales: {
@@ -1204,7 +1229,7 @@ function buildConcurrencyScaling(canvasId, configs, familyName, famModels) {
       responsive: true, maintainAspectRatio: false,
       layout: { padding: { top: 8, right: 8 } },
       plugins: {
-        legend: datasets.length <= 10 ? { labels: { color: C_LEGEND, font: { size: 10 }, boxWidth: 12, usePointStyle: true } } : { display: false },
+        legend: datasets.length <= 8 ? { labels: { color: C_LEGEND, font: { size: 10 }, boxWidth: 10, usePointStyle: true } } : { display: false },
         tooltip: { ...chartTooltipOpts(), callbacks: {
           title: (items) => {
             const ds = datasets[items[0].datasetIndex];
@@ -1345,9 +1370,15 @@ function renderTrendsTab() {
         label: seriesLabel, data,
         borderColor: color.border, backgroundColor: color.bg,
         borderWidth: 2, pointRadius: 3, pointHoverRadius: 5, fill: false, spanGaps: true, tension: 0.1,
-        _configKey: key, _pointMap: pointMap
+        _configKey: key, _pointMap: pointMap, _conc: parts[2]
       });
     }
+
+    // Sort by ISL/OSL then concurrency (numeric)
+    datasets.sort((a, b) => {
+      const ka = a._configKey.split('|'), kb = b._configKey.split('|');
+      return ka[1].localeCompare(kb[1]) || (+ka[2]) - (+kb[2]);
+    });
 
     if (datasets.length === 0) {
       card.innerHTML += '<div class="chart-empty">No historical data for this model and metric.</div>';
@@ -1360,23 +1391,59 @@ function renderTrendsTab() {
       card.insertBefore(note, wrap);
     }
 
+    // Plugin: draw concurrency labels at last data point (Total Tput only)
+    const concLabelPlugin = met.key === 'Total Tput' && datasets.length <= 12 ? {
+      id: 'concLabels_' + Math.random(),
+      afterDatasetsDraw(chart) {
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'left';
+        const focus = chart._legendFocusIndex;
+        chart.data.datasets.forEach((ds, di) => {
+          if (!ds._conc) return;
+          const meta = chart.getDatasetMeta(di);
+          ctx.globalAlpha = (focus != null && focus !== di) ? 0.12 : 1;
+          // Find last visible (non-null) point
+          for (let i = meta.data.length - 1; i >= 0; i--) {
+            if (ds.data[i] != null) {
+              const pt = meta.data[i];
+              ctx.fillStyle = ds.borderColor;
+              ctx.fillText('c' + ds._conc, pt.x + 6, pt.y + 3);
+              break;
+            }
+          }
+        });
+        ctx.restore();
+      }
+    } : null;
+
     new Chart(canvas, {
       type: 'line', data: { labels: orderedLabels, datasets },
+      plugins: concLabelPlugin ? [concLabelPlugin] : [],
       options: {
         responsive: true, maintainAspectRatio: false,
-        layout: { padding: { top: 8 } },
+        layout: { padding: { top: 8, right: concLabelPlugin ? 50 : 8 } },
         plugins: {
           legend: datasets.length <= 8
             ? { labels: { color: C_LEGEND, font: { size: 10 }, boxWidth: 10 } }
             : { display: false },
           tooltip: { ...chartTooltipOpts(), callbacks: {
             title: (items) => {
+              const ds = items[0].dataset;
               const lbl = orderedLabels[items[0].dataIndex];
-              return 'Commit ' + (labelToCid[lbl] || '') + ' · ' + fmtDate(commitDateMap[lbl]);
+              return ds.label + ' · ' + (labelToCid[lbl] || '');
             },
-            label: (item) => ` ${item.dataset.label}: ${fmtNum(item.raw, met.key === 'TPOT' ? 2 : 1)} ${met.unit}`,
+            label: (item) => {
+              const lbl = orderedLabels[item.dataIndex];
+              return [
+                ` ${met.title}:  ${fmtNum(item.raw, met.key === 'TPOT' ? 2 : 1)} ${met.unit}`,
+                ` Date:  ${fmtDate(commitDateMap[lbl])}`
+              ];
+            },
             afterBody: () => '\nClick to trace'
-          }}
+          }},
+          datalabels: { display: false }
         },
         scales: {
           x: { grid: chartGridOpts(), title: { display: true, text: 'Commit', color: C_TICK }, ticks: { color: C_TICK } },
@@ -1680,13 +1747,71 @@ renderFilters();
 renderKPICards();
 renderActiveTab();
 
-// Set CSS variable for sticky table header offset (below sticky header)
-function updateHeaderHeight() {
-  const h = document.querySelector('header')?.offsetHeight || 52;
-  document.documentElement.style.setProperty('--header-h', h + 'px');
+// Floating table header — works regardless of overflow-x on ancestors
+let _floatingEl = null;
+let _floatingCleanup = null;
+function setupFloatingHeader() {
+  // Clean up previous listeners
+  if (_floatingCleanup) { _floatingCleanup(); _floatingCleanup = null; }
+  if (_floatingEl) { _floatingEl.remove(); _floatingEl = null; }
+  // Find the visible main table (Performance or Data tab)
+  const table = document.querySelector('.tab-content.active .perf-table');
+  if (!table) return;
+  const thead = table.querySelector('thead');
+  if (!thead) return;
+
+  const headerH = document.querySelector('header')?.offsetHeight || 52;
+  const wrapper = table.closest('.table-watermark');
+
+  function onScroll() {
+    const tableRect = table.getBoundingClientRect();
+    const wrapperRect = wrapper ? wrapper.getBoundingClientRect() : tableRect;
+    const theadRect = thead.getBoundingClientRect();
+    const tbodyEnd = table.querySelector('tbody')?.getBoundingClientRect().bottom || tableRect.bottom;
+    const shouldShow = tableRect.top < headerH && tbodyEnd > headerH + 40;
+
+    if (shouldShow) {
+      if (!_floatingEl) {
+        _floatingEl = document.createElement('div');
+        _floatingEl.className = 'floating-header';
+        document.body.appendChild(_floatingEl);
+      }
+      // Clone thead and sync column widths
+      const ths = thead.querySelectorAll('th');
+      const cloneTable = document.createElement('table');
+      cloneTable.className = 'perf-table';
+      const cloneThead = thead.cloneNode(true);
+      cloneThead.querySelectorAll('th').forEach((th, i) => {
+        th.style.width = ths[i].offsetWidth + 'px';
+        th.style.minWidth = ths[i].offsetWidth + 'px';
+      });
+      cloneTable.appendChild(cloneThead);
+      _floatingEl.innerHTML = '';
+      _floatingEl.appendChild(cloneTable);
+      _floatingEl.style.display = 'block';
+      _floatingEl.style.top = headerH + 'px';
+      _floatingEl.style.left = wrapperRect.left + 'px';
+      _floatingEl.style.width = wrapperRect.width + 'px';
+      // Sync horizontal scroll
+      if (wrapper && wrapper.scrollLeft) {
+        cloneTable.style.marginLeft = -wrapper.scrollLeft + 'px';
+      }
+    } else if (_floatingEl) {
+      _floatingEl.style.display = 'none';
+    }
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  if (wrapper) wrapper.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll, { passive: true });
+  // Store cleanup
+  _floatingCleanup = () => {
+    window.removeEventListener('scroll', onScroll);
+    window.removeEventListener('resize', onScroll);
+    if (wrapper) wrapper.removeEventListener('scroll', onScroll);
+    if (_floatingEl) { _floatingEl.remove(); _floatingEl = null; }
+  };
+  onScroll();
 }
-updateHeaderHeight();
-window.addEventListener('resize', updateHeaderHeight);
 
 // Browser back/forward — re-apply hash state (skip if we triggered it ourselves)
 window.addEventListener('hashchange', () => {
