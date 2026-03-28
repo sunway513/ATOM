@@ -16,7 +16,6 @@ new ROCm container or PyTorch build.
 Reference: ROCm/rocm-systems#4401, ROCm/pytorch#2579, ROCm/pytorch#3056
 """
 
-import ctypes
 import json
 import os
 import subprocess
@@ -25,7 +24,6 @@ import tempfile
 import pytest
 import torch
 import torch.nn as nn
-
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -224,9 +222,9 @@ class TestProfilerRegression:
         backend = _get_libtorch_profiler_backend()
         if backend == "rocprofiler-sdk":
             pytest.fail(
-                f"libtorch_cpu.so links librocprofiler-sdk.so instead of "
-                f"libroctracer64.so. This causes ~270us overhead per "
-                f"hipGraphLaunch. See ROCm/pytorch#2579 for the fix."
+                "libtorch_cpu.so links librocprofiler-sdk.so instead of "
+                "libroctracer64.so. This causes ~270us overhead per "
+                "hipGraphLaunch. See ROCm/pytorch#2579 for the fix."
             )
         assert backend in (
             "roctracer",
