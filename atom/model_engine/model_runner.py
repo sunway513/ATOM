@@ -35,7 +35,6 @@ from atom.utils import (
 from atom.utils.forward_context import (
     Context,
     DPMetadata,
-    SpecDecodeMetadata,
     get_forward_context,
     reset_forward_context,
     set_forward_context,

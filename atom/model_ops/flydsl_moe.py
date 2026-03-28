@@ -37,10 +37,6 @@ def _has_flydsl_moe() -> bool:
         return False
 
     try:
-        from kernels.moe_gemm_2stage import (
-            compile_moe_gemm1,
-            compile_moe_gemm2,
-        )  # noqa: F401
 
         _flydsl_moe_available = True
         _logger.info("FlyDSL MOE kernels detected and available")

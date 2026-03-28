@@ -15,6 +15,7 @@ from aiter.jit.utils.torch_guard import torch_compile_guard
 from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 from aiter.utility import fp4_utils
 from atom.config import Config, QuantizationConfig, get_current_atom_config
+from atom.model_ops.flydsl_moe import _has_flydsl_moe
 from atom.models.utils import get_quant_config_for_layer
 from atom.model_loader.weight_utils import set_weight_attrs
 from atom.model_ops.base_config import QuantizeMethodBase
@@ -61,9 +62,6 @@ def _has_ck_moe_sorting() -> bool:
         return importlib.util.find_spec("aiter.jit.module_moe_sorting") is not None
     except Exception:
         return False
-
-
-from atom.model_ops.flydsl_moe import _has_flydsl_moe
 
 
 def _per_token_group_quant_fp8(x, group_size, fp8_dtype):

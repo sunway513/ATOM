@@ -11,7 +11,6 @@ from aiter import (
     QuantType,
     concat_and_cache_mla,
     dtypes,
-    flash_attn_varlen_func,
     fused_qk_rope_concat_and_cache_mla,
     get_hip_quant,
 )
