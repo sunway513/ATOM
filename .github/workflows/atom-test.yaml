@@ -253,7 +253,12 @@ jobs:
           echo "Model-specific environment variables:"
           cat /tmp/env_file.txt
 
-          docker run -dt --pull always --device=/dev/kfd $DEVICE_FLAG \
+          PULL_FLAG=""
+          if [ "${{ matrix.runner }}" = "atom-mi355-8gpu.predownload" ]; then
+            PULL_FLAG="--pull always"
+          fi
+
+          docker run -dt $PULL_FLAG --device=/dev/kfd $DEVICE_FLAG \
           -v "${GITHUB_WORKSPACE:-$PWD}":/workspace \
           $MODEL_MOUNT \
           -w /workspace \
@@ -327,16 +332,63 @@ jobs:
 
       - name: Download models
         run: |
+          set -euo pipefail
           if [ -d "/models" ]; then
             model_dir="/models/${{ matrix.model_path }}"
-            if docker exec "$CONTAINER_NAME" bash -lc "[ -d \"$model_dir\" ] && [ -f \"$model_dir/config.json\" ]"; then
-              echo "Model already exists under ${model_dir}; skip download"
-            else
-              echo "Model not found under ${model_dir}; downloading model"
-              if ! docker exec -e HF_TOKEN="${HF_TOKEN:-}" "$CONTAINER_NAME" bash -lc "hf download ${{ matrix.model_path }} --local-dir \"$model_dir\""; then
-                echo "Model download failed for '${{ matrix.model_path }}'. Aborting."
-                exit 1
-              fi
+            lock_suffix="$(printf '%s' "${{ matrix.model_path }}" | tr '/:@' '___')"
+            if ! docker exec \
+              -e HF_TOKEN="${HF_TOKEN:-}" \
+              -e MODEL_PATH="${{ matrix.model_path }}" \
+              -e MODEL_DIR="$model_dir" \
+              -e RUNNER_NAME="${{ matrix.runner }}" \
+              -e LOCK_SUFFIX="$lock_suffix" \
+              "$CONTAINER_NAME" \
+              bash -lc '
+                set -euo pipefail
+                completion_flag="$MODEL_DIR/.download-complete"
+                use_model_lock="true"
+
+                if [ "$RUNNER_NAME" = "atom-mi355-8gpu.predownload" ]; then
+                  use_model_lock="false"
+                fi
+
+                download_model() {
+                  if [ -f "$MODEL_DIR/config.json" ]; then
+                    echo "Model directory exists without a completion marker under ${MODEL_DIR}; validating download"
+                  else
+                    echo "Model not found under ${MODEL_DIR}; downloading model"
+                  fi
+
+                  rm -f "$completion_flag"
+                  hf download "$MODEL_PATH" --local-dir "$MODEL_DIR"
+                  touch "$completion_flag"
+                }
+
+                if [ -f "$completion_flag" ]; then
+                  echo "Model already exists under ${MODEL_DIR}; skip download"
+                elif [ "$use_model_lock" != "true" ]; then
+                  echo "Baremetal runner ${RUNNER_NAME} detected; skipping shared model download lock"
+                  download_model
+                else
+                  lock_dir="/models/.cache/atom-download-locks"
+                  mkdir -p "$lock_dir"
+                  lock_file="$lock_dir/${LOCK_SUFFIX}.lock"
+                  exec 9>"$lock_file"
+                  echo "Waiting for model download lock: $lock_file"
+                  if ! flock -w 7200 9; then
+                    echo "Timed out waiting for model download lock: $lock_file"
+                    exit 1
+                  fi
+
+                  if [ -f "$completion_flag" ]; then
+                    echo "Model became available under ${MODEL_DIR} while waiting for the lock; skip download"
+                  else
+                    download_model
+                  fi
+                fi
+              '; then
+              echo "Model download failed for '${{ matrix.model_path }}'. Aborting."
+              exit 1
             fi
           else
             echo "/models directory not found, skipping model download"
