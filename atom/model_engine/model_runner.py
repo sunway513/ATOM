@@ -34,6 +34,9 @@ from atom.utils import (
     init_exit_handler,
     resolve_obj_by_qualname,
 )
+from atom.kv_transfer.disaggregation import KVConnectorOutput
+from atom.utils.forward_context import get_kvconnector
+from atom.utils.tbo import UBatchWrapper, maybe_create_ubatch_slices
 from atom.utils.forward_context import (
     Context,
     DPMetadata,
@@ -79,8 +82,10 @@ class tokenIDProcessor:
         num_spec_tokens: int = 0,
     ):
         """Asynchronously copy the sampled_token_ids tensor to the host."""
-        # self.is_deferred_out = False
-        self.is_deferred_out = True
+        # Deferred output is disabled when running in P/D disaggregation mode
+        # (kv_transfer_config is set), enabled otherwise.
+        # TODO: enable deferred output in P/D disaggregation mode
+        self.is_deferred_out = not bool(runner.config.kv_transfer_config)
 
         self.runner = runner
         device = runner.device
@@ -165,6 +170,7 @@ class tokenIDProcessor:
         self.token_ids_cpu: list[torch.Tensor] = []
 
         self.prev_batch: Optional[ScheduledBatch] = None
+        self.prev_token_ids: Optional[torch.Tensor] = None
 
         self.pre_num_decode_token_per_seq = 1
         self.draft_token_ids: Optional[torch.Tensor] = None
@@ -277,7 +283,8 @@ class tokenIDProcessor:
 
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
-        GPU need to be copied into the corresponding slots into input_ids."""
+        GPU need to be copied into the corresponding slots into input_ids.
+        """
         scheduled_tokens = batch.scheduled_tokens  # tokens per req
         total_tokens = batch.total_tokens_num
         total_tokens_prefill = batch.total_tokens_num_prefill
@@ -545,6 +552,17 @@ class ModelRunner:
             use_mla=self.use_mla,
             use_gdn=self.use_gdn,
         )
+        use_spec = bool(self.config.speculative_config) and get_pp_group().is_last_rank
+        self.num_spec_tokens = (
+            self.config.speculative_config.num_speculative_tokens if use_spec else 0
+        )
+        self.tokenID_processor = tokenIDProcessor(
+            self,
+            self.config.max_num_batched_tokens,
+            use_spec,
+            self.num_spec_tokens,
+        )
+        self.sampler = Sampler()
         self.arange_np = np.arange(
             max(
                 self.config.max_num_seqs + 1,
@@ -588,14 +606,6 @@ class ModelRunner:
             torch.set_default_device(None)
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.model)
-        self.num_spec_tokens = self.drafter.mtp_k if hasattr(self, "drafter") else 0
-        self.tokenID_processor = tokenIDProcessor(
-            self,
-            self.config.max_num_batched_tokens,
-            hasattr(self, "drafter"),
-            self.num_spec_tokens,
-        )
-        self.sampler = Sampler()
         torch.set_default_device(self.device)
         self.async_execute_stream = torch.cuda.Stream(self.device)
         self.allocate_forward_vars()
@@ -926,6 +936,7 @@ class ModelRunner:
         logger.info(
             f"{self.label}: dummy PREFILL batch executed with {num_tokens} tokens, {num_reqs} reqs"
         )
+        # TODO: initialize KV connector during warmup
         return True
 
     def warmup_model(self):
@@ -1490,7 +1501,7 @@ class ModelRunner:
             for i, kv_cache_tensor in enumerate(kv_cache_tensors)
         }
         # vllm use register_kv_caches to register kv_cache_data. We just set it to global here
-        set_kv_cache_data(kv_cache_data)
+        set_kv_cache_data(kv_cache_data, config)
 
         # Cross-validate: compare estimated vs actual KV cache allocation
         post_alloc = torch.cuda.memory_stats()["allocated_bytes.all.current"]
@@ -1932,6 +1943,25 @@ class ModelRunner:
         )
         reset_forward_context()
         return fwd_output
+
+    @torch.inference_mode()
+    def process_kvconnector_output(self, connector_meta_output):
+        """Dispatch KV connector metadata to initiate async KV loading."""
+        if connector_meta_output is not None:
+            connector = get_kvconnector()
+            if connector is not None:
+                connector.start_load_kv(connector_meta_output)
+
+    @torch.inference_mode()
+    def async_proc_aggregation(self) -> KVConnectorOutput:
+        """Collect finished send/recv status from the KV connector."""
+        connector = get_kvconnector()
+        if connector is None:
+            return KVConnectorOutput(finished_sending=[], finished_recving=[])
+        done_sending, done_recving = connector.get_finished()
+        return KVConnectorOutput(
+            finished_sending=done_sending, finished_recving=done_recving
+        )
 
     def propose_draft_token_ids(
         self,
