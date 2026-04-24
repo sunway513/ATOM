@@ -24,6 +24,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from atom.config import Config
+from atom.model_ops.embed_head import VocabParallelEmbedding
+from atom.model_ops.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from atom.model_ops.quant_v4 import (
     act_quant_inplace,
     fp4_act_quant_inplace,
@@ -524,13 +530,11 @@ class Indexer(nn.Module):
         self.q_lora_rank = args.q_lora_rank
         self.compress_ratio = compress_ratio
 
-        # Reference uses ColumnParallelLinear; PR1 uses plain Linear.
-        self.wq_b = nn.Linear(
+        # Indexer Q heads sharded across TP ranks.
+        self.wq_b = ColumnParallelLinear(
             self.q_lora_rank, self.n_heads * self.head_dim, bias=False
         )
-        self.weights_proj = nn.Linear(
-            self.dim, self.n_heads, bias=False, dtype=torch.bfloat16
-        )
+        self.weights_proj = ColumnParallelLinear(self.dim, self.n_heads, bias=False)
         self.softmax_scale = self.head_dim**-0.5
 
         self.compressor = Compressor(args, compress_ratio, self.head_dim, rotate=True)
@@ -661,23 +665,28 @@ class DeepseekV4Attention(nn.Module):
         self.attn_sink = nn.Parameter(
             torch.empty(self.n_local_heads, dtype=torch.float32)
         )
-        self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
+        # wq_a: small dim → q_lora_rank, replicated.
+        self.wq_a = ReplicatedLinear(self.dim, self.q_lora_rank, bias=False)
         self.q_norm = _RMSNorm(self.q_lora_rank, self.eps)
-        self.wq_b = nn.Linear(
+        # wq_b: q_lora_rank → n_heads * head_dim, output sharded across heads.
+        self.wq_b = ColumnParallelLinear(
             self.q_lora_rank, self.n_heads * self.head_dim, bias=False
         )
-        self.wkv = nn.Linear(self.dim, self.head_dim, bias=False)
+        # wkv: dim → head_dim, single shared KV head (MQA), replicated.
+        self.wkv = ReplicatedLinear(self.dim, self.head_dim, bias=False)
         self.kv_norm = _RMSNorm(self.head_dim, self.eps)
-        # wo_a is BF16 in reference (special-cased dtype). Layout: weight is
-        # [n_groups * o_lora_rank, n_heads * head_dim / n_groups]. We reshape
-        # to [n_groups, o_lora_rank, n_heads * head_dim / n_groups] in forward.
-        self.wo_a = nn.Linear(
+        # wo_a: grouped LoRA. We reshape weight to [n_groups, o_lora_rank, ...]
+        # in forward. ColumnParallelLinear shards output (n_groups * o_lora_rank)
+        # along dim 0 — at TP=1 same as nn.Linear.
+        self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * args.o_lora_rank,
             bias=False,
-            dtype=torch.bfloat16,
         )
-        self.wo_b = nn.Linear(self.n_groups * args.o_lora_rank, self.dim, bias=False)
+        # wo_b: input sharded with all-reduce on output.
+        self.wo_b = RowParallelLinear(
+            self.n_groups * args.o_lora_rank, self.dim, bias=False
+        )
         self.softmax_scale = self.head_dim**-0.5
 
         # ----- Compressor (and Indexer for CSA) -----
@@ -1187,10 +1196,10 @@ class DeepseekV4Model(nn.Module):
         self.hc_eps = args.hc_eps
         self.hc_mult = args.hc_mult
 
-        # Reference's ParallelEmbedding stores `weight` as the partition's slice;
-        # at single-rank that's the full vocab. nn.Embedding has the same `weight`
-        # name, so dummy state_dicts load directly.
-        self.embed = nn.Embedding(args.vocab_size, args.dim)
+        # VocabParallelEmbedding shards along vocab dim. At TP=1 weight shape
+        # equals nn.Embedding's [vocab_size, dim] so dummy state_dicts load
+        # directly. At TP>1 each rank holds vocab_size/tp rows.
+        self.embed = VocabParallelEmbedding(args.vocab_size, args.dim)
         self.layers = nn.ModuleList(
             [Block(layer_id, args) for layer_id in range(args.n_layers)]
         )
