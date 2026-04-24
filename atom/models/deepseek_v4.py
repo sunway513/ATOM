@@ -104,6 +104,11 @@ class DeepseekV4Args:
     expert_dtype: Optional[Literal["fp4", "fp8"]] = None
     scale_fmt: Optional[Literal["ue8m0"]] = None
 
+    # ATOM QuantizationConfig — wired in PR3c so Linear layers auto-build the
+    # right (FP8 / FP4 / BF16) weight + scale params for real-checkpoint loading.
+    # When None, all Linears are BF16 (used by toy / dummy validation paths).
+    quant_config: Optional[Any] = None
+
     @classmethod
     def from_hf_config(cls, hf_config: Any) -> "DeepseekV4Args":
         rope_scaling = getattr(hf_config, "rope_scaling", {}) or {}
@@ -151,6 +156,65 @@ class DeepseekV4Args:
 
 # PR1 always runs single-rank; TP comes in PR3.
 _FP4_BLOCK_SIZE = 32  # matches reference's fp4_block_size
+
+
+# ---------------------------------------------------------------------------
+# V4-specific QuantizationConfig — wired by DeepseekV4ForCausalLM in PR3c
+# ---------------------------------------------------------------------------
+
+
+def make_v4_quant_config(hf_config):
+    """Build a QuantizationConfig that knows V4's per-layer quant scheme.
+
+    V4 checkpoint layout:
+      - Most projections (wq_a/b, wkv, wo_b, indexer.wq_b, etc.): FP8 e4m3 +
+        128x128 ue8m0 block scale. Picked up by ATOM's standard "fp8" parser.
+      - Routed expert weights (`ffn.experts.{N}.w{1,2,3}`): FP4 e2m1 +
+        per-1x32 ue8m0 block scale. Needs explicit per_1x32 override.
+      - `wo_a`: FP8 on disk but loaded as BF16 (convert.py:137-141 dequantizes
+        because the grouped-LoRA einsum needs BF16; aiter has no FP8 einsum).
+      - `Compressor.wkv` / `Compressor.wgate` / `indexer.weights_proj`: BF16
+        (or fp32 internally; reference declares dtype= explicitly). Loaded raw.
+      - All RMSNorm weights, attn_sink, hc_*: BF16/fp32 raw, no quant.
+    """
+    from atom.config import LayerQuantConfig, QuantizationConfig, QuantType
+    from aiter import dtypes
+
+    base = QuantizationConfig(hf_config)
+
+    fp4_spec = LayerQuantConfig(quant_type=QuantType.per_1x32, quant_dtype=dtypes.fp4x2)
+    no_spec = LayerQuantConfig(quant_type=QuantType.No, quant_dtype=torch.bfloat16)
+    orig_lookup = base.get_layer_quant_config
+
+    def overridden(layer_name, *, check_children=False):
+        # Routed experts → FP4 (NOT shared_experts, which stay FP8)
+        if "ffn.experts." in layer_name:
+            return fp4_spec
+        # BF16 / fp32 raw paths
+        if (
+            ".compressor.wkv" in layer_name
+            or ".compressor.wgate" in layer_name
+            or ".indexer.weights_proj" in layer_name
+            or layer_name.endswith(".wo_a")
+        ):
+            return no_spec
+        return orig_lookup(layer_name, check_children=check_children)
+
+    base.get_layer_quant_config = overridden
+    return base
+
+
+def _dequant_fp8_block_to_bf16(w_fp8, scale, block=128):
+    """Dequant block-scaled FP8 e4m3 → BF16 (for wo_a load path).
+
+    Mirrors convert.py:137-141. The wo_a weight is stored FP8 on disk but
+    used as BF16 in inference because aiter doesn't support FP8 grouped einsum.
+    """
+    out_dim, in_dim = w_fp8.shape
+    w = w_fp8.unflatten(0, (-1, block)).unflatten(-1, (-1, block)).float()
+    s = scale.float()
+    deq = w * s[:, None, :, None]
+    return deq.flatten(2, 3).flatten(0, 1).bfloat16()
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +385,7 @@ class Compressor(nn.Module):
         compress_ratio: int = 4,
         head_dim: int = 512,
         rotate: bool = False,
+        prefix: str = "",
     ):
         super().__init__()
         self.dim = args.dim
@@ -331,12 +396,16 @@ class Compressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.rotate = rotate
         self.scale_fmt = args.scale_fmt
+        self.prefix = prefix
         coff = 1 + self.overlap
 
         self.ape = nn.Parameter(
             torch.empty(compress_ratio, coff * self.head_dim, dtype=torch.float32)
         )
         # wkv/wgate stored as fp32 (matches reference's Linear(dtype=fp32) BF16 path).
+        # Kept as nn.Linear (not ATOM Linear) because the fp32 path through
+        # ATOM's tgemm auto-casts output to BF16 — losing precision the
+        # Compressor's softmax-pool step depends on. PR3+ may revisit.
         self.wkv = nn.Linear(
             self.dim, coff * self.head_dim, bias=False, dtype=torch.float32
         )
@@ -518,7 +587,7 @@ class Indexer(nn.Module):
     only for index scoring; query is also FP4-simulated.
     """
 
-    def __init__(self, args: DeepseekV4Args, compress_ratio: int = 4):
+    def __init__(self, args: DeepseekV4Args, compress_ratio: int = 4, prefix: str = ""):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.index_n_heads
@@ -530,14 +599,33 @@ class Indexer(nn.Module):
         self.q_lora_rank = args.q_lora_rank
         self.compress_ratio = compress_ratio
 
+        qc = args.quant_config
         # Indexer Q heads sharded across TP ranks.
         self.wq_b = ColumnParallelLinear(
-            self.q_lora_rank, self.n_heads * self.head_dim, bias=False
+            self.q_lora_rank,
+            self.n_heads * self.head_dim,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{prefix}.wq_b",
         )
-        self.weights_proj = ColumnParallelLinear(self.dim, self.n_heads, bias=False)
+        # weights_proj: BF16 in reference (dtype=bf16); V4QuantConfig already
+        # forces no_spec for ".indexer.weights_proj" so quant_config is fine.
+        self.weights_proj = ColumnParallelLinear(
+            self.dim,
+            self.n_heads,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{prefix}.weights_proj",
+        )
         self.softmax_scale = self.head_dim**-0.5
 
-        self.compressor = Compressor(args, compress_ratio, self.head_dim, rotate=True)
+        self.compressor = Compressor(
+            args,
+            compress_ratio,
+            self.head_dim,
+            rotate=True,
+            prefix=f"{prefix}.compressor",
+        )
         self.register_buffer(
             "kv_cache",
             torch.zeros(
@@ -642,7 +730,7 @@ class DeepseekV4Attention(nn.Module):
       - attn_sink: per-head learnable logit added only to softmax denominator
     """
 
-    def __init__(self, layer_id: int, args: DeepseekV4Args):
+    def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
         super().__init__()
         self.layer_id = layer_id
         self.dim = args.dim
@@ -661,39 +749,64 @@ class DeepseekV4Attention(nn.Module):
         self.eps = args.norm_eps
         self.scale_fmt = args.scale_fmt
 
+        qc = args.quant_config
+        p = prefix  # e.g. "layers.7.attn"
+
         # ----- Parameters (names mirror reference for state_dict load) -----
         self.attn_sink = nn.Parameter(
             torch.empty(self.n_local_heads, dtype=torch.float32)
         )
-        # wq_a: small dim → q_lora_rank, replicated.
-        self.wq_a = ReplicatedLinear(self.dim, self.q_lora_rank, bias=False)
-        self.q_norm = _RMSNorm(self.q_lora_rank, self.eps)
-        # wq_b: q_lora_rank → n_heads * head_dim, output sharded across heads.
-        self.wq_b = ColumnParallelLinear(
-            self.q_lora_rank, self.n_heads * self.head_dim, bias=False
+        self.wq_a = ReplicatedLinear(
+            self.dim,
+            self.q_lora_rank,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{p}.wq_a",
         )
-        # wkv: dim → head_dim, single shared KV head (MQA), replicated.
-        self.wkv = ReplicatedLinear(self.dim, self.head_dim, bias=False)
+        self.q_norm = _RMSNorm(self.q_lora_rank, self.eps)
+        self.wq_b = ColumnParallelLinear(
+            self.q_lora_rank,
+            self.n_heads * self.head_dim,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{p}.wq_b",
+        )
+        self.wkv = ReplicatedLinear(
+            self.dim,
+            self.head_dim,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{p}.wkv",
+        )
         self.kv_norm = _RMSNorm(self.head_dim, self.eps)
-        # wo_a: grouped LoRA. We reshape weight to [n_groups, o_lora_rank, ...]
-        # in forward. ColumnParallelLinear shards output (n_groups * o_lora_rank)
-        # along dim 0 — at TP=1 same as nn.Linear.
+        # wo_a: grouped LoRA — V4QuantConfig forces this BF16 even though disk is FP8.
+        # The grouped einsum (`bsgd,grd->bsgr`) needs BF16 weights; aiter has no FP8 einsum.
         self.wo_a = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * args.o_lora_rank,
             bias=False,
+            quant_config=qc,
+            prefix=f"{p}.wo_a",
         )
-        # wo_b: input sharded with all-reduce on output.
         self.wo_b = RowParallelLinear(
-            self.n_groups * args.o_lora_rank, self.dim, bias=False
+            self.n_groups * args.o_lora_rank,
+            self.dim,
+            bias=False,
+            quant_config=qc,
+            prefix=f"{p}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
 
         # ----- Compressor (and Indexer for CSA) -----
         if self.compress_ratio:
-            self.compressor = Compressor(args, self.compress_ratio, self.head_dim)
+            self.compressor = Compressor(
+                args,
+                self.compress_ratio,
+                self.head_dim,
+                prefix=f"{p}.compressor",
+            )
             if self.compress_ratio == 4:
-                self.indexer = Indexer(args, self.compress_ratio)
+                self.indexer = Indexer(args, self.compress_ratio, prefix=f"{p}.indexer")
             else:
                 self.indexer = None
         else:
@@ -974,11 +1087,11 @@ class Block(nn.Module):
          applied to the previous residual.
     """
 
-    def __init__(self, layer_id: int, args: DeepseekV4Args):
+    def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
         super().__init__()
         self.layer_id = layer_id
         self.norm_eps = args.norm_eps
-        self.attn = DeepseekV4Attention(layer_id, args)
+        self.attn = DeepseekV4Attention(layer_id, args, prefix=f"{prefix}.attn")
         self.ffn = MoE(layer_id, args)
         self.attn_norm = _RMSNorm(args.dim, self.norm_eps)
         self.ffn_norm = _RMSNorm(args.dim, self.norm_eps)
@@ -1138,10 +1251,30 @@ class MTPBlock(Block):
     the main model's embedding and LM head).
     """
 
-    def __init__(self, layer_id: int, args: DeepseekV4Args):
-        super().__init__(layer_id, args)
-        self.e_proj = nn.Linear(args.dim, args.dim, bias=False)
-        self.h_proj = nn.Linear(args.dim, args.dim, bias=False)
+    def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
+        super().__init__(layer_id, args, prefix=prefix)
+        # e_proj / h_proj are FP8 on disk per index; ATOM Linear with V4QuantConfig
+        # picks per_1x128 automatically. nn.Linear at construction works for the
+        # toy/dummy path; for real-checkpoint loading, switch to ReplicatedLinear.
+        qc = args.quant_config
+        if qc is None:
+            self.e_proj = nn.Linear(args.dim, args.dim, bias=False)
+            self.h_proj = nn.Linear(args.dim, args.dim, bias=False)
+        else:
+            self.e_proj = ReplicatedLinear(
+                args.dim,
+                args.dim,
+                bias=False,
+                quant_config=qc,
+                prefix=f"{prefix}.e_proj",
+            )
+            self.h_proj = ReplicatedLinear(
+                args.dim,
+                args.dim,
+                bias=False,
+                quant_config=qc,
+                prefix=f"{prefix}.h_proj",
+            )
         self.enorm = _RMSNorm(args.dim, args.norm_eps)
         self.hnorm = _RMSNorm(args.dim, args.norm_eps)
         self.norm = _RMSNorm(args.dim, args.norm_eps)
@@ -1201,7 +1334,10 @@ class DeepseekV4Model(nn.Module):
         # directly. At TP>1 each rank holds vocab_size/tp rows.
         self.embed = VocabParallelEmbedding(args.vocab_size, args.dim)
         self.layers = nn.ModuleList(
-            [Block(layer_id, args) for layer_id in range(args.n_layers)]
+            [
+                Block(layer_id, args, prefix=f"layers.{layer_id}")
+                for layer_id in range(args.n_layers)
+            ]
         )
         self.norm = _RMSNorm(args.dim, self.norm_eps)
         self.head = ParallelHead(args.vocab_size, args.dim, self.norm_eps, self.hc_eps)
@@ -1209,7 +1345,7 @@ class DeepseekV4Model(nn.Module):
         # MTP blocks: constructed and linked, but only invoked externally (PR5).
         self.mtp = nn.ModuleList()
         for layer_id in range(args.n_mtp_layers):
-            blk = MTPBlock(args.n_layers + layer_id, args)
+            blk = MTPBlock(args.n_layers + layer_id, args, prefix=f"mtp.{layer_id}")
             blk.embed = self.embed
             blk.head = self.head
             self.mtp.append(blk)
@@ -1254,6 +1390,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         self.atom_config = config
         self.hf_config = config.hf_config
         self.args = DeepseekV4Args.from_hf_config(self.hf_config)
+        # Build the V4-specific QuantizationConfig (FP8 default + FP4 experts +
+        # BF16 wo_a/Compressor) so child Linear layers auto-build the right
+        # weight + scale params for real-checkpoint loading. When the HF
+        # config lacks `quantization_config` (e.g. dummy / toy validation),
+        # this still works — base spec is QuantType.No.
+        self.args.quant_config = make_v4_quant_config(self.hf_config)
         self.model = DeepseekV4Model(args=self.args)
 
     def forward(
@@ -1273,4 +1415,103 @@ class DeepseekV4ForCausalLM(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        raise NotImplementedError("PR3: real checkpoint loader")
+        """Load weights from an iterable of (name, tensor) pairs.
+
+        Naming conventions (HF V4 checkpoint matches our internal naming 1:1):
+            embed.weight
+            layers.{i}.attn.{wq_a,q_norm,wq_b,wkv,kv_norm,wo_a,wo_b,attn_sink,...}
+            layers.{i}.attn.compressor.{ape,wkv,wgate,norm}
+            layers.{i}.attn.indexer.{wq_b,weights_proj}
+            layers.{i}.attn.indexer.compressor.{...}
+            layers.{i}.ffn.gate.{weight,bias|tid2eid}
+            layers.{i}.ffn.experts.{e}.w{1,2,3}
+            layers.{i}.ffn.shared_experts.w{1,2,3}
+            layers.{i}.{attn_norm,ffn_norm}
+            layers.{i}.{hc_attn_*,hc_ffn_*}
+            mtp.{i}.{...}                    (same shape as a Block + e_proj/h_proj/...)
+            norm.weight, head.weight, hc_head_*
+
+        On-disk quirks:
+        - FP8/FP4 scale tensors are named `<param>.scale`; ATOM internally names
+          them `<param>.weight_scale`. Remap on lookup.
+        - `wo_a` is FP8 + scale on disk but BF16 in our model (V4QuantConfig
+          forces no_spec; aiter has no FP8 grouped-einsum). Dequantize the FP8
+          weight using the on-disk scale before copying into the BF16 param.
+
+        Returns:
+            Set of parameter names successfully loaded.
+        """
+        loaded: set[str] = set()
+        # Index all our params + buffers for fast lookup.
+        targets: dict[str, torch.Tensor] = dict(self.model.named_parameters())
+        targets.update(dict(self.model.named_buffers()))
+
+        # First pass: bucket on-disk tensors by their candidate target names.
+        # Some special-case tensors (wo_a.weight + wo_a.scale → BF16) need to be
+        # processed together, so collect all tensors first then resolve.
+        scratch: dict[str, torch.Tensor] = {}
+        for name, tensor in weights:
+            scratch[name] = tensor
+
+        for tgt_name, param in targets.items():
+            ckpt_name = tgt_name
+            # ATOM scale → on-disk scale name
+            if ckpt_name.endswith(".weight_scale"):
+                alt = ckpt_name.replace(".weight_scale", ".scale")
+                if alt in scratch:
+                    ckpt_name = alt
+            if ckpt_name not in scratch:
+                continue
+
+            # Special case: wo_a is FP8+scale on disk, BF16 in model.
+            if ckpt_name.endswith(".wo_a.weight") and param.dtype == torch.bfloat16:
+                scale_name = ckpt_name.replace(".weight", ".scale")
+                if scale_name in scratch:
+                    w_fp8 = scratch[ckpt_name]
+                    s = scratch[scale_name]
+                    if w_fp8.dtype == torch.float8_e4m3fn:
+                        bf16 = _dequant_fp8_block_to_bf16(
+                            w_fp8.to(param.device), s.to(param.device), block=128
+                        )
+                        param.data.copy_(bf16)
+                        loaded.add(tgt_name)
+                        continue
+
+            # Skip wo_a.scale entirely — it's consumed by the wo_a.weight handler above.
+            if (
+                ckpt_name.endswith(".wo_a.scale")
+                and tgt_name == ckpt_name
+                and tgt_name not in dict(self.model.named_parameters())
+            ):
+                continue
+
+            tensor = scratch[ckpt_name].to(param.device)
+
+            # Shape mismatch typically means the model still uses a non-quantized
+            # representation for a layer that's quantized on disk (e.g. expert
+            # nn.Linear bf16 vs FP4 packed int8). PR3b will refactor MoE to
+            # FusedMoE at which point shapes match. For now, skip safely.
+            if param.shape != tensor.shape:
+                # FP4 packed: param [out, in/2] uint8-view; tensor int8 [out, in/2]
+                if (
+                    param.dtype == torch.float4_e2m1fn_x2
+                    and tensor.dtype == torch.int8
+                    and param.shape == tensor.shape
+                ):
+                    pass  # this branch unreachable under the outer condition
+                else:
+                    continue
+
+            loader = getattr(param, "weight_loader", None)
+            if loader is not None:
+                loader(param, tensor)
+            else:
+                if (
+                    param.dtype != tensor.dtype
+                    and param.dtype == torch.float4_e2m1fn_x2
+                ):
+                    param.data.view(torch.uint8).copy_(tensor.view(torch.uint8))
+                else:
+                    param.data.copy_(tensor.to(param.dtype))
+            loaded.add(tgt_name)
+        return loaded
