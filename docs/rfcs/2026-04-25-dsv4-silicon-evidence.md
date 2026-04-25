@@ -328,6 +328,22 @@ SemiAnalysisAI/InferenceX@c52a8e9 recipes:
 | vLLM | TP=4 | 64 | 1673 | 37.63 | 650 |
 | vLLM | TP=1 + DP=4 + EP, FP8 KV, FULL_AND_PIECEWISE cudagraph, fp4_indexer_cache | 256 | 4446 | 56.38 | 1209 |
 
+### Dtype audit — apples-to-apples check
+
+| Component | ATOM Phase 1 | SGLang B300 conc=8 | vLLM B300 conc=8 | vLLM B300 conc=256 |
+|---|---|---|---|---|
+| Expert weights | **MXFP4** (model native) | **MXFP4** (flashinfer_mxfp4) | **MXFP4** | MXFP4 |
+| Attn projection | FP8 | FP8 | FP8 | FP8 |
+| Attn KV cache | **FP8** (`--kv_cache_dtype fp8`) | FP8 (default) | FP8 (default) | **FP8** (explicit) |
+| Indexer KV cache | **FP32** (default `register_buffer(torch.zeros(...))`) | FP8 / default | FP8 / default | **FP4** (`use_fp4_indexer_cache=True`) |
+
+Hot-path (attn + MoE) is **apples-to-apples** between ATOM Phase 1 and
+SGLang B300 conc=8: same MXFP4 expert weights and same FP8 attn KV. The
+only ATOM-side disadvantage is the Indexer's `register_buffer` defaults
+to FP32 (4× FP8 bytes, 8× FP4 bytes). At conc=4 / ISL=1024 / OSL=1024
+that's at most a 1.5× memory-bandwidth artifact on the sparse indexer
+path — **not enough to explain the 15× TPOT gap**.
+
 ### Apples-to-apples gap (TP=8 ISL=1024/OSL=1024)
 
 | | ATOM Phase 1 | SGLang B300 (closest match) | Gap |
