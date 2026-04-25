@@ -30,6 +30,7 @@ from atom.model_ops.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from atom.model_ops.moe import FusedMoE
 from atom.model_ops.quant_v4 import (
     act_quant_inplace,
     fp4_act_quant_inplace,
@@ -202,6 +203,23 @@ def make_v4_quant_config(hf_config):
 
     base.get_layer_quant_config = overridden
     return base
+
+
+def _have_current_atom_config() -> bool:
+    """Check whether ATOM's global Config has been set.
+
+    `FusedMoE.__init__` calls `get_current_atom_config()` (which asserts non-None)
+    to read TP/EP/dtype globals. The toy / dummy validation paths run before any
+    ATOM ModelRunner sets it, so MoE falls back to its manual per-expert path
+    when this returns False.
+    """
+    try:
+        from atom.config import get_current_atom_config
+
+        get_current_atom_config()
+        return True
+    except (AssertionError, ImportError):
+        return False
 
 
 def _dequant_fp8_block_to_bf16(w_fp8, scale, block=128):
@@ -1015,11 +1033,44 @@ class Expert(nn.Module):
     the SiLU * up product — matches reference behavior exactly.
     """
 
-    def __init__(self, dim: int, inter_dim: int, swiglu_limit: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        swiglu_limit: float = 0.0,
+        quant_config: Optional[Any] = None,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.w1 = nn.Linear(dim, inter_dim, bias=False)
-        self.w2 = nn.Linear(inter_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, inter_dim, bias=False)
+        if quant_config is None:
+            self.w1 = nn.Linear(dim, inter_dim, bias=False)
+            self.w2 = nn.Linear(inter_dim, dim, bias=False)
+            self.w3 = nn.Linear(dim, inter_dim, bias=False)
+        else:
+            # Real-checkpoint path: route through ATOM TP linear so FP8 weights
+            # auto-load. shared_experts is the only Expert that takes this path
+            # (routed experts go through FusedMoE).
+            self.w1 = ColumnParallelLinear(
+                dim,
+                inter_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.w1",
+            )
+            self.w2 = RowParallelLinear(
+                inter_dim,
+                dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.w2",
+            )
+            self.w3 = ColumnParallelLinear(
+                dim,
+                inter_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.w3",
+            )
         self.swiglu_limit = swiglu_limit
 
     def forward(
@@ -1038,51 +1089,119 @@ class Expert(nn.Module):
 
 
 class MoE(nn.Module):
-    """Mixture-of-Experts: top-k routed experts + 1 shared expert.
+    """Mixture-of-Experts: top-k routed experts (FusedMoE) + 1 shared expert.
 
-    Port of inference/model.py:609-645. PR1 single-rank only — every rank holds
-    every expert. PR3 will swap to FusedMoE for TP/EP sharding.
+    PR3b: replaces the per-expert nn.Linear list with `FusedMoE` so 384 routed
+    experts shard across TP/EP ranks and load FP4 weights via the existing
+    `gemm_a4w4_quant` aiter kernel.
 
-    `input_ids` is plumbed through (used by hash-routing layers' Gate).
+    Routing math (`sqrtsoftplus(scores) + bias` topk) is delegated to
+    `FusedMoE.select_experts(scoring_func="sqrtsoftplus", e_score_correction_bias=...)`,
+    which we extended in atom/model_ops/moe.py to add the V4 path.
+
+    Hash routing for `layer_id < n_hash_layers` (first 3 V4 layers) is NOT yet
+    wired through FusedMoE — the `tid2eid` buffer is declared so weight loading
+    completes, but inference uses the standard sqrtsoftplus path. Hash layers
+    will produce incorrect routing; correct hash routing lands in PR3+.
     """
 
-    def __init__(self, layer_id: int, args: DeepseekV4Args):
+    def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
         super().__init__()
         self.layer_id = layer_id
         self.dim = args.dim
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts  # PR1 single-rank
         self.n_activated_experts = args.n_activated_experts
-        self.experts_start_idx = 0  # PR1 single-rank
-        self.experts_end_idx = self.n_local_experts
+        self.is_hash_layer = layer_id < args.n_hash_layers
+        self.routed_scaling_factor = args.route_scale
+        qc = args.quant_config
+        # FusedMoE requires `get_current_atom_config()` (TP/EP/dtype globals).
+        # When that's not set (toy / dummy validation path), fall back to the
+        # manual per-expert path which preserves PR1 bit-exact reference parity.
+        self.use_fused = qc is not None and _have_current_atom_config()
 
-        self.gate = Gate(layer_id, args)
-        # PR1 BF16 experts (no FP4/FP8). PR2 will switch dtype to expert_dtype.
-        self.experts = nn.ModuleList(
-            [
-                Expert(args.dim, args.moe_inter_dim, swiglu_limit=args.swiglu_limit)
-                for _ in range(self.n_routed_experts)
-            ]
-        )
-        assert args.n_shared_experts == 1, "V4 reference assumes 1 shared expert"
-        # Shared expert: no swiglu_limit (matches reference)
-        self.shared_experts = Expert(args.dim, args.moe_inter_dim, swiglu_limit=0.0)
+        if self.use_fused:
+            # ----- Production path: ReplicatedLinear gate + FusedMoE experts -----
+            self.gate = ReplicatedLinear(
+                self.dim,
+                self.n_routed_experts,
+                bias=False,
+                quant_config=None,
+                prefix=f"{prefix}.gate",
+            )
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(self.n_routed_experts, dtype=torch.float32)
+            )
+            if self.is_hash_layer:
+                self.gate.tid2eid = nn.Parameter(
+                    torch.empty(
+                        args.vocab_size, args.n_activated_experts, dtype=torch.int32
+                    ),
+                    requires_grad=False,
+                )
+
+            from types import SimpleNamespace
+
+            moe_cfg = SimpleNamespace(
+                routed_scaling_factor=self.routed_scaling_factor,
+                n_shared_experts=args.n_shared_experts,
+            )
+            self.experts = FusedMoE(
+                num_experts=self.n_routed_experts,
+                top_k=self.n_activated_experts,
+                hidden_size=self.dim,
+                intermediate_size=args.moe_inter_dim,
+                reduce_results=False,
+                renormalize=True,
+                quant_config=qc,
+                use_grouped_topk=False,
+                prefix=f"{prefix}.experts",
+                scoring_func=args.score_func,  # "sqrtsoftplus"
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                config=moe_cfg,
+            )
+            assert args.n_shared_experts == 1
+            self.shared_experts = Expert(
+                args.dim,
+                args.moe_inter_dim,
+                swiglu_limit=0.0,
+                quant_config=qc,
+                prefix=f"{prefix}.shared_experts",
+            )
+        else:
+            # ----- Toy / dummy path: manual Gate + per-expert nn.Linear -----
+            # Preserves bit-exact reference parity for PR1 verify (no FusedMoE
+            # math drift, no requirement on global atom config).
+            self.gate = Gate(layer_id, args)
+            self.experts = nn.ModuleList(
+                [
+                    Expert(args.dim, args.moe_inter_dim, swiglu_limit=args.swiglu_limit)
+                    for _ in range(self.n_routed_experts)
+                ]
+            )
+            assert args.n_shared_experts == 1
+            self.shared_experts = Expert(args.dim, args.moe_inter_dim, swiglu_limit=0.0)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
-        weights, indices = self.gate(x, input_ids.flatten())
-        y = torch.zeros_like(x, dtype=torch.float32)
-        counts = torch.bincount(
-            indices.flatten(), minlength=self.n_routed_experts
-        ).tolist()
-        for i in range(self.experts_start_idx, self.experts_end_idx):
-            if counts[i] == 0:
-                continue
-            expert = self.experts[i]
-            idx, top = torch.where(indices == i)
-            y[idx] = y[idx] + expert(x[idx], weights[idx, top, None])
-        # PR1 single-rank: no all_reduce
+        if self.use_fused:
+            # Production: FusedMoE handles top-k + weighted dispatch via aiter.
+            router_logits = self.gate(x)
+            y = self.experts(hidden_states=x, router_logits=router_logits)
+        else:
+            # Toy path: original manual dispatch with custom Gate (preserves
+            # bit-exact reference parity in PR1 verify).
+            weights, indices = self.gate(x, input_ids.flatten())
+            y = torch.zeros_like(x, dtype=torch.float32)
+            counts = torch.bincount(
+                indices.flatten(), minlength=self.n_routed_experts
+            ).tolist()
+            for i in range(self.n_routed_experts):
+                if counts[i] == 0:
+                    continue
+                idx, top = torch.where(indices == i)
+                y[idx] = y[idx] + self.experts[i](x[idx], weights[idx, top, None])
+        # Add shared expert contribution.
         y = y + self.shared_experts(x)
         return y.type_as(x).view(shape)
 
@@ -1105,7 +1224,7 @@ class Block(nn.Module):
         self.layer_id = layer_id
         self.norm_eps = args.norm_eps
         self.attn = DeepseekV4Attention(layer_id, args, prefix=f"{prefix}.attn")
-        self.ffn = MoE(layer_id, args)
+        self.ffn = MoE(layer_id, args, prefix=f"{prefix}.ffn")
         self.attn_norm = _RMSNorm(args.dim, self.norm_eps)
         self.ffn_norm = _RMSNorm(args.dim, self.norm_eps)
         self.hc_mult = hc_mult = args.hc_mult
@@ -1471,6 +1590,19 @@ class DeepseekV4ForCausalLM(nn.Module):
         # the hc_mult-expanded residual). So `hidden_states` already IS logits.
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """Return (param_name, weight_name, expert_id, shard_id) tuples for FusedMoE.
+
+        V4 expert weights on disk are named `ffn.experts.{e}.w{1,2,3}`. Pass
+        these as the gate/down/up names to FusedMoE.make_expert_params_mapping.
+        """
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.args.n_routed_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from an iterable of (name, tensor) pairs.
 
@@ -1510,11 +1642,52 @@ class DeepseekV4ForCausalLM(nn.Module):
         for name, tensor in weights:
             scratch[name] = tensor
 
+        # ----- FusedMoE expert weight dispatch (PR3b) -----
+        # Routed expert weights `layers.{i}.ffn.experts.{e}.w{1,2,3}.{weight,scale}`
+        # on disk go to FusedMoE's merged `experts.w13_*` / `experts.w2_*` params
+        # via the per-expert weight_loader hook.
+        try:
+            expert_mapping = self.get_expert_mapping()
+        except Exception:
+            expert_mapping = []
+        for param_suffix, weight_suffix, expert_id, shard_id in expert_mapping:
+            # weight_suffix e.g. ".w1.weight"; param_suffix e.g. ".w13_weight".
+            # Match every layer's `ffn.experts.{e}.w*` and dispatch.
+            for ckpt_name, tensor in list(scratch.items()):
+                if not ckpt_name.endswith(weight_suffix):
+                    continue
+                # ckpt_name like "layers.7.ffn.experts.31.w1.weight"
+                # → param_name "layers.7.ffn.experts.w13_weight"
+                # weight_suffix is e.g. ".w1.weight"; replace `.{e}` + suffix.
+                expert_part = f".experts.{expert_id}{weight_suffix}"
+                if expert_part not in ckpt_name:
+                    continue
+                tgt_name = ckpt_name.replace(expert_part, f".experts{param_suffix}")
+                param = targets.get(tgt_name)
+                if param is None:
+                    continue
+                loader = getattr(param, "weight_loader", None)
+                if loader is None:
+                    continue
+                loader(
+                    param,
+                    tensor.to(param.device),
+                    weight_suffix.lstrip("."),
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                )
+                loaded.add(tgt_name)
+
         for tgt_name, param in targets.items():
             ckpt_name = tgt_name
             # ATOM scale → on-disk scale name
             if ckpt_name.endswith(".weight_scale"):
                 alt = ckpt_name.replace(".weight_scale", ".scale")
+                if alt in scratch:
+                    ckpt_name = alt
+            # ATOM `gate.e_score_correction_bias` ↔ on-disk `gate.bias`
+            if ckpt_name.endswith(".gate.e_score_correction_bias"):
+                alt = ckpt_name.replace(".gate.e_score_correction_bias", ".gate.bias")
                 if alt in scratch:
                     ckpt_name = alt
             if ckpt_name not in scratch:

@@ -2602,6 +2602,27 @@ class FusedMoE(torch.nn.Module):
                     ).clamp_min(1e-20)
 
                 topk_ids = topk_ids.to(torch.int32)
+            elif scoring_func == "sqrtsoftplus":
+                # DeepSeek-V4 routing: sqrt(softplus(scores)) + bias for selection;
+                # weights gathered from the unbiased sqrt(softplus(.)) values.
+                routing_weights = torch.nn.functional.softplus(
+                    router_logits.float()
+                ).sqrt()
+                scores_for_choice = routing_weights
+                if e_score_correction_bias is not None:
+                    scores_for_choice = scores_for_choice + e_score_correction_bias
+
+                topk_ids = torch.topk(
+                    scores_for_choice, top_k, dim=-1, sorted=False
+                ).indices
+                topk_weights = routing_weights.gather(dim=-1, index=topk_ids)
+
+                if renormalize:
+                    topk_weights = topk_weights / topk_weights.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1e-20)
+
+                topk_ids = topk_ids.to(torch.int32)
             else:
                 raise ValueError(
                     f"Unsupported scoring function for non-grouped topk: {scoring_func}"
