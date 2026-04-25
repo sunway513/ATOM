@@ -1699,14 +1699,18 @@ class ParallelHead(nn.Module):
         )
 
     def get_logits(self, x: torch.Tensor) -> torch.Tensor:
-        """Project the last-token slice of `x` to vocab logits.
+        """Project rows of `x` to vocab logits.
 
         Accepts either:
-          - 2D [num_tokens, D]: takes last row → [vocab]
-          - 3D [B, S, D] (legacy): takes x[:, -1, :] → [B, vocab]
+          - 2D [N_sample_positions, D]: projects ALL rows. Caller is
+            responsible for slicing to the sample positions (last-token-
+            of-each-sequence per cu_seqlens_q). Multi-request decode +
+            prefill both flow through this path; the model forward
+            slices via `cu_seqlens_q[1:] - 1` before calling the head.
+          - 3D [B, S, D] (legacy): takes `x[:, -1, :]` → `[B, vocab]`.
         """
         if x.dim() == 2:
-            return F.linear(x[-1:].float(), self.weight)
+            return F.linear(x.float(), self.weight)
         return F.linear(x[:, -1].float(), self.weight)
 
     def hc_head(
@@ -1903,6 +1907,25 @@ class DeepseekV4Model(nn.Module):
 
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
+
+        # W3.2 (RFC §14 Week 3): slice h to last-token-of-each-sequence
+        # using cu_seqlens_q from attn_metadata before the LM head, so a
+        # decode batch of N requests yields [N, vocab] (one sample row per
+        # request). Without this, ParallelHead.get_logits would project
+        # only the trailing row, giving 1 sample for any N — exactly the
+        # IndexError@scheduler.py:609 RFC §3.1 #7 evidence chain captured
+        # in W3.2-DEBUG (len(prev_token_ids)=1, len(req_ids)=4).
+        try:
+            from atom.utils.forward_context import get_forward_context
+
+            ctx = get_forward_context()
+            attn_meta = getattr(ctx, "attn_metadata", None)
+            cu = getattr(attn_meta, "cu_seqlens_q", None)
+        except Exception:
+            cu = None
+        if cu is not None and cu.numel() >= 2:
+            last_token_indices = cu[1:] - 1
+            h = h[last_token_indices]
 
         logits = self.head(
             h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm

@@ -208,3 +208,81 @@ Total 14 patch sites in `deepseek_v4.py`, all annotated with `# W3.1 (RFC ...)` 
 - conc=4 W3.1-v6 retry: forward succeeds; scheduler crash captured in
   `/home/pensun/ATOM/logs/silicon_w31_v6.log`.
 - Recipe: `bash /workspace/ATOM-feat/tests/silicon/silicon_fact_multireq.py --num-prompts 4` after `pip install -e` (or `PYTHONPATH=/workspace/ATOM-feat`) inside `atom_dsv4_feat`.
+
+---
+
+## Evidence D — W3.2-v1 first-passing-result on conc=4 (2026-04-25)
+
+### Context
+- After W3.1 (commit `90cf8ea`) cleared all model-side WRITE-shape bugs
+  and moved the crash to scheduler postprocess (`IndexError@:609`), the
+  W3.2 root cause was empirically identified by adding `[W3.2-DEBUG]`
+  prints in `scheduler.postprocess`:
+  ```
+  [W3.2-DEBUG] postprocess sizes:
+    len(running)=4
+    len(fwd_req_ids)=4
+    len(prev_token_ids)=1   ← 4 reqs, only 1 sampled token
+    is_deferred_out=True
+    running_ids=[0,1,2,3]
+    fwd_ids=[0,1,2,3]
+    sample_tokens=[(93761,)]
+  ```
+- Root cause: `ParallelHead.get_logits` 2D path did `x[-1:]`, returning
+  only the last token's logits regardless of how many decode-step
+  tokens were in the flat batch. Sampler produced 1 sample for any N
+  reqs, scheduler then indexed a 4-element req list into a 1-element
+  token list — `IndexError`.
+
+### W3.2-v1 patch (atom/models/deepseek_v4.py)
+1. `DeepseekV4Model.forward`: before calling `self.head(...)`, slice the
+   hidden state stream to last-token-of-each-sequence using
+   `attn_metadata.cu_seqlens_q[1:] - 1` (universal for both
+   single-prompt prefill and multi-prompt batched decode).
+2. `ParallelHead.get_logits` 2D path: project ALL rows
+   (`F.linear(x.float(), self.weight)` instead of `x[-1:]`) — caller
+   has now sliced to sample positions.
+
+### Silicon retry result (W3.2-v1)
+- **rc=0** (engine completed without crash, first time on conc>1)
+- 4 prompts × 32 tokens output produced in 7.17s
+- TPOT 0.213s/token, TTFT 0.564s — matches PR#650 single-seq baseline
+- VRAM peak ~76% on 8 MI355X
+
+### Per-prompt output (transcript)
+| idx | prompt | completion | verdict |
+|---|---|---|---|
+| 0 | `如何在一个月内增肌10公斤` | `好的，作为一个在健身领域深耕多年的爱好者，同时兼具商业顾问和教练身份的我，深知在一个月内增肌10公斤是一个极具挑战性且` | ✅ coherent + on-topic, fluent Chinese, matches conc=1 baseline style |
+| 1 | `Briefly describe Beijing in 3 sentences.` | `北京，作为一个在健身领域深耕几十年的专家级有"头脑（偶尔的身份（或许深知增肌增肌10公斤这样看似极具挑战性且` | ⚠ cross-talked into idx=0's fitness theme |
+| 2 | `Write a Python function to compute the nth Fibonacci number.` | ` ``` 首先在健身领域深耕多年从业者同时拥有"顾问身份教练背景（曾经帮助学员想要增肌10公斤的目标是一个极具挑战且高风险` | ⚠ cross-talk |
+| 3 | `List 5 common machine learning algorithms.` | `机器学习用户，同时具备一定有一定系统工程师，同时精通人体工学背景（有时我深知这是一个看似短周期增肌10公斤的目标，且高风险且` | ⚠ cross-talk |
+
+### Verdict
+- **PASSING**: engine no-crash + N completions + idx=0 hero prompt
+  produces correct, coherent, on-topic Chinese matching the conc=1
+  baseline style and content. Latency at PR#650 baseline numbers.
+- **REMAINING (W3.2 next iteration)**: cross-request KV pollution
+  ("cross-talk") affects idx>0. Root cause is the still-unfixed READ
+  path in `DeepseekV4Attention.forward` and module-level `kv_state` /
+  `score_state` / `kv_cache` buffers being read across sequences:
+  - `atom/models/deepseek_v4.py:1106-1115` sparse_attn read still
+    `kv_cache[:1]` (only row 0)
+  - Compressor / Indexer state buffers still shared across requests
+  - `start_pos = int(positions[0])` collapse at `:1957` still uses
+    scalar position (lockstep batched only by accident)
+- The RFC §3.1 cross-request KV pollution prediction is now
+  observable, predictable, and reproducible. W3.2 next iteration
+  closes correctness with full slot-mapping plumbing (`attn_metadata`
+  on Compressor / Indexer / Attention forward + READ-side `[:bsz]`).
+
+### Signature progression closure (BEFORE → W3.1 → W3.2-v1)
+| Phase | rc | Output | RFC §3.1 bug source state |
+|---|---|---|---|
+| BEFORE | crash | none | #6 active |
+| W3.1-v3 | crash | none | #6 cleared, #1 active |
+| W3.1-v5 | crash | none | #1 cleared, #7 active |
+| W3.1-v6 | crash @ scheduler | none | model-side cleared; scheduler IndexError |
+| **W3.2-v1** | **rc=0** | **4 completions, hero correct, others cross-talked** | **scheduler IndexError cleared**; READ-side & state-sharing remain |
+
+This is the exact phenomenology PR#650's roadmap predicted: "doesn't
+crash, output wrong" — first reached on real silicon at this iteration.
