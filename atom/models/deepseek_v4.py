@@ -465,15 +465,18 @@ class Compressor(nn.Module):
         compression block boundary is hit; otherwise just buffers state and returns None.
 
         Args:
-            x: [B, S, dim] input hidden states (BF16 or FP32).
+            x: [num_tokens, dim] (2D, ATOM convention) or [B, S, dim] (3D, legacy).
+                2D input is treated as a single sequence (B=1 implicit).
             start_pos: starting position in the absolute sequence (0 = prefill).
         Returns:
-            Compressed KV slice that was just written ([B, S/ratio, head_dim] in
-            prefill, or [B, 1, head_dim] in decode), or None if no compression
+            Compressed KV slice that was just written ([1, S/ratio, head_dim] in
+            prefill, or [1, 1, head_dim] in decode), or None if no compression
             boundary was hit on this call.
         """
         assert self.kv_cache is not None, "compressor.kv_cache must be set by owner"
         assert self.freqs_cis is not None, "compressor.freqs_cis must be set by owner"
+        if x.dim() == 2:
+            x = x.unsqueeze(0)  # [num_tokens, dim] → [1, num_tokens, dim]
         bsz, seqlen, _ = x.size()
         ratio = self.compress_ratio
         overlap = self.overlap
@@ -647,17 +650,17 @@ class Indexer(nn.Module):
         """Compute sparse top-k indices over the indexer's compressed KV cache.
 
         Args:
-            x: [B, S, dim] input hidden states (for compressor + weights_proj).
-            qr: [B, S, q_lora_rank] latent query (shared with main attention's q_a).
+            x: [num_tokens, dim] input hidden states (for compressor + weights_proj).
+            qr: [num_tokens, q_lora_rank] latent query shared with main Attention's q_a.
             start_pos: absolute sequence start position.
             offset: offset added to returned indices to land them in the
                 concatenated (window || compressed) KV layout consumed by sparse_attn.
         Returns:
-            topk_idxs: [B, S, K] int — selected compressed-KV positions (with offset),
-                       -1 = invalid (future-masked).
+            topk_idxs: [1, num_tokens, K] int (B=1 implicit). -1 = future-masked.
         """
         assert self.freqs_cis is not None
-        bsz, seqlen, _ = x.size()
+        assert x.dim() == 2 and qr.dim() == 2
+        seqlen = x.size(0)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         ratio = self.compress_ratio
         rd = self.rope_head_dim
@@ -668,37 +671,39 @@ class Indexer(nn.Module):
             self.compressor.kv_cache = self.kv_cache
             self.compressor.freqs_cis = self.freqs_cis
 
-        # ----- Indexer Q -----
-        q = self.wq_b(qr)
-        q = q.unflatten(-1, (self.n_local_heads, self.head_dim))
+        # ----- Indexer Q (2D Linear, then add B=1 dim for RoPE / einsum) -----
+        q = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
+        q = q.unsqueeze(0)  # [1, S, H, D]
         _apply_rotary_emb(q[..., -rd:], freqs_cis)
         q = rotate_activation(q)
-        # Indexer Q uses FP4 simulation (matches reference QAT).
         fp4_act_quant_inplace(q, _FP4_BLOCK_SIZE)
 
-        # ----- Indexer KV -----
-        # Compressor mutates self.kv_cache (writes the new compressed entries).
+        # ----- Indexer KV (Compressor takes 2D, mutates kv_cache) -----
         self.compressor(x, start_pos)
-        weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+        # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
+        weights = (
+            self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
+        ).unsqueeze(0)
 
         # ----- Index score -----
-        # q: [B, S, H, D]; kv_cache slice: [B, T, D] -> einsum to [B, S, H, T]
         index_score = torch.einsum(
-            "bshd,btd->bsht", q, self.kv_cache[:bsz, : end_pos // ratio]
+            "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
         )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
-        # PR1 single-rank: skip all_reduce.
 
         # ----- Top-k selection over compressed positions -----
         if start_pos == 0:
             mask = (
-                torch.arange(seqlen // ratio).repeat(seqlen, 1)
-                >= torch.arange(1, seqlen + 1).unsqueeze(1) // ratio
+                torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
+                >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
             )
             index_score = index_score + torch.where(mask, float("-inf"), 0.0)
         topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
         if start_pos == 0:
-            mask = topk_idxs >= torch.arange(1, seqlen + 1).unsqueeze(1) // ratio
+            mask = (
+                topk_idxs
+                >= torch.arange(1, seqlen + 1, device=x.device).unsqueeze(1) // ratio
+            )
             topk_idxs = torch.where(mask, -1, topk_idxs + offset)
         else:
             topk_idxs = topk_idxs + offset
@@ -847,12 +852,17 @@ class DeepseekV4Attention(nn.Module):
         """Compute attention for `x` at absolute position `start_pos`.
 
         Args:
-            x: [B, S, dim] input hidden states (BF16).
-            start_pos: 0 = prefill (whole sequence); >0 = decode (S typically 1).
+            x: [num_tokens, dim] flat ATOM convention. Single-sequence
+                (B=1 implicit; multi-sequence batching needs attn_metadata,
+                deferred until ATOM's scheduler integration).
+            start_pos: absolute position of the first token in this batch.
         Returns:
-            [B, S, dim] attention output (BF16).
+            [num_tokens, dim] attention output (BF16).
         """
-        bsz, seqlen, _ = x.size()
+        assert (
+            x.dim() == 2
+        ), f"DeepseekV4Attention expects 2D [num_tokens, dim], got {x.shape}"
+        seqlen = x.size(0)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         win = self.window_size
         ratio = self.compress_ratio
@@ -867,45 +877,47 @@ class DeepseekV4Attention(nn.Module):
                 self.indexer.freqs_cis = self.freqs_cis
 
         # ----- Q: low-rank projection + per-head RMSNorm + partial RoPE -----
-        qr = q = self.q_norm(self.wq_a(x))  # qr is the latent shared with Indexer
-        q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
-        # Per-head RMSNorm (no learnable weight; matches reference)
+        # ATOM TP linears require 2D inputs; subsequent ops (RoPE, sparse_attn)
+        # need a [B=1, S, ...] view. We add the singleton batch dim only where
+        # required.
+        qr = self.q_norm(self.wq_a(x))  # [S, q_lora_rank], shared with Indexer
+        q = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.eps)
+        # Insert B=1 dim for RoPE / sparse_attn convention.
+        q = q.unsqueeze(0)  # [1, S, H, D]
         _apply_rotary_emb(q[..., -rd:], freqs_cis)
 
         # ----- Window KV: project, RMSNorm, RoPE on rope dims, FP8-sim on nope -----
-        kv = self.wkv(x)
-        kv = self.kv_norm(kv)
+        kv = self.wkv(x)  # [S, head_dim]
+        kv = self.kv_norm(kv).unsqueeze(0)  # [1, S, head_dim]
         _apply_rotary_emb(kv[..., -rd:], freqs_cis)
         act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
-        # ----- Build topk_idxs: window indices first, then compressed indices -----
-        topk_idxs = _get_window_topk_idxs(win, bsz, seqlen, start_pos)
+        # ----- Build topk_idxs (B=1 implicit) -----
+        topk_idxs = _get_window_topk_idxs(win, 1, seqlen, start_pos)
         if self.compress_ratio:
-            # `offset` is the position in the concatenated [window || compressed]
-            # tensor where compressed KV entries start.
             offset = kv.size(1) if start_pos == 0 else win
             if self.indexer is not None:
                 compress_topk_idxs = self.indexer(x, qr, start_pos, offset)
             else:
                 compress_topk_idxs = _get_compress_topk_idxs(
-                    ratio, bsz, seqlen, start_pos, offset
+                    ratio, 1, seqlen, start_pos, offset
                 )
             topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
         topk_idxs = topk_idxs.int()
 
         # ----- Attention: prefill writes window KV linearly + concats fresh
         # compressed entries; decode writes one slot in window ring buffer
-        # then reads from the persistent kv_cache. -----
+        # then reads from the persistent kv_cache. (kv_cache slot 0 = our
+        # implicit B=1.) -----
         if start_pos == 0:
             if seqlen <= win:
-                self.kv_cache[:bsz, :seqlen] = kv
+                self.kv_cache[:1, :seqlen] = kv
             else:
-                # Wrap the last `win` tokens into a ring buffer rooted at `cutoff`.
                 cutoff = seqlen % win
                 (
-                    self.kv_cache[:bsz, cutoff:win],
-                    self.kv_cache[:bsz, :cutoff],
+                    self.kv_cache[:1, cutoff:win],
+                    self.kv_cache[:1, :cutoff],
                 ) = kv[
                     :, -win:
                 ].split([win - cutoff, cutoff], dim=1)
@@ -914,12 +926,12 @@ class DeepseekV4Attention(nn.Module):
                     kv = torch.cat([kv, kv_compress], dim=1)
             o = sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
-            self.kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
+            self.kv_cache[:1, start_pos % win] = kv.squeeze(1)
             if self.compress_ratio:
                 self.compressor(x, start_pos)
             o = sparse_attn(
                 q,
-                self.kv_cache[:bsz],
+                self.kv_cache[:1],
                 self.attn_sink,
                 topk_idxs,
                 self.softmax_scale,
@@ -929,11 +941,12 @@ class DeepseekV4Attention(nn.Module):
         # carried in by the value-side RoPE of the KV entries.
         _apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
 
-        # ----- Grouped output LoRA: einsum per group, then RowParallel-equivalent project -----
-        o = o.view(bsz, seqlen, self.n_local_groups, -1)
+        # ----- Grouped output LoRA -----
+        # o: [1, S, H, D] → drop B; reshape into groups for the einsum.
+        o = o.squeeze(0).view(seqlen, self.n_local_groups, -1)  # [S, g, H/g * D]
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        x = self.wo_b(o.flatten(2))
+        o = torch.einsum("sgd,grd->sgr", o, wo_a)  # [S, g, o_lora_rank]
+        x = self.wo_b(o.flatten(1))  # 2D [S, dim]
         return x
 
 
@@ -1115,14 +1128,18 @@ class Block(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Reduce [B, S, hc, D] residual to [B, S, D] sub-layer input.
+        """Reduce [..., hc, D] residual to [..., D] sub-layer input.
+
+        Shape-agnostic in leading dims: works for [B, S, hc, D] (legacy 4D) and
+        [num_tokens, hc, D] (ATOM 2D-flat convention) alike. Only the trailing
+        (hc, D) pair matters.
 
         Also returns post-weights and combination matrix to be applied in hc_post.
         """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()  # [B, S, hc*D]
+        x = x.flatten(-2).float()  # [..., hc*D]
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn) * rsqrt  # [B, S, mix_hc]
+        mixes = F.linear(x, hc_fn) * rsqrt  # [..., mix_hc]
         pre, post, comb = hc_split_sinkhorn(
             mixes,
             hc_scale,
@@ -1131,8 +1148,8 @@ class Block(nn.Module):
             self.hc_sinkhorn_iters,
             self.hc_eps,
         )
-        # pre: [B, S, hc]; weighted-sum hc copies into single [B, S, D]
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        # pre: [..., hc]; weighted-sum hc copies into single [..., D]
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype), post, comb
 
     def hc_post(
@@ -1142,16 +1159,18 @@ class Block(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ) -> torch.Tensor:
-        """Expand [B, S, D] sub-layer output back to [B, S, hc, D] residual.
+        """Expand [..., D] sub-layer output back to [..., hc, D] residual.
 
-        post[..., hc] gates the new contribution (broadcast across hc dim);
-        comb[..., hc, hc] linearly combines the previous residual's hc copies.
+        Shape-agnostic in leading dims (mirrors hc_pre).
+
+        post[..., hc] gates the new contribution; comb[..., hc, hc] linearly
+        combines the previous residual's hc copies.
         """
-        # x: [B, S, D]; residual: [B, S, hc, D]
-        # post.unsqueeze(-1) * x.unsqueeze(-2): [B, S, hc, D] gating
-        # comb.unsqueeze(-1) * residual.unsqueeze(-2): [B, S, hc, hc, D]; sum over dim=2
+        # x: [..., D]; residual: [..., hc, D]
+        # post.unsqueeze(-1) * x.unsqueeze(-2): [..., hc, D] gating
+        # comb.unsqueeze(-1) * residual.unsqueeze(-2): [..., hc, hc, D]; sum over hc-dim
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=-3
         )
         return y.type_as(x)
 
@@ -1207,7 +1226,14 @@ class ParallelHead(nn.Module):
         )
 
     def get_logits(self, x: torch.Tensor) -> torch.Tensor:
-        # Reference projects only the last token: x[:, -1].
+        """Project the last-token slice of `x` to vocab logits.
+
+        Accepts either:
+          - 2D [num_tokens, D]: takes last row → [vocab]
+          - 3D [B, S, D] (legacy): takes x[:, -1, :] → [B, vocab]
+        """
+        if x.dim() == 2:
+            return F.linear(x[-1:].float(), self.weight)
         return F.linear(x[:, -1].float(), self.weight)
 
     def hc_head(
@@ -1217,12 +1243,16 @@ class ParallelHead(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ) -> torch.Tensor:
+        """Reduce [..., hc, D] → [..., D] via Sigmoid-gated weighted sum.
+
+        Shape-agnostic in leading dims (mirrors Block.hc_pre / hc_post).
+        """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()
+        x = x.flatten(-2).float()  # [..., hc*D]
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x, hc_fn) * rsqrt
         pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype)
 
     def forward(
@@ -1293,15 +1323,26 @@ class MTPBlock(Block):
     def forward(
         self, x: torch.Tensor, start_pos: int, input_ids: torch.Tensor
     ) -> torch.Tensor:
-        # x: [B, S, hc_mult, D] residual stream from main model
+        """Forward.
+
+        Args:
+            x: residual stream from main model. Either [num_tokens, hc, D]
+                (ATOM 2D-flat convention) or [B, S, hc, D] (legacy 4D).
+            start_pos: absolute position offset.
+            input_ids: matching token ids.
+        Returns:
+            Logits of the last token (vocab projected by self.head).
+        """
         assert (
             self.embed is not None and self.head is not None
         ), "MTPBlock requires .embed and .head to be assigned by the parent model"
-        e = self.embed(input_ids)
+        e = self.embed(input_ids)  # [num_tokens, D] or [B, S, D]
         e = self.enorm(e)
         x = self.hnorm(x)
-        # Mix embedding + hidden into a fresh residual stream
-        x = self.e_proj(e).unsqueeze(2) + self.h_proj(x)
+        # Mix embedding + hidden into a fresh residual stream. The unsqueeze
+        # adds the hc dim before the trailing D so [num_tokens, D] → [num_tokens, 1, D]
+        # broadcasts correctly against x [num_tokens, hc, D]. Same for 4D path.
+        x = self.e_proj(e).unsqueeze(-2) + self.h_proj(x)
         x = super().forward(x, start_pos, input_ids)
         logits = self.head(
             x, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
@@ -1367,9 +1408,25 @@ class DeepseekV4Model(nn.Module):
         start_pos: int = 0,
         **model_kwargs: dict,
     ) -> torch.Tensor:
-        h = self.embed(input_ids)
-        # Expand to hc_mult copies for Hyper-Connections.
-        h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
+        """Forward.
+
+        Args:
+            input_ids: 1D `[num_tokens]` (ATOM 2D-flat convention) OR 2D
+                `[B, S]` (legacy reference convention; treated as a single
+                sequence of B*S tokens — only correct for B=1).
+            start_pos: absolute position of the first token.
+        Returns:
+            Logits of the last token: `[vocab]` (1D path) or `[B, vocab]` (2D path).
+        """
+        # Normalize input_ids to 1D [num_tokens] for the 2D internal convention.
+        if input_ids.dim() == 2:
+            assert (
+                input_ids.size(0) == 1
+            ), "B>1 batched input_ids needs attn_metadata; not supported yet"
+            input_ids = input_ids.flatten()
+        h = self.embed(input_ids)  # [num_tokens, dim]
+        # Expand to hc_mult copies for Hyper-Connections: [num_tokens, hc, dim]
+        h = h.unsqueeze(-2).repeat(1, self.hc_mult, 1)
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
         logits = self.head(
