@@ -200,9 +200,12 @@ def make_v4_quant_config(hf_config):
             ".compressor.wkv" in layer_name
             or ".compressor.wgate" in layer_name
             or ".indexer.weights_proj" in layer_name
-            or layer_name.endswith(".wo_a")
         ):
             return no_spec
+        # NOTE: wo_a is FP8 on disk but used as BF16 in forward (aiter has no FP8
+        # grouped einsum). It's NOT in no_spec — instead we let it allocate as
+        # FP8 + e8m0 scale so the standard loader fills both, then
+        # DeepseekV4Attention.process_weights_after_loading dequants in place.
         return orig_lookup(layer_name, check_children=check_children)
 
     base.get_layer_quant_config = overridden
@@ -869,6 +872,37 @@ class DeepseekV4Attention(nn.Module):
             args.beta_slow,
         )
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+
+    def process_weights_after_loading(self) -> None:
+        """Dequant wo_a (FP8 + e8m0 block scale) → BF16 in place.
+
+        Called by ATOM's standard loader (atom.model_loader.loader.load_model)
+        after all weights are filled. wo_a is allocated as FP8 ColumnParallelLinear
+        so both `.weight` (FP8) and `.weight_scale` (e8m0 block scale) load
+        correctly via the standard FP8 path. We then dequant to BF16 because
+        forward needs `wo_a.weight` as BF16 for the grouped LoRA einsum
+        (`bsgd,grd->bsgr`); aiter has no FP8 grouped einsum.
+
+        Idempotent: if wo_a.weight is already BF16 (e.g. dequant was applied
+        elsewhere), this is a no-op.
+        """
+        w = self.wo_a.weight
+        if w.dtype == torch.bfloat16:
+            return  # already dequanted
+        scale = getattr(self.wo_a, "weight_scale", None)
+        if w.dtype != torch.float8_e4m3fn or scale is None:
+            return  # nothing to do
+        # Dequant: w (FP8 [out, in]) × scale (e8m0 [out/128, in/128]) → BF16
+        bf16 = _dequant_fp8_block_to_bf16(
+            w.data, scale.data.to(torch.float32), block=128
+        )
+        # Replace the weight tensor with BF16, drop the scale param so future
+        # loads / introspection don't try to use a stale FP8 scale.
+        self.wo_a.weight = torch.nn.Parameter(bf16, requires_grad=False)
+        try:
+            delattr(self.wo_a, "weight_scale")
+        except AttributeError:
+            pass
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         """Compute attention for `x` at absolute position `start_pos`.
@@ -1794,27 +1828,11 @@ class DeepseekV4ForCausalLM(nn.Module):
             if ckpt_name not in scratch:
                 continue
 
-            # Special case: wo_a is FP8+scale on disk, BF16 in model.
-            if ckpt_name.endswith(".wo_a.weight") and param.dtype == torch.bfloat16:
-                scale_name = ckpt_name.replace(".weight", ".scale")
-                if scale_name in scratch:
-                    w_fp8 = scratch[ckpt_name]
-                    s = scratch[scale_name]
-                    if w_fp8.dtype == torch.float8_e4m3fn:
-                        bf16 = _dequant_fp8_block_to_bf16(
-                            w_fp8.to(param.device), s.to(param.device), block=128
-                        )
-                        param.data.copy_(bf16)
-                        loaded.add(tgt_name)
-                        continue
-
-            # Skip wo_a.scale entirely — it's consumed by the wo_a.weight handler above.
-            if (
-                ckpt_name.endswith(".wo_a.scale")
-                and tgt_name == ckpt_name
-                and tgt_name not in dict(self.model.named_parameters())
-            ):
-                continue
+            # NOTE: previously wo_a had a manual FP8+scale → BF16 dequant special
+            # case here. wo_a is now FP8 ColumnParallelLinear in the model so
+            # weight + scale load through the standard FP8 path. Dequant happens
+            # in DeepseekV4Attention.process_weights_after_loading (called via the
+            # post-load hook walk at the end of this method).
 
             tensor = scratch[ckpt_name].to(param.device)
 
