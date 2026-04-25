@@ -1648,39 +1648,67 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         # ----- FusedMoE expert weight dispatch (PR3b) -----
         # Routed expert weights `layers.{i}.ffn.experts.{e}.w{1,2,3}.{weight,scale}`
-        # on disk go to FusedMoE's merged `experts.w13_*` / `experts.w2_*` params
-        # via the per-expert weight_loader hook.
+        # on disk go to FusedMoE's merged `experts.w13_*` / `experts.w2_*` params.
+        # The mapping uses substring substitution: `experts.{e}.w1.` (weight_name_part)
+        # → `experts.w13_` (param_name_part), keeping the `weight` / `scale` suffix.
         try:
             expert_mapping = self.get_expert_mapping()
         except Exception:
             expert_mapping = []
-        for param_suffix, weight_suffix, expert_id, shard_id in expert_mapping:
-            # weight_suffix e.g. ".w1.weight"; param_suffix e.g. ".w13_weight".
-            # Match every layer's `ffn.experts.{e}.w*` and dispatch.
-            for ckpt_name, tensor in list(scratch.items()):
-                if not ckpt_name.endswith(weight_suffix):
+        # Build longest-first index for unambiguous matching (shared with std loader).
+        expert_index: dict[str, tuple[str, int, str]] = {}
+        for param_part, weight_part, expert_id, shard_id in expert_mapping:
+            expert_index[weight_part] = (param_part, expert_id, shard_id)
+        weight_parts_sorted = sorted(expert_index.keys(), key=len, reverse=True)
+
+        consumed: set[str] = set()
+        for ckpt_name in list(scratch.keys()):
+            if "ffn.experts." not in ckpt_name and "experts." not in ckpt_name:
+                continue
+            # Skip the routed-gate/non-expert tensors that just live alongside.
+            for wpart in weight_parts_sorted:
+                if wpart not in ckpt_name:
                     continue
-                # ckpt_name like "layers.7.ffn.experts.31.w1.weight"
-                # → param_name "layers.7.ffn.experts.w13_weight"
-                # weight_suffix is e.g. ".w1.weight"; replace `.{e}` + suffix.
-                expert_part = f".experts.{expert_id}{weight_suffix}"
-                if expert_part not in ckpt_name:
-                    continue
-                tgt_name = ckpt_name.replace(expert_part, f".experts{param_suffix}")
+                ppart, expert_id, shard_id = expert_index[wpart]
+                tgt_name = ckpt_name.replace(wpart, ppart)
+                # FusedMoE expert scales: on-disk `.{shard_id}.scale` → param `_weight_scale`
+                # After substring sub `experts.{e}.w1.` → `experts.w13_`, the suffix
+                # becomes `_scale`; rename to match FusedMoE's `_weight_scale` param.
+                if tgt_name.endswith("_scale"):
+                    tgt_name = tgt_name[: -len("_scale")] + "_weight_scale"
+                elif tgt_name.endswith(".scale"):
+                    tgt_name = tgt_name[: -len(".scale")] + ".weight_scale"
                 param = targets.get(tgt_name)
                 if param is None:
-                    continue
+                    break
                 loader = getattr(param, "weight_loader", None)
                 if loader is None:
-                    continue
+                    break
+                tensor = scratch[ckpt_name].to(param.device)
+                # Dtype glue:
+                # - FP4 packed weights: disk is int8, param is float4_e2m1fn_x2;
+                #   FusedMoE._load_w13/w2 already does `.view(torch.uint8)` for fp4x2
+                #   params, but only when the loaded tensor dtype matches.
+                # - FP8 e8m0 scale: disk is float8_e8m0fnu, param is uint8;
+                #   torch's copy_ between mismatched dtypes silently zeros, so
+                #   force a uint8 view here.
+                if tensor.dtype == torch.float8_e8m0fnu and param.dtype == torch.uint8:
+                    tensor = tensor.view(torch.uint8)
+                if tensor.dtype == torch.int8 and param.dtype == torch.float4_e2m1fn_x2:
+                    tensor = tensor.view(torch.uint8)
                 loader(
                     param,
-                    tensor.to(param.device),
-                    weight_suffix.lstrip("."),
+                    tensor,
+                    tgt_name,  # weight_name (post-mapping; "scale" substring drives scale dispatch)
                     shard_id=shard_id,
                     expert_id=expert_id,
                 )
                 loaded.add(tgt_name)
+                consumed.add(ckpt_name)
+                break
+        # Drop consumed expert tensors so the second loop doesn't re-process them.
+        for k in consumed:
+            scratch.pop(k, None)
 
         for tgt_name, param in targets.items():
             ckpt_name = tgt_name
@@ -1721,18 +1749,18 @@ class DeepseekV4ForCausalLM(nn.Module):
 
             tensor = scratch[ckpt_name].to(param.device)
 
-            # Shape mismatch typically means the model still uses a non-quantized
-            # representation for a layer that's quantized on disk (e.g. expert
-            # nn.Linear bf16 vs FP4 packed int8). PR3b will refactor MoE to
-            # FusedMoE at which point shapes match. For now, skip safely.
+            # Shape mismatch handling:
+            # - When test caps n_routed_experts (e.g. 8 vs disk 384), the on-disk
+            #   gate.weight/bias are larger than param. Slice to the first N rows.
+            #   Real serving uses full 384 so this is a no-op there.
+            # - Other shape mismatches indicate a true wiring bug → skip safely.
             if param.shape != tensor.shape:
-                # FP4 packed: param [out, in/2] uint8-view; tensor int8 [out, in/2]
-                if (
-                    param.dtype == torch.float4_e2m1fn_x2
-                    and tensor.dtype == torch.int8
-                    and param.shape == tensor.shape
-                ):
-                    pass  # this branch unreachable under the outer condition
+                can_slice = param.dim() == tensor.dim() and all(
+                    ps <= ts for ps, ts in zip(param.shape, tensor.shape, strict=True)
+                )
+                if can_slice:
+                    slices = tuple(slice(0, s) for s in param.shape)
+                    tensor = tensor[slices].contiguous()
                 else:
                     continue
 
