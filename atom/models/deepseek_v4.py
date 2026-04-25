@@ -762,13 +762,23 @@ class Indexer(nn.Module):
         ).unsqueeze(0)
 
         # ----- Index score -----
-        # W3.1 (RFC §6.2.1): match q's leading batch dim instead of
-        # hardcoding [:1]. With the lingpeng B=1-implicit forward this is
-        # a no-op; with the W3.2 attn_metadata path it picks up the real
-        # per-request batch slice.
-        index_score = torch.einsum(
-            "bshd,btd->bsht", q, self.kv_cache[: q.shape[0], : end_pos // ratio]
-        )
+        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode the
+        # q is shaped [1, N, H, D] (B=1 implicit, N decode tokens flat).
+        # Read each sequence's OWN row of self.kv_cache rather than row 0.
+        # Transpose q to [N, 1, H, D], slice kv_cache[:N], compute
+        # einsum, transpose back.
+        bsz_idx = q.shape[1]
+        if bsz_idx > 1:
+            q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio]  # [N, t, head_dim]
+            index_score = torch.einsum(
+                "bshd,btd->bsht", q_per_seq, kv_per_seq
+            )  # [N, 1, H, t]
+            index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
+        else:
+            index_score = torch.einsum(
+                "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
+            )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
         # ----- Top-k selection over compressed positions -----
@@ -1092,30 +1102,44 @@ class DeepseekV4Attention(nn.Module):
         else:
             # W3.1 (RFC §6.2.1): in batched decode, kv arrives as
             # [1, batch_decode_tokens, head_dim] (implicit B=1, S=batch).
-            # The original `kv.squeeze(1)` was a B=1 trick — removed dim 1
-            # only when decode produced exactly one token (S=1). For
-            # multi-request decode (S=N), squeeze(1) is a no-op and the
-            # write to kv_cache[:1, ...] crashes.
-            # Correct shape arithmetic: squeeze the implicit B=1 (dim 0)
-            # to get [N, head_dim], write into kv_cache[:N, start_pos%win].
+            # squeeze(0) gives [batch_decode, head_dim], write into
+            # kv_cache[:batch_decode, start_pos%win].
             batch_decode = kv.shape[1]
             kv_decode = kv.squeeze(0)  # [batch_decode, head_dim]
             self.kv_cache[:batch_decode, start_pos % win] = kv_decode
             if self.compress_ratio:
                 self.compressor(x, start_pos)
-            # The sparse_attn read still uses implicit B=1 layout because
-            # downstream sparse_attn / topk_idxs were built for [1, S, ...].
-            # Multi-request correctness on the READ side requires per-token
-            # slot mapping (W3.2). For now keep [:1] equivalent — reads
-            # row 0 only; output will be wrong for non-leading requests
-            # but no crash.
-            o = sparse_attn(
-                q,
-                self.kv_cache[:1],
-                self.attn_sink,
-                topk_idxs,
-                self.softmax_scale,
-            )
+            # W3.2 (RFC §3.1 cross-talk fix): for multi-request lockstep
+            # decode (batch_decode > 1) each token belongs to a distinct
+            # sequence. Transpose q from [1, N, H, D] -> [N, 1, H, D],
+            # read per-sequence kv_cache slices, and call sparse_attn with
+            # B=N. This eliminates the "every request reads row 0" cross-
+            # talk that polluted W3.2-v1 idx>0 outputs.
+            #
+            # topk_idxs from helpers is [1, N, K]; transpose to [N, 1, K].
+            # sparse_attn output [N, 1, H, D] is transposed back to
+            # [1, N, H, D] so the downstream RoPE/o_proj path (which
+            # assumes B=1 implicit) sees the same shape it always did.
+            if batch_decode > 1:
+                q_per_seq = q.transpose(0, 1).contiguous()       # [N, 1, H, D]
+                kv_per_seq = self.kv_cache[:batch_decode]        # [N, max_seq, head_dim]
+                topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
+                o = sparse_attn(
+                    q_per_seq,
+                    kv_per_seq,
+                    self.attn_sink,
+                    topk_per_seq,
+                    self.softmax_scale,
+                )
+                o = o.transpose(0, 1).contiguous()               # [1, N, H, D]
+            else:
+                o = sparse_attn(
+                    q,
+                    self.kv_cache[:1],
+                    self.attn_sink,
+                    topk_idxs,
+                    self.softmax_scale,
+                )
 
         # Inverse RoPE on output's rope dims to remove absolute-position contribution
         # carried in by the value-side RoPE of the KV entries.
