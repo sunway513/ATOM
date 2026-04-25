@@ -224,7 +224,102 @@ class TestPrefixCacheLogicalScope:
             assert bm.pools[compress_key].blocks[bid].logical_cache_name == "compress"
 
 
-# ── 6. Block.reset only clears metadata (Q8.1 audit) ───────────────────────
+# ── 6. Aggregate per-physical-pool demand (Codex P1#1) ────────────────────
+
+
+class TestCanAppendAggregatesPhysicalPoolDemand:
+    def test_two_logicals_sharing_physical_pool_aggregate(self):
+        # Two logical caches with the SAME spec → same physical pool.
+        # If each logical needs 3 blocks but the pool only has 4 free,
+        # per-logical has_free(3) returns True for both, but the SUM
+        # demand (6) exceeds 4 → can_append must return False.
+        from atom.model_engine.block_manager import BlockManager
+
+        spec = _spec_mla_c4()
+        cfg = MockConfig(num_kvcache_blocks=4, kv_cache_block_size=4)
+        bm = BlockManager(
+            cfg,
+            kv_cache_specs={"layer.0.attn.main_c4": spec, "layer.1.attn.main_c4": spec},
+            blocks_per_pool={physical_pool_key(spec): 4},
+        )
+        # Sanity: both logicals map to ONE physical pool.
+        assert len(bm.pools) == 1
+        # Build a seq that already has 0 blocks; needs 3 new blocks per logical.
+        seq = _make_seq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])  # ~3 blocks at block_size=4
+        # If demand were checked per-logical: each says "need 3, have 4 → OK"
+        # With aggregation: total need=6 > capacity=4 → must reject.
+        result = bm.can_append(seq, num_new_tokens=1)
+        assert result is False, (
+            "can_append must aggregate demand across logical caches "
+            "sharing one physical pool — Codex P1#1."
+        )
+
+    def test_distinct_pools_dont_falsely_share_demand(self):
+        # Two logicals with DIFFERENT specs → different physical pools.
+        # Aggregation must be per-pool, NOT global.
+        from atom.model_engine.block_manager import BlockManager
+
+        cfg = MockConfig(num_kvcache_blocks=8, kv_cache_block_size=4)
+        bm = BlockManager(
+            cfg,
+            kv_cache_specs={"main": _spec_full(), "compress": _spec_compressor_c4()},
+            blocks_per_pool={
+                physical_pool_key(_spec_full()): 4,
+                physical_pool_key(_spec_compressor_c4()): 4,
+            },
+        )
+        seq = _make_seq([1, 2, 3, 4])  # 1 block needed per logical
+        assert bm.can_append(seq, num_new_tokens=1) is True
+
+
+# ── 7. Allocate rollback covers in-progress logical (Codex P1#2) ──────────
+
+
+class TestAllocateRollbackInProgressLogical:
+    def test_partial_inner_loop_failure_releases_popped_blocks(self):
+        # Set up: pool A has 100 blocks (plenty), pool B has only 1
+        # block. seq needs 2 blocks per logical. Allocation succeeds for
+        # logical "main" (in pool A) → pops 2 blocks → records to
+        # `allocated`. Then logical "compress" (in pool B) starts: pops
+        # the 1 free block, then on the SECOND _pop_free_block raises
+        # AssertionError. Rollback must release both pool-A blocks AND
+        # the 1 already-popped pool-B block.
+        from atom.model_engine.block_manager import BlockManager
+
+        spec_a = _spec_full()
+        spec_b = _spec_compressor_c4()
+        cfg = MockConfig(num_kvcache_blocks=101, kv_cache_block_size=4)
+        bm = BlockManager(
+            cfg,
+            kv_cache_specs={"main": spec_a, "compress": spec_b},
+            blocks_per_pool={
+                physical_pool_key(spec_a): 100,
+                physical_pool_key(spec_b): 1,  # not enough for seq's 2 blocks
+            },
+        )
+        pool_a = bm.pools[physical_pool_key(spec_a)]
+        pool_b = bm.pools[physical_pool_key(spec_b)]
+        free_a_before = len(pool_a.free_block_ids_set)
+        free_b_before = len(pool_b.free_block_ids_set)
+
+        seq = _make_seq([1, 2, 3, 4, 5, 6, 7, 8])  # 2 blocks at block_size=4
+        with pytest.raises(AssertionError):
+            bm.allocate(seq)
+
+        # After rollback: every pool back to its starting free count.
+        assert len(pool_a.free_block_ids_set) == free_a_before, (
+            "Pool A leaked blocks from the completed-logical rollback path."
+        )
+        assert len(pool_b.free_block_ids_set) == free_b_before, (
+            "Pool B leaked blocks from the in-progress-logical rollback "
+            "path — Codex P1#2."
+        )
+        # And seq.block_tables for every logical is empty.
+        assert seq.block_tables["main"] == []
+        assert seq.block_tables["compress"] == []
+
+
+# ── 8. Block.reset only clears metadata (Q8.1 audit) ───────────────────────
 
 
 class TestBlockResetOnlyMetadata:

@@ -334,26 +334,43 @@ class BlockManager:
 
         # Multi-pool: allocate per logical cache. On any partial failure,
         # roll back across all earlier logical caches (no leaked blocks).
+        # Codex P1: also track the IN-PROGRESS logical cache's partial
+        # block_ids so an AssertionError mid-inner-loop doesn't leak the
+        # blocks already popped/allocated under that logical name.
         allocated: list[tuple[str, list[int]]] = []
+        cur_logical: str | None = None
+        cur_block_ids: list[int] = []
         try:
             for logical_name, pkey in self.logical_to_pool.items():
                 pool = self.pools[pkey]
                 seq.block_tables.setdefault(logical_name, [])
-                block_ids: list[int] = []
+                cur_logical = logical_name
+                cur_block_ids = []
                 for _ in range(seq.num_blocks):
                     bid = pool._pop_free_block()
                     pool._allocate_block(bid, logical_name)
-                    block_ids.append(bid)
-                seq.block_tables[logical_name] = block_ids
-                allocated.append((logical_name, block_ids))
+                    cur_block_ids.append(bid)
+                seq.block_tables[logical_name] = list(cur_block_ids)
+                allocated.append((logical_name, cur_block_ids))
+                cur_logical = None
+                cur_block_ids = []
         except AssertionError:
-            # Rollback on partial failure.
+            # Rollback completed logicals.
             for logical_name, block_ids in allocated:
                 pool = self.pools[self.logical_to_pool[logical_name]]
                 for bid in reversed(block_ids):
                     pool.blocks[bid].ref_count = 0
                     pool._deallocate_block(bid)
                 seq.block_tables[logical_name] = []
+            # Rollback the IN-PROGRESS logical (if any) — these blocks
+            # were popped + _allocate_block'd but not yet recorded into
+            # `allocated`.
+            if cur_logical is not None and cur_block_ids:
+                pool = self.pools[self.logical_to_pool[cur_logical]]
+                for bid in reversed(cur_block_ids):
+                    pool.blocks[bid].ref_count = 0
+                    pool._deallocate_block(bid)
+                seq.block_tables[cur_logical] = []
             raise
 
     def _allocate_legacy(self, seq: Sequence):
@@ -449,10 +466,18 @@ class BlockManager:
             current_blocks = len(seq.block_table)
             new_blocks_needed = max(0, needed_blocks - current_blocks)
             return self._legacy_pool.has_free(new_blocks_needed)
+        # Multi-pool: AGGREGATE per-physical-pool demand before checking
+        # (Codex P1). Two logical caches that coalesce to the same physical
+        # pool would each pass an independent has_free() check while their
+        # SUM exceeds capacity, leading to admission of an seq that then
+        # fails to extend.
+        per_pool_need: dict[tuple, int] = {}
         for logical_name, pkey in self.logical_to_pool.items():
             current = len(seq.block_tables.get(logical_name, []))
             new_needed = max(0, needed_blocks - current)
-            if not self.pools[pkey].has_free(new_needed):
+            per_pool_need[pkey] = per_pool_need.get(pkey, 0) + new_needed
+        for pkey, total_need in per_pool_need.items():
+            if not self.pools[pkey].has_free(total_need):
                 return False
         return True
 
