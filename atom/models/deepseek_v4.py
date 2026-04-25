@@ -1374,10 +1374,12 @@ class MoE(nn.Module):
     `FusedMoE.select_experts(scoring_func="sqrtsoftplus", e_score_correction_bias=...)`,
     which we extended in atom/model_ops/moe.py to add the V4 path.
 
-    Hash routing for `layer_id < n_hash_layers` (first 3 V4 layers) is NOT yet
-    wired through FusedMoE — the `tid2eid` buffer is declared so weight loading
-    completes, but inference uses the standard sqrtsoftplus path. Hash layers
-    will produce incorrect routing; correct hash routing lands in PR3+.
+    Hash routing for `layer_id < n_hash_layers` (first 3 V4 layers) IS wired
+    through FusedMoE: the gate sets `custom_routing_function=self._hash_topk`
+    (via lingpeng commit 3c37b76), and FusedMoE.select_experts honors it. The
+    `tid2eid` buffer is loaded from the checkpoint and indexed per token at
+    `_hash_topk` (line ~1294). Topk weights are scaled by `route_scale=2.5`
+    per the official V4 spec (PR#650 hero-prompt verified rc=0).
     """
 
     def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
