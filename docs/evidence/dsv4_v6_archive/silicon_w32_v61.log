@@ -1,0 +1,202 @@
+[atom 23:11:02] Engine kwargs: {'trust_remote_code': False, 'tensor_parallel_size': 8, 'data_parallel_size': 1, 'enforce_eager': True, 'enable_prefix_caching': False, 'port': 8006, 'kv_cache_dtype': 'fp8', 'max_model_len': 2048, 'max_num_batched_tokens': 16384, 'scheduler_delay_factor': 0.0, 'max_num_seqs': 4, 'gpu_memory_utilization': 0.85, 'load_dummy': False, 'enable_expert_parallel': False, 'torch_profiler_dir': None, 'enable_dp_attention': False, 'kv_transfer_config': '{}', 'mark_trace': False, 'kv_cache_block_size': 16, 'compilation_config': CompilationConfig(level=3, use_cudagraph=True, local_cache_dir=None, cudagraph_capture_sizes=[1, 2, 4], cuda_graph_sizes=[512], debug_dump_path='', traced_files=set(), cache_dir='', use_inductor=True, cudagraph_mode=None, compilation_time=0.0, splitting_ops=None, cudagraph_copy_inputs=False, inductor_compile_config={}, compile_sizes=None, static_forward_context={}), 'speculative_config': None, 'enable_tbo': False, 'enable_tbo_decode': False, 'enable_low_latency': False}
+You are using a model of type `deepseek_v4` to instantiate a model of type `deepseek_v3`. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+`rope_parameters`'s factor field must be a float >= 1, got 16
+`rope_parameters`'s beta_fast field must be a float, got 32
+`rope_parameters`'s beta_slow field must be a float, got 1
+`torch_dtype` is deprecated! Use `dtype` instead!
+You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[atom 23:11:02] Engine Core Mgr: Creating EngineCore for DP rank 0/1
+[atom 23:11:02] Creating EngineCore process: DP rank 0, will use GPUs 0 to 7
+[atom 23:11:02] Engine Core Mgr: Starting EngineCore for DP rank 0/1
+[atom 23:11:10] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:10] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:10] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:10] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:10] ModelRunner rank=2, dp_rank_local=0, local_device_rank=2, device=cuda:2
+[atom 23:11:10] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:10] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:10] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:10] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:10] ModelRunner rank=3, dp_rank_local=0, local_device_rank=3, device=cuda:3
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] ModelRunner rank=0, dp_rank_local=0, local_device_rank=0, device=cuda:0
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] ModelRunner rank=6, dp_rank_local=0, local_device_rank=6, device=cuda:6
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] ModelRunner rank=5, dp_rank_local=0, local_device_rank=5, device=cuda:5
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] ModelRunner rank=7, dp_rank_local=0, local_device_rank=7, device=cuda:7
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] ModelRunner rank=4, dp_rank_local=0, local_device_rank=4, device=cuda:4
+[atom 23:11:11] Use MLAAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use MLASparseAttentionImplDecoratorForPluginMode to decorate MLAAttention
+[atom 23:11:11] Use PagedAttentionImplDecoratorForPluginMode to decorate PagedAttentionImpl
+[atom 23:11:11] Create lazy wrapper for FusedMoE to change the naming
+[atom 23:11:11] ModelRunner rank=1, dp_rank_local=0, local_device_rank=1, device=cuda:1
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 3 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 4 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 1 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 2 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 6 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 5 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+[Gloo] Rank 7 is connected to 7 peer ranks. Expected number of connected peer ranks is : 7
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+[atom 23:11:15] disable_mmap: False
+Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   0%|          | 0/64 [00:00<?, ?it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   2%|▏         | 1/64 [00:00<00:25,  2.44it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   3%|▎         | 2/64 [00:01<01:02,  1.01s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   5%|▍         | 3/64 [00:03<01:29,  1.47s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   6%|▋         | 4/64 [00:05<01:32,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   8%|▊         | 5/64 [00:07<01:31,  1.55s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:   9%|▉         | 6/64 [00:08<01:31,  1.58s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  11%|█         | 7/64 [00:10<01:28,  1.55s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  12%|█▎        | 8/64 [00:12<01:37,  1.74s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  14%|█▍        | 9/64 [00:13<01:32,  1.67s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  16%|█▌        | 10/64 [00:15<01:29,  1.66s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  17%|█▋        | 11/64 [00:17<01:27,  1.66s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  19%|█▉        | 12/64 [00:18<01:26,  1.67s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  20%|██        | 13/64 [00:20<01:25,  1.68s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  22%|██▏       | 14/64 [00:22<01:22,  1.66s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  23%|██▎       | 15/64 [00:23<01:20,  1.65s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  25%|██▌       | 16/64 [00:25<01:25,  1.77s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  27%|██▋       | 17/64 [00:27<01:19,  1.70s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  28%|██▊       | 18/64 [00:29<01:17,  1.69s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  30%|██▉       | 19/64 [00:30<01:15,  1.68s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  31%|███▏      | 20/64 [00:31<00:58,  1.32s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  33%|███▎      | 21/64 [00:32<00:55,  1.28s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  34%|███▍      | 22/64 [00:33<00:57,  1.36s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  36%|███▌      | 23/64 [00:35<00:57,  1.40s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  39%|███▉      | 25/64 [00:37<00:44,  1.14s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  41%|████      | 26/64 [00:38<00:48,  1.28s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  42%|████▏     | 27/64 [00:40<00:48,  1.31s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  44%|████▍     | 28/64 [00:42<00:53,  1.47s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  45%|████▌     | 29/64 [00:43<00:52,  1.49s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  47%|████▋     | 30/64 [00:45<00:51,  1.52s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  48%|████▊     | 31/64 [00:46<00:49,  1.51s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  50%|█████     | 32/64 [00:48<00:49,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  52%|█████▏    | 33/64 [00:49<00:47,  1.52s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  53%|█████▎    | 34/64 [00:51<00:45,  1.53s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  55%|█████▍    | 35/64 [00:52<00:44,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  56%|█████▋    | 36/64 [00:54<00:42,  1.52s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  58%|█████▊    | 37/64 [00:55<00:41,  1.53s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  59%|█████▉    | 38/64 [00:57<00:40,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  61%|██████    | 39/64 [00:59<00:39,  1.57s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  62%|██████▎   | 40/64 [01:01<00:42,  1.76s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  64%|██████▍   | 41/64 [01:02<00:38,  1.69s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  66%|██████▌   | 42/64 [01:04<00:36,  1.66s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  67%|██████▋   | 43/64 [01:06<00:34,  1.64s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  69%|██████▉   | 44/64 [01:07<00:32,  1.61s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  70%|███████   | 45/64 [01:09<00:30,  1.59s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  72%|███████▏  | 46/64 [01:10<00:28,  1.58s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  73%|███████▎  | 47/64 [01:12<00:26,  1.56s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  75%|███████▌  | 48/64 [01:13<00:24,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  77%|███████▋  | 49/64 [01:15<00:23,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  78%|███████▊  | 50/64 [01:16<00:21,  1.53s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  80%|███████▉  | 51/64 [01:18<00:19,  1.53s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  81%|████████▏ | 52/64 [01:19<00:18,  1.54s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  83%|████████▎ | 53/64 [01:21<00:17,  1.56s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  84%|████████▍ | 54/64 [01:23<00:15,  1.57s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  86%|████████▌ | 55/64 [01:25<00:16,  1.84s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  88%|████████▊ | 56/64 [01:27<00:13,  1.74s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  89%|████████▉ | 57/64 [01:28<00:10,  1.52s/it]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  92%|█████████▏| 59/64 [01:28<00:04,  1.03it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  94%|█████████▍| 60/64 [01:28<00:03,  1.31it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  95%|█████████▌| 61/64 [01:29<00:02,  1.47it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  97%|█████████▋| 62/64 [01:29<00:01,  1.62it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]:  98%|█████████▊| 63/64 [01:30<00:00,  1.38it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]: 100%|██████████| 64/64 [01:30<00:00,  1.68it/s]Loading safetensors shards[/data/hf_models/deepseek-ai/DeepSeek-V4-Pro]: 100%|██████████| 64/64 [01:30<00:00,  1.42s/it]
+[atom 23:12:55] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:56] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:56] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:57] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:57] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:57] load_model: 46/2519 model parameters were NOT loaded from checkpoint and remain at their init values. This is almost always a bug (typically a `weights_mapping` substring rule that accidentally renames a param to something the model doesn't have). Fix the mapping or the on-disk → param name translation. First 20 unloaded names: ['model.layers.0.ffn.gate.e_score_correction_bias', 'model.layers.1.ffn.gate.e_score_correction_bias', 'model.layers.2.ffn.gate.e_score_correction_bias', 'model.mtp.0.attn.attn_sink', 'model.mtp.0.attn.kv_norm.weight', 'model.mtp.0.attn.q_norm.weight', 'model.mtp.0.attn.wkv.weight', 'model.mtp.0.attn.wkv.weight_scale', 'model.mtp.0.attn.wo_a.weight', 'model.mtp.0.attn.wo_a.weight_scale', 'model.mtp.0.attn.wo_b.weight', 'model.mtp.0.attn.wo_b.weight_scale', 'model.mtp.0.attn.wq_a.weight', 'model.mtp.0.attn.wq_a.weight_scale', 'model.mtp.0.attn.wq_b.weight', 'model.mtp.0.attn.wq_b.weight_scale', 'model.mtp.0.attn_norm.weight', 'model.mtp.0.e_proj.weight', 'model.mtp.0.e_proj.weight_scale', 'model.mtp.0.enorm.weight']
+[atom 23:12:58] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:12:58] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:01] Model load done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Model Runner0/8: warmup_model 28.08 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Model Runner6/8: warmup_model 30.86 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=92.71GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=93.05GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+/opt/venv/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W425 23:13:26.718422680 ProcessGroupNCCL.cpp:5140] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+[atom 23:13:26] Model Runner4/8: warmup_model 28.24 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Model Runner5/8: warmup_model 30.28 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=93.08GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=92.87GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Model Runner2/8: warmup_model 29.28 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=92.68GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Model Runner3/8: warmup_model 29.43 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model Runner1/8: warmup_model 29.70 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=92.67GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=93.95GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Model Runner7/8: warmup_model 24.91 seconds with 4 reqs 8192 tokens
+[atom 23:13:26] Model warmup done: /data/hf_models/deepseek-ai/DeepSeek-V4-Pro
+[atom 23:13:26] Memory budget: total_gpu=287.98GB, free=93.08GB, utilization=0.85, budget=244.79GB, peak_torch=227.69GB, cudagraph_est=0.00GB, safety=5.76GB, available_for_kv=11.34GB, block_bytes=1007232, num_kvcache_blocks=12090
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:26] Binding KV cache for target model starting at layer_id=0
+[atom 23:13:27] Engine Core: load model runner success
+[atom 23:13:27] Engine Core: EngineCore fully initialized and ready
+[atom 23:13:27] Engine Core Mgr: DP rank 0 is fully initialized and ready
+[atom 23:13:27] Engine Core Mgr: All EngineCores are fully initialized and ready
+[atom 23:13:27] Engine Core Mgr: All 1 EngineCores initialized and ready
+[atom 23:13:27] KV transfer config loaded: {}
+[atom 23:13:27] LLMEngine init with 1 data parallel ranks
+[atom 23:13:27] LLMEngine init with 1 data parallel ranks
+You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[atom 23:13:28] Request 0 arrived, input tokens: 12, pending requests: 1 
+[atom 23:13:28] Request 1 arrived, input tokens: 13, pending requests: 2 
+[atom 23:13:28] Request 2 arrived, input tokens: 15, pending requests: 3 
+[atom 23:13:28] Request 3 arrived, input tokens: 12, pending requests: 4 
+[atom 23:13:28] Scheduled prefill batch: 4 reqs, 52 tokens, req_ids: (0, 1, 2, 3)
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[aiter] type hints mismatch, override to --> wv_splitk_small_fp16_bf16(arg0: torch.Tensor, arg1: torch.Tensor, arg2: torch.Tensor, arg3: int, arg4: int) -> None
+[atom 23:13:42] Request 0 finished with reason max_tokens. Input tokens: 12, output tokens: 32, latency: 14.20s, TTFT: 0.588s, TPOT: 0.439s
+[atom 23:13:42] Request 1 finished with reason max_tokens. Input tokens: 13, output tokens: 32, latency: 14.20s, TTFT: 0.588s, TPOT: 0.439s
+[atom 23:13:42] Request 2 finished with reason max_tokens. Input tokens: 15, output tokens: 32, latency: 14.20s, TTFT: 0.588s, TPOT: 0.439s
+[atom 23:13:42] Request 3 finished with reason max_tokens. Input tokens: 12, output tokens: 32, latency: 14.20s, TTFT: 0.588s, TPOT: 0.439s
+[atom 23:13:42] Engine Core: output send 4 reqs
+[atom 23:13:42] Engine Core Mgr: Shutting down all 1 EngineCores
+[atom 23:13:47] AsyncIOProcManager(ModelRunner): received signal 15 (SIGTERM), exiting...
+[atom 23:13:47] AsyncIOProcManager(ModelRunner): shutdown all runners...
+[atom 23:13:48] Engine Core Mgr: All EngineCores shut down
+  V4 encoding applied, tokens per prompt: [12, 13, 15, 12]
+=== conc=4 | running batch ===
+
+[idx=0] prompt: '如何在一个月内增肌10公斤'
+[idx=0] completion (66 chars): '好的，作为一个在健身领域深耕多年的爱好者，并且曾经有过类似增肌需求的经历，结合专业科学理论和实际经验，我会**回答这个问题这个问题 '
+[idx=0] first 16 token_ids: [3648, 303, 31188, 445, 28126, 7573, 108617, 33946, 53948, 303, 7242, 11942, 37423, 14034, 2076, 8385]
+
+[idx=1] prompt: 'Briefly describe Beijing in 3 sentences.'
+[idx=1] completion (49 chars): '北京#  |  |  |  |  |  |  |  |  |  |  |  |   \n |  | '
+[idx=1] first 16 token_ids: [6127, 5, 223, 369, 223, 369, 223, 369, 223, 369, 223, 369, 223, 369, 223, 369]
+
+[idx=2] prompt: 'Write a Python function to compute the nth Fibonacci number.'
+[idx=2] completion (37 chars): '```\n    - 1. 1. 1. 1. 1. 1. 1. 1.. 1.'
+[idx=2] first 16 token_ids: [28986, 361, 565, 223, 19, 16, 223, 19, 16, 223, 19, 16, 223, 19, 16, 223]
+
+[idx=3] prompt: 'List 5 common machine learning algorithms.'
+[idx=3] completion (39 chars): '</think>#2#2#2#2#2#2#2#2#2#2#2#2#2,22#2'
+[idx=3] first 16 token_ids: [128822, 5, 20, 5, 20, 5, 20, 5, 20, 5, 20, 5, 20, 5, 20, 5]
+
+=== wrote /workspace/ATOM-feat/logs/silicon_w32_v61.json ===
