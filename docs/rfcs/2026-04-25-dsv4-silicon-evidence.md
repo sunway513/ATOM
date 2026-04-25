@@ -286,3 +286,92 @@ Total 14 patch sites in `deepseek_v4.py`, all annotated with `# W3.1 (RFC ...)` 
 
 This is the exact phenomenology PR#650's roadmap predicted: "doesn't
 crash, output wrong" — first reached on real silicon at this iteration.
+
+---
+
+## Evidence E — W3.2-v2 perf c=4 1K/1K + upstream B300 baseline (2026-04-25)
+
+### ATOM Phase 1 perf measurement on `mi355-gpu-15`
+
+Per RFC §1.1 Phase 1 default config: TP=8 × DP=1 × EP=1, `--enforce-eager`,
+`ATOM_USE_TRITON_MOE=1`, FP8 attention KV, max-num-seqs=4,
+max-model-len=2304, gpu_memory_utilization=0.85, `--temperature 0.0`.
+
+```json
+{
+  "conc": 4,
+  "isl_target": 1024,
+  "osl_target": 1024,
+  "actual_in_tokens": [1028, 1028, 1028, 1028],
+  "wall_time_s": 219.86,
+  "throughput_decode_tok_per_s_aggregate": 18.63,
+  "throughput_decode_tok_per_s_per_seq": 4.66
+}
+```
+
+Translated to industry-standard metrics (derived):
+- **TPOT ≈ 214 ms/user** (= 1000 / 4.66)
+- **TTFT ≈ 564 ms** (per Evidence A first decode timing)
+- Wall time per request 219.86s for 1024 OSL → consistent with 4.66 tok/s/seq.
+
+### Upstream InferenceX reference (ROCm/AI-Frameworks-Dashboard#129)
+
+Single-node 8× B300 SXM6, ISL=1024 / OSL=1024, both backends from
+SemiAnalysisAI/InferenceX@c52a8e9 recipes:
+
+| Backend | Parallelism | CONC | Out tok/s | Mean TPOT (ms) | Mean TTFT (ms) |
+|---|---|---|---|---|---|
+| SGLang | TP=8 | 8 | 547 | **13.95** | 714 |
+| SGLang | TP8 + DP-attn(8) + DeepEP | 64 | 2404 | 25.66 | 1009 |
+| SGLang | TP8 + DP-attn(8) + DeepEP | 256 | 7086 | 33.48 | 2730 |
+| vLLM | TP=4 | 8 | 436 | 18.06 | 303 |
+| vLLM | TP=4 | 64 | 1673 | 37.63 | 650 |
+| vLLM | TP=1 + DP=4 + EP, FP8 KV, FULL_AND_PIECEWISE cudagraph, fp4_indexer_cache | 256 | 4446 | 56.38 | 1209 |
+
+### Apples-to-apples gap (TP=8 ISL=1024/OSL=1024)
+
+| | ATOM Phase 1 | SGLang B300 (closest match) | Gap |
+|---|---|---|---|
+| Parallelism | TP=8 single node | TP=8 single node | same |
+| Concurrency | 4 | 8 | n/a |
+| **TPOT** | **214 ms** | **13.95 ms** | **15.3× slower** |
+| **Output throughput** | 18.63 tok/s | 547 tok/s | **29.4× slower** |
+
+### Gap source breakdown (ROI-ordered, RFC §10.2 roadmap)
+
+1. **`--enforce-eager` (no CUDAGraph capture)** — Phase 1 default; small-batch
+   decode is launch-overhead dominated. Phase 2a target (RFC §10.2) drops it
+   for the decode capture path. **Largest expected lift.**
+2. **AITER native sparse_attn kernel** (RFC §9 out-of-scope, PR4) — current
+   path uses torch fallback `sparse_attn_v4.py`. AITER kernel matches
+   FlashMLA's role on B300.
+3. **W3.2 cross-talk fix incomplete** — current W3.2-v2 only fixes Attention
+   + Indexer reads; module-level `register_buffer` state buffers + central
+   reset block at `:994-1002` still cross-shared. Each unfixed site
+   contributes synchronization overhead.
+4. **DP-attention + DeepEP** (RFC §10.2 Phase 2b) — InferenceX SGLang
+   `balanced/max-throughput` recipes show DP-attn unlocks 4×-13× aggregate
+   throughput at higher concurrency. Phase 2b multi-node disaggregated
+   prefill is the InferenceX submission target.
+5. **FP4 indexer cache + FULL_AND_PIECEWISE CUDAGraph** (per vLLM B300 conc=256
+   recipe) — memory-bandwidth specific to the indexer's compressed KV.
+
+### Phase 2a expected lift (lower-bound estimate)
+
+CUDAGraph capture removes ~50ms-100ms per decode step of launch overhead on
+small batches. Going from 214 ms to ~30-50 ms TPOT is plausible just from
+CUDAGraph, putting ATOM Phase 2a within 2-4× of upstream SGLang TP=8.
+Phase 2b (DP-attn + DeepEP + AITER kernels) closes the remainder.
+
+### Reproducer (ATOM Phase 1)
+```bash
+docker exec atom_dsv4_feat env PYTHONPATH=/workspace/ATOM-feat \
+  ATOM_USE_TRITON_MOE=1 AITER_LOG_LEVEL=WARNING \
+  /opt/venv/bin/python /workspace/silicon_perf_bench.py \
+    --model /data/hf_models/deepseek-ai/DeepSeek-V4-Pro \
+    --kv_cache_dtype fp8 -tp 8 \
+    --max-num-seqs 4 --max-model-len 2304 --enforce-eager \
+    --gpu-memory-utilization 0.85 \
+    --temperature 0.0 \
+    --isl 1024 --osl 1024 --num-prompts 4
+```
