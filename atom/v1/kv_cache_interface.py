@@ -73,7 +73,9 @@ class AttentionSpec(KVCacheSpec):
 
     Subclassed by :class:`FullAttentionSpec` (standard K+V), and by
     :class:`MLAAttentionSpec` (DeepSeek-style multi-head latent attention,
-    single shared latent vector — ``use_mla=True``).
+    single shared latent vector). MLA vs standard is distinguished by
+    isinstance checks on the spec subclass — matches vLLM's convention
+    and keeps the field set minimal.
 
     Attributes:
         num_kv_heads: KV-head count (1 for MLA, num_attention_heads for
@@ -81,14 +83,11 @@ class AttentionSpec(KVCacheSpec):
         head_size: Per-head latent / KV dim.
         dtype: Storage dtype for the cache (e.g. ``torch.bfloat16``,
             ``torch.float8_e4m3fn``).
-        use_mla: True iff this cache stores a single MLA latent vector
-            instead of separate K and V.
     """
 
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
-    use_mla: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -112,8 +111,6 @@ class FullAttentionSpec(AttentionSpec):
     single-pool path identical to pre-reform behavior.
     """
 
-    use_mla: bool = False
-
 
 @dataclass(frozen=True)
 class MLAAttentionSpec(AttentionSpec):
@@ -132,16 +129,10 @@ class MLAAttentionSpec(AttentionSpec):
     ``compress_ratio`` MUST divide ``block_size`` evenly.
     """
 
-    use_mla: bool = True
     compress_ratio: int = 1
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not self.use_mla:
-            raise ValueError(
-                "MLAAttentionSpec must have use_mla=True; got "
-                f"use_mla={self.use_mla}"
-            )
         if self.compress_ratio <= 0:
             raise ValueError(
                 f"compress_ratio must be positive, got {self.compress_ratio}"
@@ -212,7 +203,6 @@ def physical_pool_key(spec: KVCacheSpec) -> tuple:
             spec.num_kv_heads,
             spec.head_size,
             str(spec.dtype),
-            spec.use_mla,
         )
     if isinstance(spec, MLAAttentionSpec):
         base = base + (spec.compress_ratio,)

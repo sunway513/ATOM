@@ -62,7 +62,9 @@ class TestAttentionSpec:
             head_size=128,
             dtype=torch.bfloat16,
         )
-        assert s.use_mla is False
+        # MLA vs Full is distinguished by isinstance checks (matches
+        # vLLM convention) — no use_mla field.
+        assert not isinstance(s, MLAAttentionSpec)
         assert s.num_kv_heads == 8
         assert s.head_size == 128
         assert s.dtype == torch.bfloat16
@@ -100,9 +102,19 @@ class TestMLAAttentionSpec:
             compress_ratio=compress_ratio,
         )
 
-    def test_default_use_mla_true(self):
+    def test_is_mla_subclass_distinguishes_from_full(self):
+        # No use_mla flag — type system carries the distinction.
         s = self._make()
-        assert s.use_mla is True
+        assert isinstance(s, MLAAttentionSpec)
+        assert isinstance(s, AttentionSpec)
+        full = FullAttentionSpec(
+            block_size=256,
+            page_size_bytes=4096,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+        )
+        assert not isinstance(full, MLAAttentionSpec)
 
     def test_default_compress_ratio_one_dense(self):
         s = self._make(compress_ratio=1)
@@ -123,18 +135,6 @@ class TestMLAAttentionSpec:
         with pytest.raises(ValueError, match="does not divide"):
             self._make(block_size=256, compress_ratio=7)
 
-    def test_rejects_use_mla_false(self):
-        # MLAAttentionSpec must keep use_mla=True; explicit override must fail.
-        with pytest.raises(ValueError, match="use_mla=True"):
-            MLAAttentionSpec(
-                block_size=256,
-                page_size_bytes=4096,
-                num_kv_heads=1,
-                head_size=512,
-                dtype=torch.bfloat16,
-                use_mla=False,
-                compress_ratio=4,
-            )
 
 
 # ── SlidingWindowMLASpec — DSV4 Compressor state ───────────────────────────
