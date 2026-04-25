@@ -27,6 +27,11 @@ from torch import nn
 from aiter.dist.parallel_state import get_tensor_model_parallel_world_size
 from atom.config import Config
 from atom.model_ops.embed_head import VocabParallelEmbedding
+from atom.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from atom.model_ops.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -501,6 +506,36 @@ class Compressor(nn.Module):
             persistent=False,
         )
 
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> SlidingWindowMLASpec:
+        """RFC §6.2.1 Compressor spec — registers compressor state as
+        sliding-window MLA-style KV with `sliding_window = coff *
+        compress_ratio` (8 for C4, 128 for C128). The block manager
+        will register one BlockPool per `physical_pool_key` of these
+        specs and allocate paged compressor state per request.
+        """
+        coff = 1 + self.overlap
+        head_size = self.head_dim
+        num_kv_heads = 1
+        # Estimate page bytes for the manager's budget allocator.
+        # storage_block_size = block_size // compress_ratio.
+        storage_block_size = block_size // self.compress_ratio
+        page_size_bytes = (
+            storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        )
+        return SlidingWindowMLASpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=self.compress_ratio,
+            sliding_window=coff * self.compress_ratio,
+        )
+
     def overlap_transform(
         self, tensor: torch.Tensor, value: float = 0.0
     ) -> torch.Tensor:
@@ -716,6 +751,30 @@ class Indexer(nn.Module):
         )
         self.freqs_cis: Optional[torch.Tensor] = None
 
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> MLAAttentionSpec:
+        """RFC §6.2.1 Indexer spec — registers indexer KV under
+        MLAAttentionSpec with `compress_ratio` so storage_block_size =
+        block_size // compress_ratio (64 for C4 default).
+        """
+        head_size = self.head_dim
+        num_kv_heads = 1
+        storage_block_size = block_size // self.compress_ratio
+        page_size_bytes = (
+            storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        )
+        return MLAAttentionSpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=self.compress_ratio,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -762,13 +821,17 @@ class Indexer(nn.Module):
         ).unsqueeze(0)
 
         # ----- Index score -----
-        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode the
-        # q is shaped [1, N, H, D] (B=1 implicit, N decode tokens flat).
-        # Read each sequence's OWN row of self.kv_cache rather than row 0.
-        # Transpose q to [N, 1, H, D], slice kv_cache[:N], compute
-        # einsum, transpose back.
+        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode
+        # (start_pos > 0 AND multiple decode tokens), each token belongs
+        # to a distinct sequence — read each sequence's OWN row of
+        # self.kv_cache rather than row 0. Transpose q to [N, 1, H, D],
+        # slice kv_cache[:N], compute einsum, transpose back.
+        # Gate on start_pos > 0 so warmup / prefill (where multi-token
+        # input is one sequence) keeps the B=1-implicit path and does
+        # not over-slice kv_cache (max_batch_size << seqlen during
+        # warmup).
         bsz_idx = q.shape[1]
-        if bsz_idx > 1:
+        if start_pos > 0 and bsz_idx > 1:
             q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
             kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio]  # [N, t, head_dim]
             index_score = torch.einsum(
@@ -946,6 +1009,33 @@ class DeepseekV4Attention(nn.Module):
             args.beta_slow,
         )
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> MLAAttentionSpec:
+        """RFC §6.2.1 main MLA attention spec. compress_ratio=0 in this
+        layer's args means "dense" (no compression); we map it to
+        compress_ratio=1 for the spec so storage_block_size == block_size.
+        compress_ratio=4 (C4) and compress_ratio>=8 (C128/HCA) flow
+        through unchanged.
+        """
+        head_size = self.head_dim
+        num_kv_heads = 1
+        cr = self.compress_ratio if self.compress_ratio else 1
+        storage_block_size = block_size // cr
+        page_size_bytes = (
+            storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        )
+        return MLAAttentionSpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=cr,
+        )
 
     def process_weights_after_loading(self) -> None:
         """Dequant wo_a (FP8 + e8m0 block scale) → BF16 in place.
