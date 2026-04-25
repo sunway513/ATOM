@@ -260,6 +260,116 @@ def _dequant_fp8_block_to_bf16(w_fp8, scale, block=128):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# W3.2-v3: per-seq KV-cache row allocator.
+#
+# lingpeng's reference model uses one row of the flat `kv_cache[max_batch_size,
+# ...]` per logical sequence (B=1-implicit). ATOM's scheduler runs prefills
+# and decodes asynchronously, so we cannot use the *batch position* (the
+# `[:bsz]` slice everywhere in the original code) as the row index — every
+# prefill would clobber row 0 and every decode would reread someone else's
+# state. RFC §3.1 cross-talk + W3.2-v2 evidence (idx=1,2,3 garbled).
+#
+# Fix: identify each sequence by the FIRST PHYSICAL BLOCK ID in
+# `attn_metadata.block_tables[:, 0]` — BlockManager allocates monotonically,
+# so this is a stable per-seq tag. Map it onto `[0, max_rows)` via a singleton
+# allocator that prunes rows whose fbid is no longer in the active set.
+#
+# The result tensor (LongTensor[N] of row indices, on the same device as
+# block_tables) is cached on the current `forward_context` so all layers in
+# one model step share the same allocation without paying repeated CPU-GPU
+# sync. Falls back to `None` on warmup (no attn_metadata), letting layers
+# keep their legacy `[:bsz_kv]` writes.
+# ---------------------------------------------------------------------------
+
+_FBID_TO_ROW: dict[int, int] = {}
+_ROW_TO_FBID: list[Optional[int]] = []
+
+# W3.2-v5: when DeepseekV4Model.forward splits a packed prefill batch by
+# cu_seqlens_q (v4 outer loop), each inner DeepseekV4Attention.forward call
+# sees only ONE seq's tokens (bsz_kv == 1) but the global allocator returns
+# N rows (one per active seq). The outer loop publishes "which seq am I
+# now?" via this thread-local so the inner attention can pick the matching
+# row. None means "use seq_rows directly" (decode lockstep, or warmup).
+_DSV4_CURRENT_SEQ_IDX: Optional[int] = None
+
+
+def _dsv4_set_current_seq_idx(idx: Optional[int]) -> None:
+    global _DSV4_CURRENT_SEQ_IDX
+    _DSV4_CURRENT_SEQ_IDX = idx
+
+
+def _dsv4_get_current_seq_idx() -> Optional[int]:
+    return _DSV4_CURRENT_SEQ_IDX
+
+
+def _dsv4_get_seq_rows(max_rows: int) -> Optional[torch.Tensor]:
+    """Return LongTensor[N] of kv_cache row indices for the active batch.
+
+    None if forward_context / attn_metadata / block_tables is unavailable
+    (warmup path). Cached on forward_context after first call per step.
+    """
+    try:
+        from atom.utils.forward_context import get_forward_context
+
+        ctx = get_forward_context()
+    except Exception:
+        return None
+
+    attn_meta = getattr(ctx, "attn_metadata", None)
+    if attn_meta is None:
+        return None
+
+    # Cache on attn_metadata so the result is per-step (a fresh
+    # AttentionMetaData is built every model_runner step).
+    cached = getattr(attn_meta, "_dsv4_seq_rows", None)
+    if cached is not None:
+        return cached
+
+    block_tables = getattr(attn_meta, "block_tables", None)
+    if block_tables is None or block_tables.numel() == 0:
+        return None
+
+    # block_tables: [N, max_blocks_per_seq]. First column = first block id of each seq.
+    fbids = block_tables[:, 0].tolist()  # CPU sync once per step
+    active_set = set(fbids)
+
+    # Prune rows whose fbid left the active set
+    global _ROW_TO_FBID
+    if len(_ROW_TO_FBID) < max_rows:
+        _ROW_TO_FBID.extend([None] * (max_rows - len(_ROW_TO_FBID)))
+    for r in range(max_rows):
+        held = _ROW_TO_FBID[r]
+        if held is not None and held not in active_set:
+            _FBID_TO_ROW.pop(held, None)
+            _ROW_TO_FBID[r] = None
+
+    # Allocate rows for new fbids (preserve existing assignments)
+    rows: list[int] = []
+    for fbid in fbids:
+        r = _FBID_TO_ROW.get(fbid)
+        if r is None:
+            for cand in range(max_rows):
+                if _ROW_TO_FBID[cand] is None:
+                    _FBID_TO_ROW[fbid] = cand
+                    _ROW_TO_FBID[cand] = fbid
+                    r = cand
+                    break
+            if r is None:
+                # Active seqs exceed max_rows — overflow. Fall back to
+                # batch position; correctness will be degraded but no
+                # crash. RFC §14 W3.3 acceptance gate would surface this.
+                r = len(rows) % max_rows
+        rows.append(r)
+
+    out = torch.tensor(rows, dtype=torch.long, device=block_tables.device)
+    try:
+        attn_meta._dsv4_seq_rows = out
+    except Exception:
+        pass
+    return out
+
+
 class _RMSNorm(nn.Module):
     """Reference RMSNorm: weight stored in fp32, computation in fp32, output in input dtype.
 
@@ -396,6 +506,73 @@ def _get_window_topk_idxs(
         matrix = torch.where(matrix > base, -1, matrix)
         # Already 2D [seqlen, K] — no tile needed.
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
+
+
+def _get_window_topk_idxs_pertoken(
+    window_size: int,
+    positions: torch.Tensor,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Per-token sliding-window topk indices.
+
+    For each token t at absolute position p_t, builds the index row that
+    covers the causal window of length `window_size` ending at p_t.
+    Used by W3.2-v6 multi-request decode (4 seqs at different positions
+    can no longer share a single scalar start_pos). Returns
+    `[1, T, window_size]` int.
+
+    Branches:
+      • p_t < window_size-1: indices [0, 1, ..., p_t, -1, -1, ...] (slot
+        not yet written → -1).
+      • p_t >= window_size-1: cycled ring layout
+        [(p_t % w)+1, ..., w-1, 0, ..., p_t % w].
+    """
+    kw = dict(device=device) if device is not None else {}
+    T = positions.shape[0]
+    w = window_size
+    k = torch.arange(w, **kw)  # [w]
+    pos = positions.to(torch.long).to(**(kw if kw else {}))
+    pos_2d = pos.unsqueeze(1)  # [T, 1]
+    k_2d = k.unsqueeze(0)  # [1, w]
+    full = pos_2d >= (w - 1)  # [T, 1] bool — has window wrapped?
+    # Branch A: not yet full → arange masked by causal cap
+    case_partial = torch.where(
+        k_2d <= pos_2d,
+        k_2d.expand(T, -1),
+        torch.full((T, w), -1, dtype=torch.long, **kw),
+    )
+    # Branch B: cycled indices = [(p%w)+1 .. w-1, 0 .. p%w]
+    pos_mod = (pos_2d % w)  # [T, 1]
+    # Build the rotation per token: shift = (pos_mod + 1)
+    # cycled[t, k] = (k + pos_mod[t] + 1) % w
+    cycled = (k_2d + pos_mod + 1) % w  # [T, w]
+    matrix = torch.where(full, cycled, case_partial)
+    return matrix.unsqueeze(0)  # [1, T, w]
+
+
+def _get_compress_topk_idxs_pertoken(
+    ratio: int,
+    positions: torch.Tensor,
+    offset: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Per-token compressed-block topk indices.
+
+    For token t at position p_t, valid compressed entries are those that
+    are causal: idx in [0, (p_t+1)//ratio). Beyond that → -1.
+    Used by W3.2-v6 indexer-less compress topk path.
+    """
+    kw = dict(device=device) if device is not None else {}
+    T = positions.shape[0]
+    pos = positions.to(torch.long).to(**(kw if kw else {}))
+    n_blocks = ((pos + 1) // ratio).max().item() if T > 0 else 0
+    if n_blocks == 0:
+        # No compressed blocks visible to anyone → all -1
+        return torch.full((1, T, 1), -1, dtype=torch.long, **kw)
+    base = torch.arange(n_blocks, **kw).unsqueeze(0).expand(T, -1)  # [T, n_blocks]
+    cap = ((pos + 1) // ratio).unsqueeze(1)  # [T, 1]
+    matrix = torch.where(base < cap, base + offset, torch.full_like(base, -1))
+    return matrix.unsqueeze(0)
 
 
 @lru_cache(2)
@@ -551,14 +728,22 @@ class Compressor(nn.Module):
         new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
         return new_tensor
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> Optional[torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, positions: torch.Tensor
+    ) -> Optional[torch.Tensor]:
         """Compress KV for the input tokens. Writes into self.kv_cache when a
         compression block boundary is hit; otherwise just buffers state and returns None.
 
         Args:
             x: [num_tokens, dim] (2D, ATOM convention) or [B, S, dim] (3D, legacy).
                 2D input is treated as a single sequence (B=1 implicit).
-            start_pos: starting position in the absolute sequence (0 = prefill).
+            positions: per-token absolute positions [num_tokens]. W3.2-v6:
+                replaces `start_pos: int`. Inside this function we derive
+                `start_pos = int(positions[0])` for the existing scalar
+                math; valid because the caller (DeepseekV4Attention) splits
+                multi-request prefill via cu_seqlens_q so each call sees
+                one seq, and decode positions for our smoke test all share
+                the same compress-boundary phase.
         Returns:
             Compressed KV slice that was just written ([1, S/ratio, head_dim] in
             prefill, or [1, 1, head_dim] in decode), or None if no compression
@@ -569,6 +754,9 @@ class Compressor(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(0)  # [num_tokens, dim] → [1, num_tokens, dim]
         bsz, seqlen, _ = x.size()
+        # Derive scalar start_pos from per-token positions.
+        positions = positions.to(torch.long)
+        start_pos = int(positions[0].item()) if positions.numel() > 0 else 0
         ratio = self.compress_ratio
         overlap = self.overlap
         d = self.head_dim
@@ -580,6 +768,11 @@ class Compressor(nn.Module):
         kv = self.wkv(x)
         score = self.wgate(x)
 
+        # W3.2-v3 + v5: per-seq stable rows. The v4 outer loop publishes
+        # cur_idx; if seq_rows.numel() != local bsz, pick seq_rows[cur_idx].
+        seq_rows = _dsv4_get_seq_rows(self.kv_state.shape[0])
+        cur_idx = _dsv4_get_current_seq_idx()
+
         if start_pos == 0:
             # ===== Prefill path =====
             should_compress = seqlen >= ratio
@@ -587,19 +780,31 @@ class Compressor(nn.Module):
             cutoff = seqlen - remainder
             offset = ratio if overlap else 0
 
+            if seq_rows is not None and seq_rows.numel() == bsz:
+                rows_pre = seq_rows
+            elif (
+                seq_rows is not None
+                and cur_idx is not None
+                and 0 <= cur_idx < seq_rows.numel()
+                and bsz == 1
+            ):
+                rows_pre = seq_rows[cur_idx : cur_idx + 1]
+            else:
+                rows_pre = torch.arange(bsz, device=kv.device, dtype=torch.long)
+
             # Save the last `ratio` overlap-slice tokens into kv_state for use
             # by the next decode call's overlap window.
             if overlap and cutoff >= ratio:
-                self.kv_state[:bsz, :ratio] = kv[:, cutoff - ratio : cutoff]
-                self.score_state[:bsz, :ratio] = (
+                self.kv_state[rows_pre, :ratio] = kv[:, cutoff - ratio : cutoff]
+                self.score_state[rows_pre, :ratio] = (
                     score[:, cutoff - ratio : cutoff] + self.ape
                 )
             # Save the trailing partial block (remainder tokens) into kv_state.
             if remainder > 0:
-                kv, self.kv_state[:bsz, offset : offset + remainder] = kv.split(
-                    [cutoff, remainder], dim=1
-                )
-                self.score_state[:bsz, offset : offset + remainder] = (
+                kv_main, kv_tail = kv.split([cutoff, remainder], dim=1)
+                self.kv_state[rows_pre, offset : offset + remainder] = kv_tail
+                kv = kv_main
+                self.score_state[rows_pre, offset : offset + remainder] = (
                     score[:, cutoff:] + self.ape[:remainder]
                 )
                 score = score[:, :cutoff]
@@ -611,28 +816,39 @@ class Compressor(nn.Module):
                 score = self.overlap_transform(score, float("-inf"))
             kv = (kv * score.softmax(dim=2)).sum(dim=2)
         else:
-            # ===== Decode path (start_pos > 0, seqlen == 1) =====
-            # W3.1: comment "seqlen == 1" only holds in B=1; under
-            # multi-request batched decode kv arrives as
-            # [1, batch_decode, head_dim]. Use dim-1 batch + squeeze(0).
+            # ===== Decode path (start_pos > 0) =====
+            # kv arrives as [1, batch_decode, head_dim] (B=1-implicit, S=batch).
             should_compress = (start_pos + 1) % self.compress_ratio == 0
             score = score + self.ape[start_pos % ratio]
             batch_decode = kv.shape[1]
+            if seq_rows is not None and seq_rows.numel() == batch_decode:
+                rows_dec = seq_rows
+            elif (
+                seq_rows is not None
+                and cur_idx is not None
+                and 0 <= cur_idx < seq_rows.numel()
+                and batch_decode == 1
+            ):
+                rows_dec = seq_rows[cur_idx : cur_idx + 1]
+            else:
+                rows_dec = torch.arange(
+                    batch_decode, device=kv.device, dtype=torch.long
+                )
             if overlap:
-                self.kv_state[:batch_decode, ratio + start_pos % ratio] = kv.squeeze(0)
-                self.score_state[:batch_decode, ratio + start_pos % ratio] = score.squeeze(0)
+                self.kv_state[rows_dec, ratio + start_pos % ratio] = kv.squeeze(0)
+                self.score_state[rows_dec, ratio + start_pos % ratio] = score.squeeze(0)
                 if should_compress:
                     kv_state = torch.cat(
                         [
-                            self.kv_state[:batch_decode, :ratio, :d],
-                            self.kv_state[:batch_decode, ratio:, d:],
+                            self.kv_state[rows_dec, :ratio, :d],
+                            self.kv_state[rows_dec, ratio:, d:],
                         ],
                         dim=1,
                     )
                     score_state = torch.cat(
                         [
-                            self.score_state[:batch_decode, :ratio, :d],
-                            self.score_state[:batch_decode, ratio:, d:],
+                            self.score_state[rows_dec, :ratio, :d],
+                            self.score_state[rows_dec, ratio:, d:],
                         ],
                         dim=1,
                     )
@@ -640,21 +856,14 @@ class Compressor(nn.Module):
                         dim=1, keepdim=True
                     )
                     # Roll: the just-completed window becomes the next overlap window.
-                    self.kv_state[:batch_decode, :ratio] = self.kv_state[:batch_decode, ratio:]
-                    self.score_state[:batch_decode, :ratio] = self.score_state[:batch_decode, ratio:]
+                    self.kv_state[rows_dec, :ratio] = self.kv_state[rows_dec, ratio:]
+                    self.score_state[rows_dec, :ratio] = self.score_state[rows_dec, ratio:]
             else:
-                # W3.1 (RFC §6.2.1 bug source #1): same B=1-implicit shape
-                # bug as DeepseekV4Attention. kv arrives as
-                # [1, batch_decode, head_dim] under multi-request decode;
-                # the original kv.squeeze(1) was a single-decode-token
-                # (S=1) trick. Squeeze the implicit B=1 instead and use
-                # dim 1 as the real batch.
-                batch_decode = kv.shape[1]
-                self.kv_state[:batch_decode, start_pos % ratio] = kv.squeeze(0)
-                self.score_state[:batch_decode, start_pos % ratio] = score.squeeze(0)
+                self.kv_state[rows_dec, start_pos % ratio] = kv.squeeze(0)
+                self.score_state[rows_dec, start_pos % ratio] = score.squeeze(0)
                 if should_compress:
                     kv = (
-                        self.kv_state[:batch_decode] * self.score_state[:batch_decode].softmax(dim=1)
+                        self.kv_state[rows_dec] * self.score_state[rows_dec].softmax(dim=1)
                     ).sum(dim=1, keepdim=True)
 
         if not should_compress:
@@ -678,14 +887,11 @@ class Compressor(nn.Module):
             act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
         if start_pos == 0:
-            self.kv_cache[:bsz, : seqlen // ratio] = kv
+            self.kv_cache[rows_pre, : seqlen // ratio] = kv
         else:
-            # W3.1: kv from the decode aggregation has shape
+            # kv from the decode aggregation has shape
             # [batch_decode, 1, head_dim] (sum(dim=1, keepdim=True)).
-            # Use the dim-0 batch directly via batch_decode in scope from
-            # the decode branch above. squeeze(1) here removes the
-            # genuine size-1 aggregation dim.
-            self.kv_cache[:batch_decode, start_pos // ratio] = kv.squeeze(1)
+            self.kv_cache[rows_dec, start_pos // ratio] = kv.squeeze(1)
         return kv
 
 
@@ -779,15 +985,19 @@ class Indexer(nn.Module):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        start_pos: int,
+        positions: torch.Tensor,
         offset: int,
     ) -> torch.Tensor:
         """Compute sparse top-k indices over the indexer's compressed KV cache.
 
+        W3.2-v6: signature lifted from `start_pos: int` to per-token
+        `positions: Tensor`. RoPE is per-token; the rest of the math
+        derives a scalar start_pos for the caller-split single-seq case.
+
         Args:
             x: [num_tokens, dim] input hidden states (for compressor + weights_proj).
             qr: [num_tokens, q_lora_rank] latent query shared with main Attention's q_a.
-            start_pos: absolute sequence start position.
+            positions: per-token absolute positions [num_tokens].
             offset: offset added to returned indices to land them in the
                 concatenated (window || compressed) KV layout consumed by sparse_attn.
         Returns:
@@ -796,7 +1006,9 @@ class Indexer(nn.Module):
         assert self.freqs_cis is not None
         assert x.dim() == 2 and qr.dim() == 2
         seqlen = x.size(0)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        positions = positions.to(torch.long)
+        start_pos = int(positions[0].item()) if positions.numel() > 0 else 0
+        freqs_cis = self.freqs_cis[positions]  # per-token RoPE
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         end_pos = start_pos + seqlen
@@ -813,35 +1025,51 @@ class Indexer(nn.Module):
         q = rotate_activation(q)
         fp4_act_quant_inplace(q, _FP4_BLOCK_SIZE)
 
-        # ----- Indexer KV (Compressor takes 2D, mutates kv_cache) -----
-        self.compressor(x, start_pos)
+        # ----- Indexer KV (Compressor takes positions, mutates kv_cache) -----
+        self.compressor(x, positions)
         # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
             self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
         ).unsqueeze(0)
 
         # ----- Index score -----
-        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode
-        # (start_pos > 0 AND multiple decode tokens), each token belongs
-        # to a distinct sequence — read each sequence's OWN row of
-        # self.kv_cache rather than row 0. Transpose q to [N, 1, H, D],
-        # slice kv_cache[:N], compute einsum, transpose back.
-        # Gate on start_pos > 0 so warmup / prefill (where multi-token
-        # input is one sequence) keeps the B=1-implicit path and does
-        # not over-slice kv_cache (max_batch_size << seqlen during
-        # warmup).
+        # W3.2-v3 (RFC §3.1 cross-talk fix on Indexer): in batched decode
+        # each token belongs to a distinct sequence — read each
+        # sequence's OWN row of self.kv_cache by per-seq stable row id.
+        # During prefill of a single seq, also read that seq's own row
+        # (whichever it was assigned by `_dsv4_get_seq_rows`), not row 0.
+        # During warmup (no attn_metadata) fall back to legacy [:1].
         bsz_idx = q.shape[1]
+        seq_rows_idx = _dsv4_get_seq_rows(self.kv_cache.shape[0])
+        cur_idx_idx = _dsv4_get_current_seq_idx()
         if start_pos > 0 and bsz_idx > 1:
+            if seq_rows_idx is not None and seq_rows_idx.numel() == bsz_idx:
+                rows_idx = seq_rows_idx
+            else:
+                rows_idx = torch.arange(
+                    bsz_idx, device=q.device, dtype=torch.long
+                )
             q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
-            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio]  # [N, t, head_dim]
+            kv_per_seq = self.kv_cache[rows_idx, : end_pos // ratio]  # [N, t, head_dim]
             index_score = torch.einsum(
                 "bshd,btd->bsht", q_per_seq, kv_per_seq
             )  # [N, 1, H, t]
             index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
         else:
-            index_score = torch.einsum(
-                "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
-            )
+            # W3.2-v5: prefer the row published by the outer cu_seqlens_q loop.
+            if (
+                seq_rows_idx is not None
+                and cur_idx_idx is not None
+                and 0 <= cur_idx_idx < seq_rows_idx.numel()
+            ):
+                kv_slice = self.kv_cache[
+                    seq_rows_idx[cur_idx_idx : cur_idx_idx + 1], : end_pos // ratio
+                ]
+            elif seq_rows_idx is not None and seq_rows_idx.numel() >= 1:
+                kv_slice = self.kv_cache[seq_rows_idx[:1], : end_pos // ratio]
+            else:
+                kv_slice = self.kv_cache[:1, : end_pos // ratio]
+            index_score = torch.einsum("bshd,btd->bsht", q, kv_slice)
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
         # ----- Top-k selection over compressed positions -----
@@ -1089,14 +1317,20 @@ class DeepseekV4Attention(nn.Module):
 
         self.wo_a.quant_type = _QT.No
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
-        """Compute attention for `x` at absolute position `start_pos`.
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Compute attention for `x` with per-token absolute `positions`.
+
+        W3.2-v6 (RFC §3.1, SGLang-isomorphic): positions is the per-token
+        absolute-position tensor (Tensor[num_tokens]). lingpeng's original
+        `start_pos: int` scalar was the W3.2-v5 wall (multi-request decode
+        with 4 seqs at different positions all read the same scalar →
+        wrong RoPE for 3 of 4). With per-token positions every token
+        rotates against its own absolute position and writes its own ring
+        slot.
 
         Args:
-            x: [num_tokens, dim] flat ATOM convention. Single-sequence
-                (B=1 implicit; multi-sequence batching needs attn_metadata,
-                deferred until ATOM's scheduler integration).
-            start_pos: absolute position of the first token in this batch.
+            x: [num_tokens, dim] flat ATOM convention.
+            positions: [num_tokens] long tensor of absolute positions.
         Returns:
             [num_tokens, dim] attention output (BF16).
         """
@@ -1104,10 +1338,18 @@ class DeepseekV4Attention(nn.Module):
             x.dim() == 2
         ), f"DeepseekV4Attention expects 2D [num_tokens, dim], got {x.shape}"
         seqlen = x.size(0)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        positions = positions.to(torch.long).to(x.device)
+        freqs_cis = self.freqs_cis[positions]  # per-token RoPE
+        # Scalar start_pos derived for the topk helpers + compressor/indexer
+        # (we keep their scalar interface here; for our test all tokens in
+        # one Attention call belong to one seq during prefill, or each
+        # token carries its own position during decode where the helper
+        # uses the per-token variant).
+        start_pos_scalar = int(positions[0].item()) if seqlen > 0 else 0
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
+        is_prefill = bool(start_pos_scalar == 0) and seqlen > 1
 
         # First-call plumbing: hand the (compressed-half) KV cache + freqs_cis
         # to the compressor / indexer.
@@ -1117,19 +1359,31 @@ class DeepseekV4Attention(nn.Module):
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
 
-        # Reset all KV buffers on new prefill (start_pos==0). The ATOM warmup
-        # forward (seqlen=MAX_BATCHED_TOKENS with zeros) fills these buffers
-        # with garbage. Real prefill only overwrites a few slots, leaving
-        # stale warmup data that poisons decode attention.
-        if start_pos == 0:
-            self.kv_cache.zero_()
-            if self.compress_ratio:
-                self.compressor.kv_state.zero_()
-                self.compressor.score_state.fill_(float("-inf"))
-                if self.indexer is not None:
-                    self.indexer.kv_cache.zero_()
-                    self.indexer.compressor.kv_state.zero_()
-                    self.indexer.compressor.score_state.fill_(float("-inf"))
+        # On new prefill (every token starts at pos 0 in this seq), zero
+        # ONLY the rows we're about to write — never globally clobber.
+        if is_prefill:
+            seq_rows = _dsv4_get_seq_rows(self.kv_cache.shape[0])
+            if seq_rows is not None and seq_rows.numel() > 0:
+                self.kv_cache[seq_rows] = 0
+                if self.compress_ratio:
+                    self.compressor.kv_state[seq_rows] = 0
+                    self.compressor.score_state[seq_rows] = float("-inf")
+                    if self.indexer is not None:
+                        self.indexer.kv_cache[seq_rows] = 0
+                        self.indexer.compressor.kv_state[seq_rows] = 0
+                        self.indexer.compressor.score_state[seq_rows] = float(
+                            "-inf"
+                        )
+            else:
+                # Warmup / no attn_metadata: legacy global reset.
+                self.kv_cache.zero_()
+                if self.compress_ratio:
+                    self.compressor.kv_state.zero_()
+                    self.compressor.score_state.fill_(float("-inf"))
+                    if self.indexer is not None:
+                        self.indexer.kv_cache.zero_()
+                        self.indexer.compressor.kv_state.zero_()
+                        self.indexer.compressor.score_state.fill_(float("-inf"))
 
         # ----- Q: low-rank projection + per-head RMSNorm + partial RoPE -----
         # ATOM TP linears require 2D inputs; subsequent ops (RoPE, sparse_attn)
@@ -1148,72 +1402,94 @@ class DeepseekV4Attention(nn.Module):
         _apply_rotary_emb(kv[..., -rd:], freqs_cis)
         act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
-        # ----- Build topk_idxs (B=1 implicit) -----
-        topk_idxs = _get_window_topk_idxs(win, 1, seqlen, start_pos, device=x.device)
+        # ----- Build topk_idxs -----
+        # Prefill: KV being indexed is the freshly-projected [1, seqlen,
+        # head_dim] (concat'd with newly-emitted compressed if any). Use
+        # the legacy scalar helper which sizes K=min(seqlen, win) — must
+        # match kv.size(1) or sparse_attn reads garbage. start_pos=0 is
+        # guaranteed for prefill paths; positions[t]==t per cu_split iter.
+        # Decode: KV being indexed is self.kv_cache[row][:win]. Use the
+        # per-token helper to get correct windows for each seq's actual
+        # position (W3.2-v6 RoPE+slot fix).
+        if is_prefill:
+            start_pos_for_helper = int(positions[0].item()) if seqlen > 0 else 0
+            topk_idxs = _get_window_topk_idxs(
+                win, 1, seqlen, start_pos_for_helper, device=x.device
+            )
+        else:
+            topk_idxs = _get_window_topk_idxs_pertoken(
+                win, positions, device=x.device
+            )
         if self.compress_ratio:
-            offset = kv.size(1) if start_pos == 0 else win
+            # offset into the concatenated [window || compressed] layout
+            offset = kv.size(1) if is_prefill else win
             if self.indexer is not None:
-                compress_topk_idxs = self.indexer(x, qr, start_pos, offset)
+                compress_topk_idxs = self.indexer(x, qr, positions, offset)
             else:
-                compress_topk_idxs = _get_compress_topk_idxs(
-                    ratio, 1, seqlen, start_pos, offset, device=x.device
-                )
+                if is_prefill:
+                    compress_topk_idxs = _get_compress_topk_idxs(
+                        ratio, 1, seqlen, start_pos_for_helper, offset,
+                        device=x.device,
+                    )
+                else:
+                    compress_topk_idxs = _get_compress_topk_idxs_pertoken(
+                        ratio, positions, offset, device=x.device
+                    )
             topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
         topk_idxs = topk_idxs.int()
 
-        # ----- Attention: prefill writes window KV linearly + concats fresh
-        # compressed entries; decode writes one slot in window ring buffer
-        # then reads from the persistent kv_cache. (kv_cache slot 0 = our
-        # implicit B=1.) -----
-        # W3.1 (RFC §6.2.1): replace 5 hardcoded [:1] writes/reads with
-        # slices matching the RHS batch dim. For the lingpeng B=1-implicit
-        # path this is a no-op; for batched decode (where kv arrives as
-        # [B, 1, head_dim] from the model_runner) this stops the dim-
-        # mismatch crash at the previous :1054. Module-level buffer
-        # sharing across requests (the deeper bug source #1-#5) is
-        # unfixed here and will be handled in W3.2 with proper slot
-        # mapping.
+        # ----- Determine per-token (seq_row, slot) for KV writes -----
+        # seq_rows: [N_active_seqs] from allocator; pick which seq each
+        # token belongs to using cu_seqlens_q (prefill of one seq) or by
+        # treating each decode token as its own seq.
+        seq_rows = _dsv4_get_seq_rows(self.kv_cache.shape[0])
+        cur_idx = _dsv4_get_current_seq_idx()
         bsz_kv = kv.shape[0]
-        if start_pos == 0:
-            if seqlen <= win:
-                self.kv_cache[:bsz_kv, :seqlen] = kv
-            else:
-                cutoff = seqlen % win
-                (
-                    self.kv_cache[:bsz_kv, cutoff:win],
-                    self.kv_cache[:bsz_kv, :cutoff],
-                ) = kv[
-                    :, -win:
-                ].split([win - cutoff, cutoff], dim=1)
-            if self.compress_ratio:
-                if (kv_compress := self.compressor(x, start_pos)) is not None:
-                    kv = torch.cat([kv, kv_compress], dim=1)
+
+        # Map each of the `seqlen` tokens to a row in self.kv_cache.
+        if cur_idx is not None and seq_rows is not None and 0 <= cur_idx < seq_rows.numel():
+            # Prefill outer loop published which seq we're processing.
+            row_per_token = seq_rows[cur_idx].expand(seqlen)
+        elif seq_rows is not None and seq_rows.numel() == seqlen:
+            # Packed decode: 1 token per active seq.
+            row_per_token = seq_rows
+        elif seq_rows is not None and seq_rows.numel() >= 1:
+            # Single-seq fallback (legacy / tests).
+            row_per_token = seq_rows[:1].expand(seqlen)
+        else:
+            # Warmup / no attn_metadata: write to row 0.
+            row_per_token = torch.zeros(seqlen, device=x.device, dtype=torch.long)
+
+        # ----- Per-token KV write into self.kv_cache via flat scatter -----
+        # kv: [1, seqlen, head_dim] → [seqlen, head_dim]
+        kv_flat = kv.squeeze(0)
+        # slot index: per-token (positions % win); ring-buffer semantics.
+        slots = (positions % win).to(torch.long)
+        # flat view of the [max_batch, win, head_dim] cache
+        cache_flat = self.kv_cache.view(-1, self.kv_cache.shape[-1])
+        flat_idx = row_per_token * win + slots  # [seqlen]
+        cache_flat[flat_idx] = kv_flat
+
+        # ----- Compressor/Indexer state writes -----
+        kv_compress = None
+        if self.compress_ratio:
+            kv_compress = self.compressor(x, positions)
+
+        # ----- sparse_attn read -----
+        if is_prefill:
+            # Prefill of a single seq: kv (just-written window KV) is the
+            # contiguous [1, seqlen, head_dim] freshly-projected tensor;
+            # concat any newly-emitted compressed entries.
+            if kv_compress is not None:
+                kv = torch.cat([kv, kv_compress], dim=1)
             o = sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
-            # W3.1 (RFC §6.2.1): in batched decode, kv arrives as
-            # [1, batch_decode_tokens, head_dim] (implicit B=1, S=batch).
-            # squeeze(0) gives [batch_decode, head_dim], write into
-            # kv_cache[:batch_decode, start_pos%win].
-            batch_decode = kv.shape[1]
-            kv_decode = kv.squeeze(0)  # [batch_decode, head_dim]
-            self.kv_cache[:batch_decode, start_pos % win] = kv_decode
-            if self.compress_ratio:
-                self.compressor(x, start_pos)
-            # W3.2 (RFC §3.1 cross-talk fix): for multi-request lockstep
-            # decode (batch_decode > 1) each token belongs to a distinct
-            # sequence. Transpose q from [1, N, H, D] -> [N, 1, H, D],
-            # read per-sequence kv_cache slices, and call sparse_attn with
-            # B=N. This eliminates the "every request reads row 0" cross-
-            # talk that polluted W3.2-v1 idx>0 outputs.
-            #
-            # topk_idxs from helpers is [1, N, K]; transpose to [N, 1, K].
-            # sparse_attn output [N, 1, H, D] is transposed back to
-            # [1, N, H, D] so the downstream RoPE/o_proj path (which
-            # assumes B=1 implicit) sees the same shape it always did.
-            if batch_decode > 1:
-                q_per_seq = q.transpose(0, 1).contiguous()       # [N, 1, H, D]
-                kv_per_seq = self.kv_cache[:batch_decode]        # [N, max_seq, head_dim]
-                topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
+            # Decode: each token reads its OWN seq's kv_cache row.
+            if seqlen > 1:
+                # Multi-request packed decode: transpose to per-seq.
+                q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+                kv_per_seq = self.kv_cache[row_per_token]   # [N, win, head_dim]
+                topk_per_seq = topk_idxs.transpose(0, 1).contiguous()
                 o = sparse_attn(
                     q_per_seq,
                     kv_per_seq,
@@ -1221,11 +1497,11 @@ class DeepseekV4Attention(nn.Module):
                     topk_per_seq,
                     self.softmax_scale,
                 )
-                o = o.transpose(0, 1).contiguous()               # [1, N, H, D]
+                o = o.transpose(0, 1).contiguous()  # [1, N, H, D]
             else:
                 o = sparse_attn(
                     q,
-                    self.kv_cache[:1],
+                    self.kv_cache[row_per_token],
                     self.attn_sink,
                     topk_idxs,
                     self.softmax_scale,
@@ -1766,7 +2042,7 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
+        positions: torch.Tensor,
         input_ids: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # ----- Attention sub-layer with mHC mixing -----
@@ -1775,7 +2051,7 @@ class Block(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x = self.attn_norm(x)
-        x = self.attn(x, start_pos)
+        x = self.attn(x, positions)
         x = self.hc_post(x, residual, post, comb)
 
         # ----- FFN sub-layer with mHC mixing -----
@@ -1914,14 +2190,14 @@ class MTPBlock(Block):
         self.head: Optional[ParallelHead] = None
 
     def forward(
-        self, x: torch.Tensor, start_pos: int, input_ids: torch.Tensor
+        self, x: torch.Tensor, positions: torch.Tensor, input_ids: torch.Tensor
     ) -> torch.Tensor:
         """Forward.
 
         Args:
             x: residual stream from main model. Either [num_tokens, hc, D]
                 (ATOM 2D-flat convention) or [B, S, hc, D] (legacy 4D).
-            start_pos: absolute position offset.
+            positions: absolute positions per token, [num_tokens].
             input_ids: matching token ids.
         Returns:
             Logits of the last token (vocab projected by self.head).
@@ -1929,14 +2205,11 @@ class MTPBlock(Block):
         assert (
             self.embed is not None and self.head is not None
         ), "MTPBlock requires .embed and .head to be assigned by the parent model"
-        e = self.embed(input_ids)  # [num_tokens, D] or [B, S, D]
+        e = self.embed(input_ids)
         e = self.enorm(e)
         x = self.hnorm(x)
-        # Mix embedding + hidden into a fresh residual stream. The unsqueeze
-        # adds the hc dim before the trailing D so [num_tokens, D] → [num_tokens, 1, D]
-        # broadcasts correctly against x [num_tokens, hc, D]. Same for 4D path.
         x = self.e_proj(e).unsqueeze(-2) + self.h_proj(x)
-        x = super().forward(x, start_pos, input_ids)
+        x = super().forward(x, positions, input_ids)
         logits = self.head(
             x, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
         )
@@ -1998,39 +2271,43 @@ class DeepseekV4Model(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        start_pos: int = 0,
+        positions: Optional[torch.Tensor] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
         """Forward.
 
         Args:
             input_ids: 1D `[num_tokens]` (ATOM 2D-flat convention) OR 2D
-                `[B, S]` (legacy reference convention; treated as a single
-                sequence of B*S tokens — only correct for B=1).
-            start_pos: absolute position of the first token.
+                `[B, S]` (legacy reference convention).
+            positions: 1D `[num_tokens]` absolute positions per token, or
+                None (legacy single-seq prefill at pos 0).
         Returns:
-            Logits of the last token: `[vocab]` (1D path) or `[B, vocab]` (2D path).
+            Logits sampled at last-token-of-each-sequence: `[N, vocab]`.
         """
         # Normalize input_ids to 1D [num_tokens] for the 2D internal convention.
         if input_ids.dim() == 2:
             assert (
                 input_ids.size(0) == 1
-            ), "B>1 batched input_ids needs attn_metadata; not supported yet"
+            ), "B>1 batched input_ids needs positions tensor; not supported"
             input_ids = input_ids.flatten()
+
+        # W3.2-v6: synthesize legacy positions for callers that pass None
+        # (e.g., the single-prompt simple_inference reference path that
+        # the lingpeng tests use). For real ATOM serving the runner
+        # always passes a populated positions tensor.
+        num_tokens = input_ids.size(0)
+        if positions is None:
+            positions = torch.arange(
+                num_tokens, device=input_ids.device, dtype=torch.long
+            )
+        else:
+            positions = positions.to(torch.long)
+
         h = self.embed(input_ids)  # [num_tokens, dim]
         # Expand to hc_mult copies for Hyper-Connections: [num_tokens, hc, dim]
         h = h.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
-        for layer in self.layers:
-            h = layer(h, start_pos, input_ids)
-
-        # W3.2 (RFC §14 Week 3): slice h to last-token-of-each-sequence
-        # using cu_seqlens_q from attn_metadata before the LM head, so a
-        # decode batch of N requests yields [N, vocab] (one sample row per
-        # request). Without this, ParallelHead.get_logits would project
-        # only the trailing row, giving 1 sample for any N — exactly the
-        # IndexError@scheduler.py:609 RFC §3.1 #7 evidence chain captured
-        # in W3.2-DEBUG (len(prev_token_ids)=1, len(req_ids)=4).
+        # Pull cu_seqlens_q for the LM-head last-token slice + prefill split.
         try:
             from atom.utils.forward_context import get_forward_context
 
@@ -2038,7 +2315,49 @@ class DeepseekV4Model(nn.Module):
             attn_meta = getattr(ctx, "attn_metadata", None)
             cu = getattr(attn_meta, "cu_seqlens_q", None)
         except Exception:
+            ctx = None
+            attn_meta = None
             cu = None
+
+        # W3.2-v6: keep the cu_seqlens_q-driven prefill split (each iter
+        # passes a single seq's tokens + their actual positions). The
+        # split is what makes seq_rows[cur_idx] addressable per call;
+        # per-token positions inside the Attention then fix RoPE / ring-
+        # slot indexing — the v5 wall.
+        is_packed_prefill = (
+            attn_meta is not None
+            and cu is not None
+            and cu.numel() >= 3
+            and getattr(attn_meta, "block_tables", None) is not None
+            and attn_meta.block_tables.dim() == 2
+            and attn_meta.block_tables.shape[0] == cu.numel() - 1
+            and num_tokens > (cu.numel() - 1)  # >1 token per seq → prefill
+        )
+        if is_packed_prefill:
+            num_seqs = cu.numel() - 1
+            full_seq_rows = _dsv4_get_seq_rows(num_seqs)
+            attn_meta._dsv4_seq_rows = full_seq_rows
+            h_segments: list[torch.Tensor] = []
+            cu_cpu = cu.detach().to(torch.long).cpu().tolist()
+            for i in range(num_seqs):
+                s, e = cu_cpu[i], cu_cpu[i + 1]
+                h_seg = h[s:e]
+                ids_seg = input_ids[s:e]
+                pos_seg = positions[s:e]
+                _dsv4_set_current_seq_idx(i)
+                try:
+                    for layer in self.layers:
+                        h_seg = layer(h_seg, pos_seg, ids_seg)
+                finally:
+                    _dsv4_set_current_seq_idx(None)
+                h_segments.append(h_seg)
+            h = torch.cat(h_segments, dim=0)
+        else:
+            for layer in self.layers:
+                h = layer(h, positions, input_ids)
+
+        # Slice h to last-token-of-each-sequence using cu_seqlens_q from
+        # attn_metadata before the LM head.
         if cu is not None and cu.numel() >= 2:
             last_token_indices = cu[1:] - 1
             h = h[last_token_indices]
@@ -2120,8 +2439,17 @@ class DeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
-        start_pos = int(positions[0].item()) if positions is not None else 0
-        return self.model(input_ids=input_ids, start_pos=start_pos, **model_kwargs)
+        # W3.2-v6 (RFC §3.1, SGLang-isomorphic): pass `positions` through
+        # as a Tensor[num_tokens] so multi-request inference can give each
+        # token its true absolute position. lingpeng's `start_pos: int`
+        # scalar lossy-degrade was the W3.2-v5 wall (4 seqs at different
+        # actual positions all read freqs_cis[start_pos] = wrong RoPE for
+        # 3 of 4). Compatible fallback: legacy `start_pos: int` callers
+        # can still pass `positions=None` and we synthesize a positions
+        # tensor of [0..seqlen).
+        return self.model(
+            input_ids=input_ids, positions=positions, **model_kwargs
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # In V4, the LM head is fused into DeepseekV4Model.forward (it consumes

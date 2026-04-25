@@ -58,6 +58,11 @@ support_model_arch_dict = {
     "DeepseekV3ForCausalLM": "atom.models.deepseek_v2.DeepseekV2ForCausalLM",
     "DeepseekV32ForCausalLM": "atom.models.deepseek_v2.DeepseekV2ForCausalLM",
     "DeepseekV4ForCausalLM": "atom.models.deepseek_v4.DeepseekV4ForCausalLM",
+    # MLA paged-KV-cache variant — opt-in via `architectures` override or
+    # `--model-arch`. Same V4 weights, but raw-KV uses the standard ATOM
+    # paged tensor (forward_context.kv_cache_data) instead of the legacy
+    # flat `register_buffer("kv_cache", ...)`. See atom.models.deepseek_v4_mla.
+    "DeepseekV4ForCausalLM_MLA": "atom.models.deepseek_v4_mla.DeepseekV4ForCausalLM_MLA",
     "GptOssForCausalLM": "atom.models.gpt_oss.GptOssForCausalLM",
     "GlmMoeDsaForCausalLM": "atom.models.deepseek_v2.GlmMoeDsaForCausalLM",
     "Glm4MoeForCausalLM": "atom.models.glm4_moe.Glm4MoeForCausalLM",
