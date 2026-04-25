@@ -188,8 +188,12 @@ def make_v4_quant_config(hf_config):
     orig_lookup = base.get_layer_quant_config
 
     def overridden(layer_name, *, check_children=False):
-        # Routed experts → FP4 (NOT shared_experts, which stay FP8)
-        if "ffn.experts." in layer_name:
+        # Routed experts → FP4 (NOT shared_experts, which stay FP8).
+        # Match both per-expert prefix `layers.N.ffn.experts.M.w{1,2,3}` (used
+        # by individual Linear lookups, with trailing `.M.w1`) AND the bare
+        # `layers.N.ffn.experts` prefix (used by FusedMoE.__init__ when
+        # constructing fused expert params — has NO trailing dot).
+        if ".ffn.experts" in layer_name:
             return fp4_spec
         # BF16 / fp32 raw paths
         if (
