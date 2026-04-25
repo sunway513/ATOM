@@ -113,6 +113,16 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
         tp_rank_start = loaded_weight_per_rank * get_tp_group().rank
         tp_rank_end = tp_rank_start + loaded_weight_per_rank
         param.data.copy_(loaded_weight.view(-1)[tp_rank_start:tp_rank_end])
+    else:
+        # Shape mismatch we cannot resolve — leaving the destination at its init
+        # value is almost always a bug. The post-load check in load_model() will
+        # catch this and warn (param will be in `unloaded` set since this loader
+        # never wrote to it). Raise here so the failure is loud at copy time
+        # too, instead of being masked by the default ones-init of RMSNorm etc.
+        raise RuntimeError(
+            f"default_weight_loader: shape mismatch — param={tuple(param.shape)} "
+            f"loaded={tuple(loaded_weight.shape)}. Cannot copy."
+        )
 
 
 def safetensors_weights_iterator(
@@ -260,6 +270,12 @@ def load_model(
     weights_mapping = getattr(model, "weights_mapping", {})
     skip_weight_prefixes = getattr(model, "skip_weight_prefixes", [])
     mtp_remap = getattr(model, "remap_mtp_weight_name", None)
+    # Models can also expose a `weights_mapper` (WeightsMapper instance) for
+    # precise prefix/suffix-anchored renames that the dumb substring-substitution
+    # `weights_mapping` dict cannot express safely. If both are set they are
+    # composed: weights_mapper applies first, then the legacy substring map.
+    if weights_mapper is None:
+        weights_mapper = getattr(model, "weights_mapper", None)
     params_dict = dict(model.named_parameters())
 
     # Pre-index expert_mapping by weight_name_part for O(1) lookup.
@@ -508,6 +524,47 @@ def load_model(
         # Wait for all tasks to complete and raise any exceptions.
         for future in concurrent.futures.as_completed(futures):
             future.result()
+
+    # Verify every model parameter actually got loaded from the checkpoint.
+    # Without this check, weights_mapping bugs (e.g. a substring rule
+    # accidentally rewriting `attn_norm.weight` → `attn_model.norm.weight`)
+    # silently leave the destination parameter at its init value (all-ones for
+    # RMSNorm, all-zeros for newly-allocated buffers), corrupting forward
+    # outputs in ways that are extremely hard to diagnose. WARN loudly here
+    # so the failure surfaces at load time instead of at generation time.
+    loaded_param_names = {
+        n.removeprefix(prefix) if prefix else n for n in loaded_weights_record
+    }
+    expected_param_names = set(params_dict.keys())
+    unloaded = sorted(expected_param_names - loaded_param_names)
+    # Filter known-OK skips: post-load-derived params (e.g. FusedMoE shuffle
+    # output buffers, weight_scale params merged from multiple checkpoint scales).
+    # Heuristic: anything ending in `_shuffled`, `_packed`, etc. Conservative
+    # default = report everything else.
+    suppressed_suffixes = ("_shuffled", "_packed", "_meta_for_quant", "weight_scale_2")
+    truly_unloaded = [
+        n for n in unloaded if not any(n.endswith(s) for s in suppressed_suffixes)
+    ]
+    if truly_unloaded:
+        # Only report from rank 0 (other ranks have the same view).
+        try:
+            _is_rank0 = get_tp_group().rank == 0
+        except Exception:
+            _is_rank0 = True
+        if _is_rank0:
+            sample = truly_unloaded[:20]
+            logger.warning(
+                "load_model: %d/%d model parameters were NOT loaded from "
+                "checkpoint and remain at their init values. This is almost "
+                "always a bug (typically a `weights_mapping` substring rule "
+                "that accidentally renames a param to something the model "
+                "doesn't have). Fix the mapping or the on-disk → param name "
+                "translation. First %d unloaded names: %s",
+                len(truly_unloaded),
+                len(expected_param_names),
+                len(sample),
+                sample,
+            )
 
     # Avoid holding stale Parameter refs that prevent storage release.
     del params_dict

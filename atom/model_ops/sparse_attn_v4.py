@@ -81,7 +81,9 @@ def sparse_attn(
     # Promote to FP32 for accumulation; zero out invalid positions in value tensor
     # so they contribute nothing to weighted sum even before masking the logits.
     kv_f32 = kv_gathered.float()
-    kv_f32 = torch.where(valid.unsqueeze(-1), kv_f32, kv_f32.new_zeros(()))
+    kv_f32 = torch.where(
+        valid.unsqueeze(-1), kv_f32, torch.zeros((), dtype=kv_f32.dtype, device=device)
+    )
 
     # ----- Scores: q @ kv^T -----
     # q: [B, M, H, D]  ;  kv_f32: [B, M, K, D]  ->  scores: [B, M, H, K]
@@ -103,7 +105,11 @@ def sparse_attn(
     # all -inf is undefined; we get NaN. Replace with 0 in that pathological
     # case (matches kernel's behavior since `acc_o` stays 0 in that case).
     cmax = combined.amax(dim=-1, keepdim=True)
-    cmax = torch.where(cmax == float("-inf"), cmax.new_zeros(()), cmax)
+    cmax = torch.where(
+        cmax == float("-inf"),
+        torch.zeros((), dtype=cmax.dtype, device=device),
+        cmax,
+    )
     weights = (combined - cmax).exp()
     denom = weights.sum(dim=-1, keepdim=True)
     weights = weights / denom.clamp(min=1e-30)

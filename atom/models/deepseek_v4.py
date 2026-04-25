@@ -15,6 +15,7 @@ spec decode, torch.compile, server) land in PR2-PR6.
 """
 
 import math
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Iterable, Literal, Optional, Tuple
@@ -23,6 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from aiter.dist.parallel_state import get_tensor_model_parallel_world_size
 from atom.config import Config
 from atom.model_ops.embed_head import VocabParallelEmbedding
 from atom.model_ops.linear import (
@@ -112,38 +114,44 @@ class DeepseekV4Args:
 
     @classmethod
     def from_hf_config(cls, hf_config: Any) -> "DeepseekV4Args":
-        rope_scaling = getattr(hf_config, "rope_scaling", {}) or {}
+        # Use getattr with sensible defaults so we work whether the HF config is
+        # a real V4 PretrainedConfig (all fields present) or a V3 PretrainedConfig
+        # populated with extra V4 attrs (some fields may live only in the raw
+        # config_dict, not on the config object — `transformers` strips unknown
+        # kwargs unless they're in the schema).
+        g = lambda k, default=None: getattr(hf_config, k, default)
+        rope_scaling = g("rope_scaling", {}) or {}
         return cls(
-            vocab_size=hf_config.vocab_size,
-            dim=hf_config.hidden_size,
-            n_layers=hf_config.num_hidden_layers,
-            n_mtp_layers=getattr(hf_config, "num_nextn_predict_layers", 1),
-            n_hash_layers=getattr(hf_config, "num_hash_layers", 0),
-            norm_eps=hf_config.rms_norm_eps,
-            max_seq_len=hf_config.max_position_embeddings,
-            n_heads=hf_config.num_attention_heads,
-            head_dim=hf_config.head_dim,
-            rope_head_dim=hf_config.qk_rope_head_dim,
-            q_lora_rank=hf_config.q_lora_rank,
-            o_lora_rank=hf_config.o_lora_rank,
-            o_groups=hf_config.o_groups,
-            window_size=hf_config.sliding_window,
-            compress_ratios=tuple(hf_config.compress_ratios),
-            index_n_heads=hf_config.index_n_heads,
-            index_head_dim=hf_config.index_head_dim,
-            index_topk=hf_config.index_topk,
-            moe_inter_dim=hf_config.moe_intermediate_size,
-            n_routed_experts=hf_config.n_routed_experts,
-            n_shared_experts=hf_config.n_shared_experts,
-            n_activated_experts=hf_config.num_experts_per_tok,
-            score_func=hf_config.scoring_func,
-            route_scale=hf_config.routed_scaling_factor,
-            swiglu_limit=hf_config.swiglu_limit,
-            hc_mult=hf_config.hc_mult,
-            hc_sinkhorn_iters=hf_config.hc_sinkhorn_iters,
-            hc_eps=hf_config.hc_eps,
-            rope_theta=hf_config.rope_theta,
-            compress_rope_theta=hf_config.compress_rope_theta,
+            vocab_size=g("vocab_size"),
+            dim=g("hidden_size"),
+            n_layers=g("num_hidden_layers"),
+            n_mtp_layers=g("num_nextn_predict_layers", 1),
+            n_hash_layers=g("num_hash_layers", 0),
+            norm_eps=g("rms_norm_eps", 1e-6),
+            max_seq_len=g("max_position_embeddings", 2048),
+            n_heads=g("num_attention_heads"),
+            head_dim=g("head_dim", 512),
+            rope_head_dim=g("qk_rope_head_dim", 64),
+            q_lora_rank=g("q_lora_rank", 1536),
+            o_lora_rank=g("o_lora_rank", 256),
+            o_groups=g("o_groups", 16),
+            window_size=g("sliding_window", 128),
+            compress_ratios=tuple(g("compress_ratios", (0,))),
+            index_n_heads=g("index_n_heads", 64),
+            index_head_dim=g("index_head_dim", 128),
+            index_topk=g("index_topk", 1024),
+            moe_inter_dim=g("moe_intermediate_size", 2048),
+            n_routed_experts=g("n_routed_experts", 256),
+            n_shared_experts=g("n_shared_experts", 1),
+            n_activated_experts=g("num_experts_per_tok", 6),
+            score_func=g("scoring_func", "sqrtsoftplus"),
+            route_scale=g("routed_scaling_factor", 1.5),
+            swiglu_limit=g("swiglu_limit", 10.0),
+            hc_mult=g("hc_mult", 4),
+            hc_sinkhorn_iters=g("hc_sinkhorn_iters", 20),
+            hc_eps=g("hc_eps", 1e-6),
+            rope_theta=g("rope_theta", 10000.0),
+            compress_rope_theta=g("compress_rope_theta", 160000.0),
             rope_factor=rope_scaling.get("factor", 1.0),
             original_seq_len=rope_scaling.get("original_max_position_embeddings", 0),
             beta_fast=rope_scaling.get("beta_fast", 32),
@@ -342,30 +350,37 @@ def _apply_rotary_emb(
 
 @lru_cache(1)
 def _get_window_topk_idxs(
-    window_size: int, bsz: int, seqlen: int, start_pos: int
+    window_size: int,
+    bsz: int,
+    seqlen: int,
+    start_pos: int,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Per-query topk-style indices into the sliding window KV cache.
 
     Port of inference/model.py:255-265. Returns [bsz, seqlen, window_size] of
     int positions into the KV buffer. -1 marks "skip" (causal mask, no fill).
     """
+    kw = dict(device=device) if device is not None else {}
     if start_pos >= window_size - 1:
         start_pos %= window_size
         matrix = torch.cat(
             [
-                torch.arange(start_pos + 1, window_size),
-                torch.arange(0, start_pos + 1),
+                torch.arange(start_pos + 1, window_size, **kw),
+                torch.arange(0, start_pos + 1, **kw),
             ],
             dim=0,
         )
     elif start_pos > 0:
         matrix = F.pad(
-            torch.arange(start_pos + 1), (0, window_size - start_pos - 1), value=-1
+            torch.arange(start_pos + 1, **kw),
+            (0, window_size - start_pos - 1),
+            value=-1,
         )
     else:
-        base = torch.arange(seqlen).unsqueeze(1)
+        base = torch.arange(seqlen, **kw).unsqueeze(1)
         matrix = (base - window_size + 1).clamp(0) + torch.arange(
-            min(seqlen, window_size)
+            min(seqlen, window_size), **kw
         )
         matrix = torch.where(matrix > base, -1, matrix)
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
@@ -373,18 +388,24 @@ def _get_window_topk_idxs(
 
 @lru_cache(2)
 def _get_compress_topk_idxs(
-    ratio: int, bsz: int, seqlen: int, start_pos: int, offset: int
+    ratio: int,
+    bsz: int,
+    seqlen: int,
+    start_pos: int,
+    offset: int,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Per-query indices into the compressed KV cache (for HCA — no Indexer).
 
     Port of inference/model.py:269-276. -1 marks compressed blocks that are
     still in the future at this query position.
     """
+    kw = dict(device=device) if device is not None else {}
     if start_pos > 0:
-        matrix = torch.arange(0, (start_pos + 1) // ratio) + offset
+        matrix = torch.arange(0, (start_pos + 1) // ratio, **kw) + offset
     else:
-        matrix = torch.arange(seqlen // ratio).repeat(seqlen, 1)
-        mask = matrix >= torch.arange(1, seqlen + 1).unsqueeze(1) // ratio
+        matrix = torch.arange(seqlen // ratio, **kw).repeat(seqlen, 1)
+        mask = matrix >= torch.arange(1, seqlen + 1, **kw).unsqueeze(1) // ratio
         matrix = torch.where(mask, -1, matrix + offset)
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
 
@@ -619,8 +640,12 @@ class Indexer(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.index_n_heads
-        # PR1 single-rank: n_local_heads == n_heads (TP comes in PR3).
-        self.n_local_heads = args.index_n_heads
+        # TP shards Q heads (wq_b is ColumnParallelLinear); per-rank head count.
+        tp_size = get_tensor_model_parallel_world_size()
+        assert (
+            args.index_n_heads % tp_size == 0
+        ), f"index_n_heads={args.index_n_heads} not divisible by tp={tp_size}"
+        self.n_local_heads = args.index_n_heads // tp_size
         self.head_dim = args.index_head_dim
         self.rope_head_dim = args.rope_head_dim
         self.index_topk = args.index_topk
@@ -765,15 +790,24 @@ class DeepseekV4Attention(nn.Module):
         self.layer_id = layer_id
         self.dim = args.dim
         self.n_heads = args.n_heads
-        # PR1 single-rank: n_local_heads == n_heads (TP comes in PR3).
-        self.n_local_heads = args.n_heads
+        # TP shards heads + groups across ranks. ColumnParallelLinear (wq_b, wo_a)
+        # auto-splits output dim, so per-rank counts must be divided by tp_size.
+        tp_size = get_tensor_model_parallel_world_size()
+        assert (
+            args.n_heads % tp_size == 0
+        ), f"n_heads={args.n_heads} not divisible by tp={tp_size}"
+        assert (
+            args.o_groups % tp_size == 0
+        ), f"o_groups={args.o_groups} not divisible by tp={tp_size}"
+        self.tp_size = tp_size
+        self.n_local_heads = args.n_heads // tp_size
         self.q_lora_rank = args.q_lora_rank
         self.o_lora_rank = args.o_lora_rank
         self.head_dim = args.head_dim
         self.rope_head_dim = args.rope_head_dim
         self.nope_head_dim = args.head_dim - args.rope_head_dim
         self.n_groups = args.o_groups
-        self.n_local_groups = self.n_groups  # single-rank
+        self.n_local_groups = self.n_groups // tp_size
         self.window_size = args.window_size
         self.compress_ratio = args.compress_ratios[layer_id]
         self.eps = args.norm_eps
@@ -903,6 +937,27 @@ class DeepseekV4Attention(nn.Module):
             delattr(self.wo_a, "weight_scale")
         except AttributeError:
             pass
+        # CRITICAL: prevent LinearBase.process_weights_after_loading from
+        # `shuffle_weights(self.weight)` on the now-BF16 wo_a. That shuffle
+        # is for the FP8 CK GEMM layout; applying it to a plain BF16 matrix
+        # consumed by `torch.einsum` corrupts the layout (rows get permuted
+        # within 16×16 blocks, only rows aligned to the block boundaries
+        # stay in place). Iteration order in load_model is parent-first
+        # (DeepseekV4Attention before its child wo_a Linear), so our hook
+        # runs BEFORE the shuffle — overriding `quant_type` here makes the
+        # subsequent LinearBase post-load a no-op for wo_a.
+        #
+        # TODO(perf): replace dequant-to-BF16 + einsum with FP8 batched BMM
+        # (same path as MLA's `_v_up_proj_and_o_proj`). Steps:
+        #   1. Dequant FP8 per-128-block → BF16 (this code)
+        #   2. Reshape to [n_local_groups, o_lora_rank, d_per_group]
+        #   3. Requant via dynamic_per_batched_tensor_quant → FP8 + scalar scale
+        #   4. Forward: _aiter_triton_fp8_bmm(o, W_OA, W_OA_scale, group_size=128)
+        # This avoids the dequant + einsum overhead and reuses the proven MLA
+        # batched-FP8 kernel. See attention_mla.py:211 for reference.
+        from atom.config import QuantType as _QT
+
+        self.wo_a.quant_type = _QT.No
 
     def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
         """Compute attention for `x` at absolute position `start_pos`.
@@ -932,6 +987,20 @@ class DeepseekV4Attention(nn.Module):
             if self.indexer is not None:
                 self.indexer.freqs_cis = self.freqs_cis
 
+        # Reset all KV buffers on new prefill (start_pos==0). The ATOM warmup
+        # forward (seqlen=MAX_BATCHED_TOKENS with zeros) fills these buffers
+        # with garbage. Real prefill only overwrites a few slots, leaving
+        # stale warmup data that poisons decode attention.
+        if start_pos == 0:
+            self.kv_cache.zero_()
+            if self.compress_ratio:
+                self.compressor.kv_state.zero_()
+                self.compressor.score_state.fill_(float("-inf"))
+                if self.indexer is not None:
+                    self.indexer.kv_cache.zero_()
+                    self.indexer.compressor.kv_state.zero_()
+                    self.indexer.compressor.score_state.fill_(float("-inf"))
+
         # ----- Q: low-rank projection + per-head RMSNorm + partial RoPE -----
         # ATOM TP linears require 2D inputs; subsequent ops (RoPE, sparse_attn)
         # need a [B=1, S, ...] view. We add the singleton batch dim only where
@@ -950,14 +1019,14 @@ class DeepseekV4Attention(nn.Module):
         act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
         # ----- Build topk_idxs (B=1 implicit) -----
-        topk_idxs = _get_window_topk_idxs(win, 1, seqlen, start_pos)
+        topk_idxs = _get_window_topk_idxs(win, 1, seqlen, start_pos, device=x.device)
         if self.compress_ratio:
             offset = kv.size(1) if start_pos == 0 else win
             if self.indexer is not None:
                 compress_topk_idxs = self.indexer(x, qr, start_pos, offset)
             else:
                 compress_topk_idxs = _get_compress_topk_idxs(
-                    ratio, 1, seqlen, start_pos, offset
+                    ratio, 1, seqlen, start_pos, offset, device=x.device
                 )
             topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
         topk_idxs = topk_idxs.int()
@@ -1077,6 +1146,7 @@ class Expert(nn.Module):
         inter_dim: int,
         swiglu_limit: float = 0.0,
         quant_config: Optional[Any] = None,
+        reduce_results: bool = True,
         prefix: str = "",
     ):
         super().__init__()
@@ -1085,9 +1155,6 @@ class Expert(nn.Module):
             self.w2 = nn.Linear(inter_dim, dim, bias=False)
             self.w3 = nn.Linear(dim, inter_dim, bias=False)
         else:
-            # Real-checkpoint path: route through ATOM TP linear so FP8 weights
-            # auto-load. shared_experts is the only Expert that takes this path
-            # (routed experts go through FusedMoE).
             self.w1 = ColumnParallelLinear(
                 dim,
                 inter_dim,
@@ -1100,6 +1167,7 @@ class Expert(nn.Module):
                 dim,
                 bias=False,
                 quant_config=quant_config,
+                reduce_results=reduce_results,
                 prefix=f"{prefix}.w2",
             )
             self.w3 = ColumnParallelLinear(
@@ -1156,6 +1224,9 @@ class MoE(nn.Module):
         # When that's not set (toy / dummy validation path), fall back to the
         # manual per-expert path which preserves PR1 bit-exact reference parity.
         self.use_fused = qc is not None and _have_current_atom_config()
+        self.use_torch_moe = bool(os.environ.get("ATOM_V4_TORCH_MOE"))
+        self.swiglu_limit = args.swiglu_limit
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.use_fused:
             # ----- Production path: ReplicatedLinear gate + FusedMoE experts -----
@@ -1202,12 +1273,14 @@ class MoE(nn.Module):
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 config=moe_cfg,
             )
+            self.experts.swiglu_limit = args.swiglu_limit
             assert args.n_shared_experts == 1
             self.shared_experts = Expert(
                 args.dim,
                 args.moe_inter_dim,
                 swiglu_limit=0.0,
                 quant_config=qc,
+                reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
             if self.is_hash_layer:
@@ -1252,24 +1325,104 @@ class MoE(nn.Module):
             topk_weights = topk_weights / topk_weights.sum(
                 dim=-1, keepdim=True
             ).clamp_min(1e-20)
+        topk_weights = topk_weights * self.routed_scaling_factor
         return topk_weights, topk_ids
+
+    def _torch_moe_forward(
+        self, x: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-expert torch loop using unshuffled FP4 weights from FusedMoE.
+
+        Supports swiglu_limit clamping that the fused kernel path cannot do.
+        Requires ATOM_V4_TORCH_MOE=1 (skips weight shuffle in post-load).
+        """
+        from aiter.utility.fp4_utils import e8m0_to_f32, mxfp4_to_f32
+
+        w13 = self.experts.w13_weight  # [E, 2*inter_tp, H//2] fp4x2
+        w2 = self.experts.w2_weight  # [E, H, inter_tp//2] fp4x2
+        w13_s = self.experts.w13_weight_scale  # [E, 2*inter_tp, H//32] uint8
+        w2_s = self.experts.w2_weight_scale  # [E, H, inter_tp//32] uint8
+
+        E = w13.shape[0]
+        inter_tp = w13.shape[1] // 2
+        limit = self.swiglu_limit
+
+        y = torch.zeros_like(x, dtype=torch.float32)
+        for e_id in range(E):
+            mask = topk_ids == e_id
+            if not mask.any():
+                continue
+            idx = mask.nonzero(as_tuple=False)
+            tok_idx = idx[:, 0]
+            top_idx = idx[:, 1]
+            sub_x = x[tok_idx].float()
+            sub_w = topk_weights[tok_idx, top_idx].unsqueeze(-1)
+
+            # Dequant w1/w3 (gate/up) from FP4
+            w13_e = mxfp4_to_f32(w13[e_id])  # [2*inter_tp, H]
+            w13_s_e = e8m0_to_f32(w13_s[e_id].contiguous().view(torch.float8_e8m0fnu))
+            # Apply block scale: w13 [2*inter_tp, H], scale [2*inter_tp, H//32]
+            w13_f = w13_e.view(2 * inter_tp, -1, 32) * w13_s_e.view(2 * inter_tp, -1, 1)
+            w13_f = w13_f.reshape(2 * inter_tp, -1)
+            w1_f = w13_f[:inter_tp]  # gate [inter_tp, H]
+            w3_f = w13_f[inter_tp:]  # up   [inter_tp, H]
+
+            gate = sub_x @ w1_f.T  # [N, inter_tp]
+            up = sub_x @ w3_f.T
+
+            if limit > 0:
+                gate = gate.clamp(max=limit)
+                up = up.clamp(-limit, limit)
+            act = F.silu(gate) * up * sub_w  # weight before w2
+
+            # Dequant w2 (down) from FP4
+            w2_e = mxfp4_to_f32(w2[e_id])  # [H, inter_tp]
+            w2_s_e = e8m0_to_f32(w2_s[e_id].contiguous().view(torch.float8_e8m0fnu))
+            w2_f = w2_e.view(-1, w2_e.shape[1] // 1, 1) * 1.0  # placeholder
+            # Correct: w2 [H, inter_tp], scale [H, inter_tp//32]
+            w2_f = w2_e.view(w2_e.shape[0], -1, 32) * w2_s_e.view(
+                w2_s_e.shape[0], -1, 1
+            )
+            w2_f = w2_f.reshape(w2_e.shape[0], -1)
+
+            out = act.to(torch.bfloat16).float() @ w2_f.T  # [N, H]
+            y[tok_idx] += out
+
+        return y
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
-        if self.use_fused:
-            # Production: FusedMoE handles top-k + weighted dispatch via aiter.
+        if self.use_fused and self.use_torch_moe:
+            # Torch fallback: use FusedMoE's select_experts for routing,
+            # then per-expert torch loop with FP4 dequant + swiglu_limit clamp.
             router_logits = self.gate(x)
             if self.is_hash_layer:
-                # Stash input_ids so _hash_topk closure (custom_routing_function)
-                # can index tid2eid. Cleared after the experts call.
+                self._hash_input_ids = input_ids
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                top_k=self.n_activated_experts,
+                use_grouped_topk=False,
+                renormalize=True,
+                custom_routing_function=(
+                    self._hash_topk if self.is_hash_layer else None
+                ),
+                scoring_func=self.experts.scoring_func,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+            if self.is_hash_layer:
+                self._hash_input_ids = None
+            y = self._torch_moe_forward(x, topk_weights, topk_ids)
+        elif self.use_fused:
+            router_logits = self.gate(x)
+            if self.is_hash_layer:
                 self._hash_input_ids = input_ids
             y = self.experts(hidden_states=x, router_logits=router_logits)
             if self.is_hash_layer:
                 self._hash_input_ids = None
         else:
-            # Toy path: original manual dispatch with custom Gate (preserves
-            # bit-exact reference parity in PR1 verify).
             weights, indices = self.gate(x, input_ids.flatten())
             y = torch.zeros_like(x, dtype=torch.float32)
             counts = torch.bincount(
@@ -1280,8 +1433,11 @@ class MoE(nn.Module):
                     continue
                 idx, top = torch.where(indices == i)
                 y[idx] = y[idx] + self.experts[i](x[idx], weights[idx, top, None])
-        # Add shared expert contribution.
         y = y + self.shared_experts(x)
+        if self.use_fused and self.tp_size > 1:
+            from aiter.dist.communication_op import tensor_model_parallel_all_reduce
+
+            y = tensor_model_parallel_all_reduce(y)
         return y.type_as(x).view(shape)
 
 
@@ -1319,6 +1475,9 @@ class Block(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
+    # mHC `hc_post_mult_value`: V4 uses `2.0 * sigmoid(post)` for the post gate.
+    HC_POST_MULT = 2.0
+
     def hc_pre(
         self,
         x: torch.Tensor,
@@ -1328,12 +1487,55 @@ class Block(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reduce [..., hc, D] residual to [..., D] sub-layer input.
 
-        Shape-agnostic in leading dims: works for [B, S, hc, D] (legacy 4D) and
-        [num_tokens, hc, D] (ATOM 2D-flat convention) alike. Only the trailing
-        (hc, D) pair matters.
+        Prefers the fused aiter `mhc_pre` kernel (single ROCm op for RMSNorm +
+        hc-fn linear + Sinkhorn projection + weighted reduction). Falls back to
+        the torch `hc_split_sinkhorn` reference implementation when aiter is
+        unavailable (toy validation paths in PR1).
 
-        Also returns post-weights and combination matrix to be applied in hc_post.
+        Shape-agnostic in leading dims: works for [B, S, hc, D] (legacy 4D) and
+        [num_tokens, hc, D] (ATOM 2D-flat convention) alike.
+
+        Returns: (layer_input, post, comb) — order matches torch fallback.
         """
+        # Fused path: aiter.mhc_pre takes the residual as [m, hc_mult, dim] and
+        # returns (post_mix [m, hc, 1], comb_mix [m, hc, hc], layer_input [m, dim]).
+        # When the leading dims are >2 (e.g. [B, S, hc, D]), flatten to [B*S, hc, D]
+        # and unflatten the outputs.
+        try:
+            import aiter as _aiter  # local import; avoids hard dep at module load
+
+            mhc_pre = getattr(_aiter, "mhc_pre", None)
+        except ImportError:
+            mhc_pre = None
+        # aiter mhc_pre kernel asserts hidden % 512 == 0 OR hidden % 256 == 0
+        # (mhc_kernels.cu:864 calls __builtin_trap on violation, NOT a raise).
+        # Pre-check in Python so toy / small-dim configs gracefully fall through.
+        dim = x.shape[-1]
+        aiter_ok = (
+            mhc_pre is not None and x.is_cuda and (dim % 512 == 0 or dim % 256 == 0)
+        )
+        if aiter_ok:
+            lead = x.shape[:-2]
+            r = x.reshape(-1, *x.shape[-2:])  # [M, hc, D]
+            post, comb, y = mhc_pre(
+                r,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                float(self.norm_eps),
+                float(self.hc_eps),
+                float(self.hc_eps),
+                self.HC_POST_MULT,
+                int(self.hc_sinkhorn_iters),
+            )
+            post = post.squeeze(-1)  # aiter: [M, hc, 1] → [M, hc]
+            return (
+                y.reshape(*lead, y.shape[-1]),
+                post.reshape(*lead, post.shape[-1]),
+                comb.reshape(*lead, *comb.shape[-2:]),
+            )
+
+        # Torch fallback (PR1 toy mode / no-aiter): mirrors the reference math.
         shape, dtype = x.size(), x.dtype
         x = x.flatten(-2).float()  # [..., hc*D]
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
@@ -1346,7 +1548,6 @@ class Block(nn.Module):
             self.hc_sinkhorn_iters,
             self.hc_eps,
         )
-        # pre: [..., hc]; weighted-sum hc copies into single [..., D]
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype), post, comb
 
@@ -1359,11 +1560,30 @@ class Block(nn.Module):
     ) -> torch.Tensor:
         """Expand [..., D] sub-layer output back to [..., hc, D] residual.
 
-        Shape-agnostic in leading dims (mirrors hc_pre).
-
-        post[..., hc] gates the new contribution; comb[..., hc, hc] linearly
-        combines the previous residual's hc copies.
+        Prefers fused aiter `mhc_post`; falls back to torch.
         """
+        try:
+            import aiter as _aiter
+
+            mhc_post = getattr(_aiter, "mhc_post", None)
+        except ImportError:
+            mhc_post = None
+        # Same divisibility constraint as mhc_pre.
+        dim = residual.shape[-1]
+        aiter_ok = (
+            mhc_post is not None and x.is_cuda and (dim % 512 == 0 or dim % 256 == 0)
+        )
+        if aiter_ok:
+            lead = residual.shape[:-2]
+            x_ = x.reshape(-1, x.shape[-1])
+            r_ = residual.reshape(-1, *residual.shape[-2:])
+            post_ = post.reshape(-1, post.shape[-1]).unsqueeze(-1)
+            comb_ = comb.reshape(-1, *comb.shape[-2:])
+            out = torch.empty_like(r_)
+            mhc_post(out, x_, r_, post_, comb_)
+            return out.reshape(*lead, *r_.shape[-2:]).type_as(x)
+
+        # Torch fallback.
         # x: [..., D]; residual: [..., hc, D]
         # post.unsqueeze(-1) * x.unsqueeze(-2): [..., hc, D] gating
         # comb.unsqueeze(-1) * residual.unsqueeze(-2): [..., hc, hc, D]; sum over hc-dim
@@ -1625,8 +1845,10 @@ class DeepseekV4Model(nn.Module):
         h = self.embed(input_ids)  # [num_tokens, dim]
         # Expand to hc_mult copies for Hyper-Connections: [num_tokens, hc, dim]
         h = h.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
+
         logits = self.head(
             h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
         )
@@ -1647,23 +1869,38 @@ class DeepseekV4ForCausalLM(nn.Module):
       path on the relevant Linear modules (TODO PR4).
     """
 
-    # Substring renames applied by atom.model_loader.loader.load_model:
-    # - `embed.`, `layers.`, `norm.`, `head.`, `hc_head_`: V4 ckpt has bare
-    #   names (no `model.` prefix). Our model lives under `self.model = ...`
-    #   so all params are accessed via `model.embed.weight` etc.
-    # - `.gate.bias`: V4's name for the routed-expert score correction bias.
-    # - `.scale`: V4 ckpt suffix for the per-block ue8m0 / e8m0 scale tensors.
-    #   ATOM's loader already auto-renames `weight_scale_inv` → `weight_scale`
-    #   so we route through that.
-    # IMPORTANT: order matters because `.replace()` is greedy. Apply prefix
-    # renames BEFORE suffix renames so e.g. `embed.weight` becomes
-    # `model.embed.weight` not `model.embed.weight_scale_inv` (no `.scale` here).
+    # Disk-name → param-name renames applied by atom.model_loader.loader.load_model.
+    #
+    # We use a `WeightsMapper` (prefix/suffix-anchored) for the `model.` prefix
+    # injection because the V4 HF checkpoint stores bare names (`norm.weight`,
+    # `head.weight`, `embed.weight`, `layers.X.*`, `hc_head_*`, `mtp.X.*`) and
+    # our model lives under `self.model = DeepseekV4Model(...)` so all params
+    # are accessed via `model.<name>`. The legacy `weights_mapping` substring
+    # dict CANNOT express this safely: `"norm.weight" → "model.norm.weight"`
+    # also matches inside `attn_norm.weight` / `ffn_norm.weight` / `q_norm.weight`
+    # / `compressor.norm.weight` etc. and silently corrupts the lookup
+    # (b87f6f, debugged via the `load_model` post-load WARNING).
+    #
+    # The substring dict is reserved for the renames that ARE legitimately
+    # substring-shaped:
+    # - `.gate.bias` → `.gate.e_score_correction_bias` (V4's routed-expert
+    #   score correction bias has a different name in our model)
+    # - `.scale` → `.weight_scale_inv` (V4 ckpt suffix → ATOM's expected name;
+    #   load_model then auto-renames `_inv` → `` so the final param is
+    #   `.weight_scale`).
+    from atom.model_loader.loader import WeightsMapper as _WeightsMapper
+
+    weights_mapper = _WeightsMapper(
+        orig_to_new_prefix={
+            "embed.": "model.embed.",
+            "layers.": "model.layers.",
+            "norm.weight": "model.norm.weight",
+            "head.weight": "model.head.weight",
+            "hc_head_": "model.hc_head_",
+            "mtp.": "model.mtp.",
+        }
+    )
     weights_mapping = {
-        "embed.": "model.embed.",
-        "layers.": "model.layers.",
-        "norm.weight": "model.norm.weight",
-        "head.weight": "model.head.weight",
-        "hc_head_": "model.hc_head_",
         ".gate.bias": ".gate.e_score_correction_bias",
         ".scale": ".weight_scale_inv",
     }

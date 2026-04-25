@@ -492,6 +492,9 @@ class QuantizationConfig:
 
 _CONFIG_REGISTRY: dict[str, str] = {
     "deepseek_v32": "deepseek_v3",
+    "deepseek_v4": "deepseek_v3",  # V4 reuses V3 schema; V4-specific fields
+    # (compress_ratios, num_hash_layers, hc_mult, swiglu_limit, ...) flow
+    # through as extra config attrs and are read in DeepseekV4Args.from_hf_config.
     "glm_moe_dsa": "deepseek_v3",  # GLM 5.0 MoE, structure similar to DeepSeek v3.2
     "kimi_k2": "deepseek_v3",
 }
@@ -563,13 +566,22 @@ def get_hf_config(model: str, trust_remote_code: bool = False) -> PretrainedConf
 
     if model_type in _CONFIG_REGISTRY:
         config_class = AutoConfig.for_model(_CONFIG_REGISTRY[model_type])
-        return config_class.from_pretrained(
+        hf_config = config_class.from_pretrained(
             model,
             # revision=revision,
             # code_revision=code_revision,
             token=_get_hf_token(),
             trust_remote_code=trust_remote_code,
         )
+        # transformers' from_pretrained strips fields that aren't in the target
+        # config schema. For mapped types (e.g. deepseek_v4 → deepseek_v3) the
+        # source-specific fields would be dropped. Re-inject them so V4-only
+        # attrs (compress_ratios, num_hash_layers, hc_mult, swiglu_limit, ...)
+        # remain accessible via getattr(hf_config, field) downstream.
+        for field, value in config_dict.items():
+            if not hasattr(hf_config, field):
+                setattr(hf_config, field, value)
+        return hf_config
     try:
         hf_config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code

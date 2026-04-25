@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -685,8 +686,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.quant_type == QuantType.per_1x32
         )
         gfx = get_gfx()
-        self.use_triton = gfx.startswith("gfx94") or (
-            gfx.startswith("gfx95") and envs.ATOM_USE_TRITON_GEMM
+        self.use_triton = (
+            gfx.startswith("gfx94")
+            or (gfx.startswith("gfx95") and envs.ATOM_USE_TRITON_GEMM)
+            or os.environ.get("ATOM_USE_TRITON_MOE") == "1"
         )
         if self.use_triton:
             from atom.model_ops.utils import has_triton_kernels
@@ -818,6 +821,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_bias.data = layer.w13_bias.data.to(torch.float32)
         if layer.w2_bias is not None:
             layer.w2_bias.data = layer.w2_bias.data.to(torch.float32)
+
+        if os.environ.get("ATOM_V4_TORCH_MOE"):
+            return
 
         if self.use_triton:
             from atom.model_ops.fused_moe_triton import _swizzle_mxfp4
@@ -994,6 +1000,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     w2_precision_config=self.w2_precision_config,
                     w1_bias=layer.w13_bias,
                     w2_bias=layer.w2_bias,
+                    swiglu_limit=getattr(layer, "swiglu_limit", 0.0),
                     apply_router_weight_on_input=layer.apply_router_weight_on_input,
                     global_num_experts=global_num_experts,
                     expert_map=expert_map,
