@@ -16,7 +16,6 @@ RFC §9.5.5.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import typing
 
 import pytest
@@ -35,7 +34,6 @@ from tests.audit._vllm_spec_snapshot import (
     SNAPSHOT_COMMIT,
     VLLM_SPEC_SIGNATURES,
 )
-
 
 _ATOM_SPECS = {
     "KVCacheSpec": KVCacheSpec,
@@ -170,9 +168,7 @@ class TestNoUndeclaredCanonicalFields:
             for f in dataclasses.fields(atom_cls)
             if f.name in atom_cls.__annotations__
         }
-        snap_fields = {
-            n for n, _t, _d in VLLM_SPEC_SIGNATURES[spec_name]["fields"]
-        }
+        snap_fields = {n for n, _t, _d in VLLM_SPEC_SIGNATURES[spec_name]["fields"]}
         # Walk vLLM's class chain to allow inherited fields too — ATOM may
         # declare a field at a different level in the inheritance hierarchy.
         vllm_chain_fields = set(snap_fields)
@@ -190,10 +186,7 @@ class TestNoUndeclaredCanonicalFields:
         for fname in own_fields:
             if (spec_name, fname) in self.KNOWN_DENORMALIZATIONS:
                 continue
-            assert (
-                fname in canon_for_spec
-                or fname in vllm_chain_fields
-            ), (
+            assert fname in canon_for_spec or fname in vllm_chain_fields, (
                 f"{spec_name} declares ATOM-only field {fname!r}; either "
                 f"add it to canonical fields (snapshot) or ensure vLLM has "
                 f"the same field at some ancestor level."
@@ -207,9 +200,7 @@ class TestFrozenDataclassContract:
     @pytest.mark.parametrize("spec_name", list(_ATOM_SPECS.keys()))
     def test_atom_spec_is_frozen_dataclass(self, spec_name):
         atom_cls = _ATOM_SPECS[spec_name]
-        assert dataclasses.is_dataclass(atom_cls), (
-            f"{spec_name} must be a dataclass"
-        )
+        assert dataclasses.is_dataclass(atom_cls), f"{spec_name} must be a dataclass"
         params = atom_cls.__dataclass_params__
         # vLLM specs are all frozen=True; ATOM matches.
         assert params.frozen is True, f"{spec_name} must be frozen=True"

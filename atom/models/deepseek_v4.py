@@ -28,7 +28,6 @@ from aiter.dist.parallel_state import get_tensor_model_parallel_world_size
 from atom.config import Config
 from atom.model_ops.embed_head import VocabParallelEmbedding
 from atom.v1.kv_cache_interface import (
-    KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -525,9 +524,7 @@ class Compressor(nn.Module):
         # Estimate page bytes for the manager's budget allocator.
         # storage_block_size = block_size // compress_ratio.
         storage_block_size = block_size // self.compress_ratio
-        page_size_bytes = (
-            storage_block_size * num_kv_heads * head_size * dtype.itemsize
-        )
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
         return SlidingWindowMLASpec(
             block_size=block_size,
             page_size_bytes=page_size_bytes,
@@ -622,7 +619,9 @@ class Compressor(nn.Module):
             batch_decode = kv.shape[1]
             if overlap:
                 self.kv_state[:batch_decode, ratio + start_pos % ratio] = kv.squeeze(0)
-                self.score_state[:batch_decode, ratio + start_pos % ratio] = score.squeeze(0)
+                self.score_state[:batch_decode, ratio + start_pos % ratio] = (
+                    score.squeeze(0)
+                )
                 if should_compress:
                     kv_state = torch.cat(
                         [
@@ -642,8 +641,12 @@ class Compressor(nn.Module):
                         dim=1, keepdim=True
                     )
                     # Roll: the just-completed window becomes the next overlap window.
-                    self.kv_state[:batch_decode, :ratio] = self.kv_state[:batch_decode, ratio:]
-                    self.score_state[:batch_decode, :ratio] = self.score_state[:batch_decode, ratio:]
+                    self.kv_state[:batch_decode, :ratio] = self.kv_state[
+                        :batch_decode, ratio:
+                    ]
+                    self.score_state[:batch_decode, :ratio] = self.score_state[
+                        :batch_decode, ratio:
+                    ]
             else:
                 # W3.1 (RFC §6.2.1 bug source #1): same B=1-implicit shape
                 # bug as DeepseekV4Attention. kv arrives as
@@ -656,7 +659,8 @@ class Compressor(nn.Module):
                 self.score_state[:batch_decode, start_pos % ratio] = score.squeeze(0)
                 if should_compress:
                     kv = (
-                        self.kv_state[:batch_decode] * self.score_state[:batch_decode].softmax(dim=1)
+                        self.kv_state[:batch_decode]
+                        * self.score_state[:batch_decode].softmax(dim=1)
                     ).sum(dim=1, keepdim=True)
 
         if not should_compress:
@@ -765,9 +769,7 @@ class Indexer(nn.Module):
         head_size = self.head_dim
         num_kv_heads = 1
         storage_block_size = block_size // self.compress_ratio
-        page_size_bytes = (
-            storage_block_size * num_kv_heads * head_size * dtype.itemsize
-        )
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
         return MLAAttentionSpec(
             block_size=block_size,
             page_size_bytes=page_size_bytes,
@@ -1027,9 +1029,7 @@ class DeepseekV4Attention(nn.Module):
         num_kv_heads = 1
         cr = self.compress_ratio if self.compress_ratio else 1
         storage_block_size = block_size // cr
-        page_size_bytes = (
-            storage_block_size * num_kv_heads * head_size * dtype.itemsize
-        )
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
         return MLAAttentionSpec(
             block_size=block_size,
             page_size_bytes=page_size_bytes,
@@ -1184,9 +1184,7 @@ class DeepseekV4Attention(nn.Module):
                 (
                     self.kv_cache[:bsz_kv, cutoff:win],
                     self.kv_cache[:bsz_kv, :cutoff],
-                ) = kv[
-                    :, -win:
-                ].split([win - cutoff, cutoff], dim=1)
+                ) = kv[:, -win:].split([win - cutoff, cutoff], dim=1)
             if self.compress_ratio:
                 if (kv_compress := self.compressor(x, start_pos)) is not None:
                     kv = torch.cat([kv, kv_compress], dim=1)
@@ -1213,8 +1211,8 @@ class DeepseekV4Attention(nn.Module):
             # [1, N, H, D] so the downstream RoPE/o_proj path (which
             # assumes B=1 implicit) sees the same shape it always did.
             if batch_decode > 1:
-                q_per_seq = q.transpose(0, 1).contiguous()       # [N, 1, H, D]
-                kv_per_seq = self.kv_cache[:batch_decode]        # [N, max_seq, head_dim]
+                q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+                kv_per_seq = self.kv_cache[:batch_decode]  # [N, max_seq, head_dim]
                 topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
                 o = sparse_attn(
                     q_per_seq,
@@ -1223,7 +1221,7 @@ class DeepseekV4Attention(nn.Module):
                     topk_per_seq,
                     self.softmax_scale,
                 )
-                o = o.transpose(0, 1).contiguous()               # [1, N, H, D]
+                o = o.transpose(0, 1).contiguous()  # [1, N, H, D]
             else:
                 o = sparse_attn(
                     q,

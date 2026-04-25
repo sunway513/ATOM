@@ -2,7 +2,6 @@
 # Layer 1 unit tests for atom/model_engine/sequence.py multi-pool block tables.
 # Per RFC §9.5.2 — CPU only, mocked, ≤ 30s.
 
-import pytest
 
 from conftest import MockConfig  # noqa: F401  (forces conftest stubs to run)
 
