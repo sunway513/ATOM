@@ -17,7 +17,6 @@ from atom.v1.kv_cache_interface import (
     physical_pool_key,
 )
 
-
 # ── KVCacheSpec base ───────────────────────────────────────────────────────
 
 
@@ -134,7 +133,6 @@ class TestMLAAttentionSpec:
         # storage_block_size; must reject at construction.
         with pytest.raises(ValueError, match="does not divide"):
             self._make(block_size=256, compress_ratio=7)
-
 
 
 # ── SlidingWindowMLASpec — DSV4 Compressor state ───────────────────────────
@@ -272,7 +270,6 @@ class TestVLLMAuditPin:
         # specific vLLM commit. Not a branch name, not a placeholder.
         assert isinstance(_VLLM_AUDIT_COMMIT, str)
         assert len(_VLLM_AUDIT_COMMIT) == 40, (
-            f"_VLLM_AUDIT_COMMIT must be a 40-char SHA, got "
-            f"{_VLLM_AUDIT_COMMIT!r}"
+            f"_VLLM_AUDIT_COMMIT must be a 40-char SHA, got " f"{_VLLM_AUDIT_COMMIT!r}"
         )
         assert all(c in "0123456789abcdef" for c in _VLLM_AUDIT_COMMIT)

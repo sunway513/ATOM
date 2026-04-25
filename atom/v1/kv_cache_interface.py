@@ -27,8 +27,7 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import torch
 
@@ -58,9 +57,7 @@ class KVCacheSpec:
 
     def __post_init__(self) -> None:
         if self.block_size <= 0:
-            raise ValueError(
-                f"block_size must be positive, got {self.block_size}"
-            )
+            raise ValueError(f"block_size must be positive, got {self.block_size}")
         if self.page_size_bytes <= 0:
             raise ValueError(
                 f"page_size_bytes must be positive, got {self.page_size_bytes}"
@@ -92,13 +89,9 @@ class AttentionSpec(KVCacheSpec):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.num_kv_heads <= 0:
-            raise ValueError(
-                f"num_kv_heads must be positive, got {self.num_kv_heads}"
-            )
+            raise ValueError(f"num_kv_heads must be positive, got {self.num_kv_heads}")
         if self.head_size <= 0:
-            raise ValueError(
-                f"head_size must be positive, got {self.head_size}"
-            )
+            raise ValueError(f"head_size must be positive, got {self.head_size}")
 
 
 @dataclass(frozen=True)

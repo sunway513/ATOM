@@ -34,7 +34,6 @@ from atom.config import Config
 from atom.model_engine.sequence import Sequence
 from atom.v1.kv_cache_interface import KVCacheSpec, physical_pool_key
 
-
 # ---------------------------------------------------------------------------
 # Block — per-block metadata (NOT the underlying KV memory; that is owned
 # by the model runner and indexed via slot_mapping).
@@ -389,9 +388,7 @@ class BlockManager:
             )
             key = ("main", h)
             block_id = (
-                pool.hash_to_block_id.get(key, -1)
-                if self.enable_prefix_caching
-                else -1
+                pool.hash_to_block_id.get(key, -1) if self.enable_prefix_caching else -1
             )
             if block_id == -1 or pool.blocks[block_id].token_ids != token_ids:
                 cache_miss = True

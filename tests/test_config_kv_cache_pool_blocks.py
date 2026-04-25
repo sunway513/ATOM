@@ -2,10 +2,8 @@
 # Layer 1 unit tests for Config.kv_cache_pool_blocks + engine_core dispatch.
 # Per RFC §6.2.1 / §9.5.2 — CPU only, mocked, ≤ 30s.
 
-import pytest
 
 from conftest import MockConfig
-
 
 # ── Config field ───────────────────────────────────────────────────────────
 
