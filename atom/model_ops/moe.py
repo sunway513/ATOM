@@ -2228,6 +2228,15 @@ class FusedMoE(torch.nn.Module):
         if load_shard_size != expert_shard_size:
             expert_data = expert_data.narrow(shard_dim, 0, load_shard_size)
         if expert_data.dtype != dtypes.fp4x2:
+            # Dtype glue: V4 stores per-1x32 weight scales as float8_e8m0fnu but
+            # FusedMoE allocates them as uint8 (raw byte storage). PyTorch's
+            # copy_() between mismatched float8/uint8 dtypes silently writes
+            # zeros — must reinterpret the source as uint8 first.
+            if expert_data.dtype == torch.uint8 and loaded_weight.dtype in (
+                torch.float8_e8m0fnu,
+                torch.float8_e4m3fn,
+            ):
+                loaded_weight = loaded_weight.view(torch.uint8)
             expert_data.copy_(loaded_weight)
         else:
             expert_data.view(torch.uint8).copy_(loaded_weight.view(torch.uint8))
@@ -2258,6 +2267,12 @@ class FusedMoE(torch.nn.Module):
         if expert_data.dtype == dtypes.fp4x2:
             expert_data.view(torch.uint8).copy_(loaded_weight.view(torch.uint8))
         else:
+            # Dtype glue: see _load_w13 for the same uint8/float8 reinterpret.
+            if expert_data.dtype == torch.uint8 and loaded_weight.dtype in (
+                torch.float8_e8m0fnu,
+                torch.float8_e4m3fn,
+            ):
+                loaded_weight = loaded_weight.view(torch.uint8)
             expert_data.copy_(loaded_weight)
 
     def _load_single_value(

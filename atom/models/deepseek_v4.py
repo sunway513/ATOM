@@ -1614,11 +1614,22 @@ class DeepseekV4ForCausalLM(nn.Module):
     """
 
     # Substring renames applied by atom.model_loader.loader.load_model:
-    # - `.gate.bias` is V4's name for the routed-expert score correction bias.
-    # - `.scale` (suffix on every quantized weight) is the V4 ckpt name for the
-    #   per-block ue8m0 / e8m0 scale tensors. ATOM's loader already auto-renames
-    #   `weight_scale_inv` → `weight_scale` so we route through that.
+    # - `embed.`, `layers.`, `norm.`, `head.`, `hc_head_`: V4 ckpt has bare
+    #   names (no `model.` prefix). Our model lives under `self.model = ...`
+    #   so all params are accessed via `model.embed.weight` etc.
+    # - `.gate.bias`: V4's name for the routed-expert score correction bias.
+    # - `.scale`: V4 ckpt suffix for the per-block ue8m0 / e8m0 scale tensors.
+    #   ATOM's loader already auto-renames `weight_scale_inv` → `weight_scale`
+    #   so we route through that.
+    # IMPORTANT: order matters because `.replace()` is greedy. Apply prefix
+    # renames BEFORE suffix renames so e.g. `embed.weight` becomes
+    # `model.embed.weight` not `model.embed.weight_scale_inv` (no `.scale` here).
     weights_mapping = {
+        "embed.": "model.embed.",
+        "layers.": "model.layers.",
+        "norm.weight": "model.norm.weight",
+        "head.weight": "model.head.weight",
+        "hc_head_": "model.hc_head_",
         ".gate.bias": ".gate.e_score_correction_bias",
         ".scale": ".weight_scale_inv",
     }
