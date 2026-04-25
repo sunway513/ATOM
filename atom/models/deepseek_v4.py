@@ -1602,9 +1602,26 @@ class DeepseekV4Model(nn.Module):
 class DeepseekV4ForCausalLM(nn.Module):
     """ATOM model contract wrapper.
 
-    PR1: only `__init__` (from ATOM Config) + `forward` (toy validation only).
-    PR3 will add `load_weights` for the real HF checkpoint.
+    Loads via two paths:
+    - `model.load_weights(...)` (this file): used by tests + when ModelRunner
+      is bypassed. Handles V4 ckpt naming + FP8 wo_a dequant + FusedMoE expert
+      dispatch in one place.
+    - `atom.model_loader.loader.load_model(...)` (standard ATOM serving): uses
+      the `weights_mapping` class attribute below to rename V4 ckpt names into
+      shapes the standard FusedMoE expert mapping understands. Wo_a dequant
+      and other special cases are handled by the `process_weights_after_loading`
+      path on the relevant Linear modules (TODO PR4).
     """
+
+    # Substring renames applied by atom.model_loader.loader.load_model:
+    # - `.gate.bias` is V4's name for the routed-expert score correction bias.
+    # - `.scale` (suffix on every quantized weight) is the V4 ckpt name for the
+    #   per-block ue8m0 / e8m0 scale tensors. ATOM's loader already auto-renames
+    #   `weight_scale_inv` → `weight_scale` so we route through that.
+    weights_mapping = {
+        ".gate.bias": ".gate.e_score_correction_bias",
+        ".scale": ".weight_scale_inv",
+    }
 
     def __init__(self, config: Config, prefix: str = "") -> None:
         super().__init__()
@@ -1817,4 +1834,18 @@ class DeepseekV4ForCausalLM(nn.Module):
                 else:
                     param.data.copy_(tensor.to(param.dtype))
             loaded.add(tgt_name)
+
+        # Trigger post-load hooks (e.g. FusedMoE's `process_weights_after_loading`
+        # runs `shuffle_weights` so aiter ck_moe sees the right layout). Without
+        # this the FP4 ck_moe kernel reads stale layout → HSA crash at forward.
+        for module in self.model.modules():
+            ppl = getattr(module, "process_weights_after_loading", None)
+            if callable(ppl):
+                # quant_method.process_weights_after_loading(layer) — quant_method
+                # is the FusedMoE attribute, layer is the module itself.
+                qm = getattr(module, "quant_method", None)
+                if qm is not None and hasattr(qm, "process_weights_after_loading"):
+                    qm.process_weights_after_loading(module)
+                else:
+                    ppl()
         return loaded
