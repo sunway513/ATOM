@@ -124,7 +124,9 @@ class DeepseekV4Args:
         # populated with extra V4 attrs (some fields may live only in the raw
         # config_dict, not on the config object — `transformers` strips unknown
         # kwargs unless they're in the schema).
-        g = lambda k, default=None: getattr(hf_config, k, default)
+        def g(k, default=None):
+            return getattr(hf_config, k, default)
+
         rope_scaling = g("rope_scaling", {}) or {}
         return cls(
             vocab_size=g("vocab_size"),
