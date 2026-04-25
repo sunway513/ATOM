@@ -2558,6 +2558,18 @@ class FusedMoE(torch.nn.Module):
         routed_scaling_factor: float = 1.0,
     ):
 
+        # custom_routing_function takes precedence (e.g. DeepSeek-V4 hash routing
+        # in the first 3 layers, where topk_ids are looked up from a per-token
+        # hash table instead of computed from gate logits).
+        if custom_routing_function is not None:
+            topk_weights, topk_ids = custom_routing_function(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+            )
+            return topk_weights, topk_ids
+
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None

@@ -1136,12 +1136,17 @@ class MoE(nn.Module):
                 torch.empty(self.n_routed_experts, dtype=torch.float32)
             )
             if self.is_hash_layer:
+                # tid2eid: per-token-id top-k expert lookup table (V4 first 3
+                # layers use this in lieu of gate-logit routing).
                 self.gate.tid2eid = nn.Parameter(
                     torch.empty(
                         args.vocab_size, args.n_activated_experts, dtype=torch.int32
                     ),
                     requires_grad=False,
                 )
+                # Cache for input_ids — set by forward() right before the FusedMoE
+                # call so the custom routing closure can index tid2eid.
+                self._hash_input_ids: Optional[torch.Tensor] = None
 
             from types import SimpleNamespace
 
@@ -1171,6 +1176,10 @@ class MoE(nn.Module):
                 quant_config=qc,
                 prefix=f"{prefix}.shared_experts",
             )
+            if self.is_hash_layer:
+                # Inject hash routing into FusedMoE.select_experts via the
+                # custom_routing_function hook (added in atom/model_ops/moe.py).
+                self.experts.custom_routing_function = self._hash_topk
         else:
             # ----- Toy / dummy path: manual Gate + per-expert nn.Linear -----
             # Preserves bit-exact reference parity for PR1 verify (no FusedMoE
@@ -1185,13 +1194,45 @@ class MoE(nn.Module):
             assert args.n_shared_experts == 1
             self.shared_experts = Expert(args.dim, args.moe_inter_dim, swiglu_limit=0.0)
 
+    def _hash_topk(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """V4 hash routing for first 3 layers.
+
+        topk_ids = tid2eid[input_ids]  (no gate-based selection)
+        topk_weights = sqrtsoftplus(router_logits) gathered at topk_ids
+        Then renormalize so weights sum to 1 per token.
+        """
+        assert (
+            self._hash_input_ids is not None
+        ), "MoE.forward() must set self._hash_input_ids before calling experts() in hash layers"
+        ids = self._hash_input_ids.flatten()
+        topk_ids = self.gate.tid2eid[ids].to(torch.int32)  # [N, topk]
+        scores = torch.nn.functional.softplus(gating_output.float()).sqrt()
+        topk_weights = scores.gather(dim=-1, index=topk_ids.long())
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-20)
+        return topk_weights, topk_ids
+
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
         if self.use_fused:
             # Production: FusedMoE handles top-k + weighted dispatch via aiter.
             router_logits = self.gate(x)
+            if self.is_hash_layer:
+                # Stash input_ids so _hash_topk closure (custom_routing_function)
+                # can index tid2eid. Cleared after the experts call.
+                self._hash_input_ids = input_ids
             y = self.experts(hidden_states=x, router_logits=router_logits)
+            if self.is_hash_layer:
+                self._hash_input_ids = None
         else:
             # Toy path: original manual dispatch with custom Gate (preserves
             # bit-exact reference parity in PR1 verify).
