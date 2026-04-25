@@ -201,3 +201,88 @@ class TestFromAttnMetadata:
         fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
         assert fb.positions.dtype == torch.long
         assert fb.cu_seqlens_q.dtype == torch.long
+
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="needs CUDA for cross-device test"
+    )
+    def test_cpu_metadata_with_cuda_positions_normalizes_to_positions_device(self):
+        """P1.2 regression: previously cu stayed on CPU while positions
+        was on CUDA, causing __post_init__ device assert to fail. Adapter
+        must move ALL metadata tensors to positions.device.
+        """
+        cu = torch.tensor([0, 12, 25], dtype=torch.long, device="cpu")
+        block_tables = torch.tensor([[10, 11], [20, 21]], dtype=torch.long, device="cpu")
+        context_lens = torch.zeros(2, dtype=torch.long, device="cpu")
+        attn_meta = SimpleNamespace(
+            cu_seqlens_q=cu, block_tables=block_tables, context_lens=context_lens
+        )
+        positions = torch.tensor(
+            list(range(12)) + list(range(13)), dtype=torch.long, device="cuda"
+        )
+        fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
+        # All metadata tensors covered by __post_init__ device-invariant
+        # must now share positions.device (= cuda).
+        assert fb.positions.device.type == "cuda"
+        assert fb.cu_seqlens_q.device.type == "cuda"
+        assert fb.extend_seq_lens.device.type == "cuda"
+        assert fb.seq_lens.device.type == "cuda"
+        assert fb.req_pool_indices.device.type == "cuda"
+
+    def test_cpu_only_metadata_all_devices_match_positions(self):
+        """CPU-only sanity: when positions and metadata both start on
+        CPU, __post_init__ device-uniformity is satisfied (regression-
+        guards the case where the adapter accidentally diverged devices).
+        """
+        cu = torch.tensor([0, 12, 25], dtype=torch.long)
+        block_tables = torch.tensor([[10, 11], [20, 21]], dtype=torch.long)
+        attn_meta = SimpleNamespace(
+            cu_seqlens_q=cu, block_tables=block_tables, context_lens=None
+        )
+        positions = torch.tensor(
+            list(range(12)) + list(range(13)), dtype=torch.long
+        )
+        fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
+        ref_dev = positions.device
+        for fname in ("cu_seqlens_q", "extend_seq_lens", "seq_lens", "req_pool_indices"):
+            assert getattr(fb, fname).device == ref_dev, (
+                f"{fname} on {getattr(fb, fname).device}, expected {ref_dev}"
+            )
+
+
+class TestPoolSlotUniqueness:
+    """P2.1: req_pool_indices is a W4.1 placeholder filled with
+    block_tables[:, 0]; under prefix caching two seqs may share a first
+    block. `assert_pool_slot_unique()` is the explicit gate for callers
+    that need uniqueness."""
+
+    def test_unique_passes(self):
+        fb = _make_basic_decode()
+        # No exception
+        fb.assert_pool_slot_unique()
+
+    def test_duplicate_raises(self):
+        # Simulate a prefix-cache collision: two seqs share first block.
+        cu = torch.tensor([0, 1, 2], dtype=torch.long)
+        block_tables = torch.tensor(
+            [[10, 11], [10, 12]], dtype=torch.long  # same first block
+        )
+        context_lens = torch.tensor([5, 5], dtype=torch.long)
+        attn_meta = SimpleNamespace(
+            cu_seqlens_q=cu, block_tables=block_tables, context_lens=context_lens
+        )
+        positions = torch.tensor([5, 5], dtype=torch.long)
+        fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
+        # The placeholder copies the colliding first-block ids verbatim.
+        assert fb.req_pool_indices.tolist() == [10, 10]
+        with pytest.raises(ValueError, match="not unique"):
+            fb.assert_pool_slot_unique()
+
+    def test_empty_batch_skips_check(self):
+        cu = torch.tensor([0], dtype=torch.long)
+        attn_meta = SimpleNamespace(
+            cu_seqlens_q=cu, block_tables=None, context_lens=None
+        )
+        positions = torch.zeros(0, dtype=torch.long)
+        fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
+        # No exception even though there are no seqs
+        fb.assert_pool_slot_unique()

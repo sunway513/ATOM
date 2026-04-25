@@ -70,9 +70,14 @@ class DSV4ForwardBatch:
         prefix sum, 0-prefixed. Equivalent to ATOM's existing
         `attn_metadata.cu_seqlens_q`.
     req_pool_indices: `[num_seqs]` long tensor — opaque per-seq id stable
-        across steps; W4.2 wires this to the engine KV-pool slot assignment.
-        For W4.1 we accept any monotonic int (ATOM's existing
-        `block_tables[:, 0]` first-block-id is a valid placeholder).
+        across steps. **W4.1 PLACEHOLDER**: `from_attn_metadata()` populates
+        this with `block_tables[:, 0]` (first physical block id). This is
+        NOT stable-unique under prefix caching / block reuse: two
+        prefix-sharing seqs can share a first block. Do not depend on
+        uniqueness — call `assert_pool_slot_unique()` if you need that
+        guarantee at the call site. W4.2 replaces the adapter with the
+        engine KV-pool's true slot allocator, which guarantees a stable
+        unique id per active seq regardless of prefix-cache state.
     out_cache_loc: `[num_tokens]` long tensor — absolute slot in the engine
         KV pool where each token's KV should be written. W4.2 fills this
         with `req_pool_indices[seq] * ring_size + (positions[t] %
@@ -180,6 +185,29 @@ class DSV4ForwardBatch:
     def is_prefill(self) -> bool:
         return self.forward_mode == DSV4ForwardMode.PREFILL
 
+    def assert_pool_slot_unique(self) -> None:
+        """Runtime check: `req_pool_indices` has no duplicates.
+
+        W4.1 callers depending on per-seq isolation (e.g., per-seq
+        kv_cache row indexing) MUST call this before using
+        `req_pool_indices` as a unique seq tag — the W4.1 placeholder
+        adapter (`from_attn_metadata`) sets it to `block_tables[:, 0]`
+        which can collide under prefix caching. W4.2 makes this
+        unconditional, but until then this is the explicit gate.
+        """
+        if self.req_pool_indices.numel() == 0:
+            return
+        unique = torch.unique(self.req_pool_indices)
+        if unique.numel() != self.req_pool_indices.numel():
+            raise ValueError(
+                "req_pool_indices is not unique — likely a prefix-cache "
+                "first-block collision (W4.1 placeholder limitation). "
+                "Got "
+                f"{self.req_pool_indices.tolist()}. Wait for W4.2 "
+                "engine KV-pool slot allocator to land before relying on "
+                "uniqueness, or disable prefix caching for this run."
+            )
+
     @classmethod
     def from_attn_metadata(
         cls,
@@ -195,36 +223,40 @@ class DSV4ForwardBatch:
         owned pool and out_cache_loc, this adapter is upgraded to
         `from_engine_state()` (W4.4).
 
-        Args:
-            attn_metadata: ATOM `AttentionMetaData` instance with
-                cu_seqlens_q, block_tables, context_lens populated.
-            positions: per-token positions tensor.
+        ATOM normally builds attn_metadata tensors on CUDA, but a few
+        paths (warmup, CPU-fallback unit tests) construct them on CPU
+        while `positions` lands on the model's GPU device. Normalize
+        ALL fields to `positions.device` here so __post_init__'s
+        device-uniformity invariant holds regardless of where the
+        upstream tensors started.
         """
-        cu = attn_metadata.cu_seqlens_q.to(torch.long)
+        device = positions.device
+        cu = attn_metadata.cu_seqlens_q.to(torch.long).to(device)
         num_seqs = cu.numel() - 1
-        # extend_seq_lens = cu[1:] - cu[:-1]
+        # extend_seq_lens computed on the unified target device
         extend_seq_lens = cu[1:] - cu[:-1]
 
         # context_lens may not be populated in pure-prefill warmup paths;
         # fall back to extend_seq_lens (no prior KV).
         context_lens = getattr(attn_metadata, "context_lens", None)
         if context_lens is not None and context_lens.numel() == num_seqs:
-            seq_lens = context_lens.to(torch.long).to(positions.device) + extend_seq_lens
+            seq_lens = context_lens.to(torch.long).to(device) + extend_seq_lens
         else:
             seq_lens = extend_seq_lens.clone()
 
-        # req_pool_indices: use block_tables[:, 0] as a stable per-seq id.
-        # In W4.2 this becomes the engine-pool slot index directly.
+        # req_pool_indices: see field docstring — W4.1 placeholder fills
+        # with block_tables[:, 0]; NOT stable-unique under prefix caching.
+        # Call assert_pool_slot_unique() if uniqueness is required.
         block_tables = getattr(attn_metadata, "block_tables", None)
         if (
             block_tables is not None
             and block_tables.dim() == 2
             and block_tables.shape[0] == num_seqs
         ):
-            req_pool_indices = block_tables[:, 0].to(torch.long).to(positions.device)
+            req_pool_indices = block_tables[:, 0].to(torch.long).to(device)
         else:
             req_pool_indices = torch.arange(
-                num_seqs, dtype=torch.long, device=positions.device
+                num_seqs, dtype=torch.long, device=device
             )
 
         # forward_mode: if any seq has extend > 1, it's prefill (mixed batch
@@ -237,12 +269,16 @@ class DSV4ForwardBatch:
         else:
             mode = DSV4ForwardMode.DECODE
 
+        # block_tables is kept as a pass-through reference; if it lives
+        # on a different device that's fine (model layers will move it
+        # when consumed in W4.3+). Only the metadata tensors that
+        # __post_init__ asserts on are guaranteed to share device.
         return cls(
             forward_mode=mode,
             positions=positions.to(torch.long),
-            seq_lens=seq_lens.to(torch.long),
-            extend_seq_lens=extend_seq_lens.to(torch.long),
-            cu_seqlens_q=cu.to(torch.long),
+            seq_lens=seq_lens,
+            extend_seq_lens=extend_seq_lens,
+            cu_seqlens_q=cu,
             req_pool_indices=req_pool_indices,
             block_tables=block_tables,
         )
