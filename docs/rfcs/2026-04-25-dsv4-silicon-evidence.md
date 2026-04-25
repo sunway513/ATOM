@@ -442,3 +442,87 @@ docker exec atom_dsv4_feat env PYTHONPATH=/workspace/ATOM-feat \
 |---|---|---|
 | Perf c=4 ISL=1024 OSL=1024 | 0 | TPOT 214 ms/user, 18.6 tok/s aggregate |
 | lm_eval gsm8k limit=20 conc=1 | 0 | flexible-extract 0.70 (±0.105) |
+
+---
+
+## Evidence G — W3.2-v2 cross-talk fix verification on conc=4 (2026-04-25)
+
+### Setup
+Same config as Evidence D, with W3.2-v2 commit `8a8cee1` (Attention +
+Indexer transpose for per-seq KV read) + commit `c01c3a3` (Indexer
+warmup-guard) applied.
+
+### Result (silicon_w32_v2_retry.json) — rc=0
+
+| idx | prompt | Before W3.2-v2 (Evidence D) | After W3.2-v2 |
+|---|---|---|---|
+| 0 (hero) | `如何在一个月内增肌10公斤` | ✅ coherent 中文 | ✅ **still coherent**: `好的，作为一个在健身领域深耕多年的爱好者...` |
+| 1 | `Briefly describe Beijing in 3 sentences.` | ⚠ cross-talked into idx=0's fitness theme | ⚠ **garbled symbols**: `北京#%……&*（）*&……￥#…` |
+| 2 | `Write a Python function to compute the nth Fibonacci number.` | ⚠ cross-talked into fitness theme | ⚠ **degenerate repetition**: `` ` `` `// 1. 在 在 在 在 在 在 ...` |
+| 3 | `List 5 common machine learning algorithms.` | ⚠ cross-talked into fitness theme | ⚠ **degenerate pattern**: `机器学习#_#_#_#_#_#_#...` |
+
+### Verdict: cross-talk fix partial — bug surface evolved
+
+W3.2-v2 (Attention + Indexer per-seq KV read) successfully eliminated
+the "every read goes to row 0" pollution. **Now each non-hero request
+reads its OWN kv_cache row** — but the row CONTENTS are not isolated
+because the remaining W3.2-final items still leave module-state cross-
+contaminated:
+
+| RFC §3.1 bug source | Status after W3.2-v2 | Symptom |
+|---|---|---|
+| #1 Compressor `kv_state` / `score_state` `register_buffer` | shared across requests | each row's state is wiped/clobbered when any request resets |
+| #5 Central reset block `:994-1002` | still wipes ALL rows on any `start_pos==0` | mid-decode rows for non-leading requests get zero'd |
+| #7 Scalar `start_pos = positions[0]` collapse | unchanged | all requests use the leading sequence's absolute position |
+| #6 `[:1]` hardcodes | ✅ FIXED in W3.1 | — |
+| Indexer + Attention sparse_attn READ | ✅ FIXED in W3.2-v2 | — |
+
+Result phenomenology: idx>0 no longer borrows idx=0's content (which
+was at least coherent), so they instead surface uninitialized /
+clobbered state as **degenerate output** (random symbols, repeated
+tokens). This is a **closer-to-truth** signature than W3.2-v1's
+borrowed coherence — degenerate output is exactly what one expects
+from "right slot, wrong contents."
+
+### Signature progression closure (BEFORE → W3.2-v2)
+
+| Phase | rc | Symptom | RFC §3.1 source state |
+|---|---|---|---|
+| BEFORE | crash | none | #6 active |
+| W3.1-v3 | crash @ Compressor | none | #1 surface |
+| W3.1-v5 | assert @ topk shape | none | #7 surface |
+| W3.1-v6 | crash @ scheduler | none | scheduler IndexError |
+| W3.2-v1 | rc=0 | idx>0 cross-talked into idx=0 | scheduler fixed; READ-side row=0 |
+| **W3.2-v2** | **rc=0** | **idx>0 degenerate (own-row but stale)** | **READ-side fixed**; #1/#5/#7 still active |
+
+### What W3.2-final must close to reach correctness
+
+Per RFC §6.2.1 + §3.1, the remaining items:
+1. **Remove central reset block at `:994-1002`** — replace with
+   write-before-read invariant (RFC §8.1) so non-leading requests
+   keep their state when a new request enters prefill.
+2. **Remove module-level `register_buffer`** for `score_state`,
+   `kv_state`, `kv_cache` (Compressor + Indexer + Attention) — store
+   per-request state in pool tensors managed by `BlockManager`.
+3. **Vector `start_pos`** via `cu_seqlens_q` / `token_to_seq_idxs`
+   from `attn_metadata` — replace `positions[0]` scalar collapse at
+   `:1957` AND propagate per-token positions through Compressor /
+   Indexer / Attention forwards.
+4. **`get_kv_cache_spec()` wiring through `attn_metadata_builder`** —
+   each layer's spec drives BlockManager registration; per-request
+   slot_mapping replaces `[:bsz]` index.
+
+After W3.2-final lands, the W3.3 acceptance gate is `test_dsv4_greedy_seq
+_vs_batch` token-ID equality at conc=4 vs sequential conc=1 (RFC §10.1).
+
+### Reproducer
+```bash
+docker exec atom_dsv4_feat env PYTHONPATH=/workspace/ATOM-feat \
+  ATOM_USE_TRITON_MOE=1 AITER_LOG_LEVEL=WARNING \
+  /opt/venv/bin/python /workspace/silicon_fact_multireq.py \
+    --model /data/hf_models/deepseek-ai/DeepSeek-V4-Pro \
+    --kv_cache_dtype fp8 -tp 8 \
+    --max-num-seqs 4 --max-model-len 1024 --enforce-eager \
+    --temperature 0.0 --max-tokens 32 --num-prompts 4 \
+    --out /workspace/ATOM-feat/logs/silicon_w32_v2_retry.json
+```
