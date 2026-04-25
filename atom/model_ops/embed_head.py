@@ -2,16 +2,19 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 from aiter.dist.communication_op import tensor_model_parallel_all_gather
 from aiter.dist.parallel_state import get_tp_group
 from aiter.jit.utils.torch_guard import torch_compile_guard
-from aiter.tuned_gemm import tgemm
+
+from atom.model_ops.utils import atom_parameter
 from atom.plugin import is_plugin_mode
+from atom.utils import envs
 from atom.utils.forward_context import ForwardContext, get_forward_context
-from torch import nn
+from aiter.tuned_gemm import tgemm
 
 
 @triton.jit
@@ -114,8 +117,8 @@ class VocabParallelEmbedding(nn.Module):
         self.num_embeddings_per_partition = self.num_embeddings // self.tp_size
         self.vocab_start_idx = self.num_embeddings_per_partition * self.tp_rank
         self.vocab_end_idx = self.vocab_start_idx + self.num_embeddings_per_partition
-        self.weight = nn.Parameter(
-            torch.empty(self.num_embeddings_per_partition, embedding_dim)
+        self.weight = atom_parameter(
+            torch.empty(self.num_embeddings_per_partition, embedding_dim),
         )
         self.weight.weight_loader = self.weight_loader
 
@@ -159,7 +162,9 @@ class ParallelLMHead(VocabParallelEmbedding):
     ):
         super().__init__(num_embeddings, embedding_dim)
         if bias:
-            self.bias = nn.Parameter(torch.empty(self.num_embeddings_per_partition))
+            self.bias = atom_parameter(
+                torch.empty(self.num_embeddings_per_partition),
+            )
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
@@ -175,7 +180,8 @@ class ParallelLMHead(VocabParallelEmbedding):
                 x = x[last_indices].contiguous()
         logits = tgemm.mm(x, self.weight, self.bias)
         if self.tp_size > 1:
-            logits = tensor_model_parallel_all_gather(logits, use_custom=True)
+            use_custom = envs.ATOM_USE_CUSTOM_ALL_GATHER
+            logits = tensor_model_parallel_all_gather(logits, use_custom=use_custom)
             # all_logits = (
             #     [torch.empty_like(logits) for _ in range(self.tp_size)]
             #     if self.tp_rank == 0

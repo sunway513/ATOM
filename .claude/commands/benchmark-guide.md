@@ -27,16 +27,16 @@ rocm-smi --showmemuse | grep "GPU Memory Allocated"
 # 2. Run benchmark
 python -m atom.benchmarks.benchmark_serving \
   --model=<model> --backend=vllm --base-url=http://localhost:8000 \
-  --dataset-name=random \
-  --random-input-len=1024 --random-output-len=1024 \
-  --random-range-ratio=0.8 \
-  --max-concurrency=128 \
-  --num-prompts=1280 \
-  --trust-remote-code \
-  --num-warmups=1 \
-  --request-rate=inf --ignore-eos \
-  --save-result \
-  --percentile-metrics="ttft,tpot,itl,e2el"
+  --dataset-name=random \                          # use synthetic random data
+  --random-input-len=1024 --random-output-len=1024 \  # ISL/OSL
+  --random-range-ratio=0.8 \                       # ±20% length variation
+  --max-concurrency=128 \                          # concurrent request limit
+  --num-prompts=1280 \                             # CONC*10, total requests
+  --trust-remote-code \                            # required for custom models
+  --num-warmups=256 \                              # CONC*2, warmup before measurement
+  --request-rate=inf --ignore-eos \                # saturate server, fixed output length
+  --save-result \                                  # write JSON result file
+  --percentile-metrics="ttft,tpot,itl,e2el"        # metrics to report percentiles for
 ```
 
 ## Nightly Standard Parameters
@@ -74,6 +74,12 @@ curl -X POST http://127.0.0.1:8000/stop_profile
 | ITL | Inter-Token Latency |
 | E2EL | End-to-End Latency |
 | Throughput | Output tokens/s |
+
+## Critical Rules
+
+- **Never run accuracy and performance tests simultaneously** — they interfere with each other's results. Always finish one before starting the other.
+- **Report Total Token throughput (tok/s)**, not Output token throughput — Total includes input+output.
+- **MTP models require `--use-chat-template`** — tokenizer mismatch without it causes inaccurate results.
 
 ## CI Benchmark Workflow
 

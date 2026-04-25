@@ -3,6 +3,7 @@ import logging
 from atom.models.qwen3 import Qwen3ForCausalLM
 from atom.models.qwen3_moe import Qwen3MoeForCausalLM
 from atom.models.glm4_moe import Glm4MoeForCausalLM
+from atom.models.deepseek_v2 import DeepseekV3ForCausalLM
 from atom.config import Config
 from atom.plugin.prepare import is_vllm, is_sglang
 
@@ -12,11 +13,16 @@ _ATOM_SUPPORTED_MODELS = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,
     "Qwen3MoeForCausalLM": Qwen3MoeForCausalLM,
     "Glm4MoeForCausalLM": Glm4MoeForCausalLM,
+    "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
 }
 
 
 def _register_custom_attention_to_sglang() -> None:
+    """Override sglang's built-in "aiter" attention backend with ATOM's implementation.
 
+    sglang only accepts pre-registered backend names, so we reuse the "aiter"
+    name to inject ATOMAttnBackendForSgl without modifying sglang source.
+    """
     from sglang.srt.layers.attention.attention_registry import (
         register_attention_backend,
     )
@@ -24,13 +30,15 @@ def _register_custom_attention_to_sglang() -> None:
     # here register the custom attention backend with the name "aiter"
     # as sglang defines the fixed attention backend choices, which must be
     # in-tree
-    logger.info("Register custom attention backend AiterBackend to SGLang")
+    logger.info("Register custom attention backend ATOMAttnBackendForSgl to SGLang")
 
     @register_attention_backend("aiter")
     def create_atom_backend(runner):
-        from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
+        from atom.plugin.sglang.attention_backend.sgl_attn_backend import (
+            ATOMAttnBackendForSgl,
+        )
 
-        return AiterAttnBackend(runner)
+        return ATOMAttnBackendForSgl(runner)
 
 
 def register_ops_to_sglang(atom_config: Config) -> None:
@@ -41,8 +49,10 @@ def register_ops_to_sglang(atom_config: Config) -> None:
 
 
 def set_attn_cls() -> None:
-    """
-    Set the attention class for constructing the model based on the framework
+    """Swap ``atom.model_ops.Attention`` to the framework-appropriate class.
+
+    ATOM models reference ``ops.Attention`` generically; this function binds
+    it to PagedAttention (vLLM) or RadixAttention (sglang) at plugin init time.
     """
     import atom.model_ops as ops
 
@@ -56,14 +66,15 @@ def set_attn_cls() -> None:
 
 def init_aiter_dist(config: Config) -> None:
     """
-    Initialize aiter dist for using aiter custom collective op
+    Initialize aiter dist for using aiter custom collective op.
+
+    In vLLM plugin mode, tries to reuse vLLM's TP group and inject aiter's ca_comm
+    first (single IPC init, avoids 2x reduce slowdown). Falls back to init_dist_env
+    if reuse fails.
     """
     logger.info(
         "Initialize aiter dist for using aiter custom collective op for plugin mode"
     )
-
-    from aiter import init_dist_env
-    from aiter.dist.utils import get_distributed_init_method
 
     rank = config.plugin_config.rank
     tensor_parallel_size = config.tensor_parallel_size
@@ -71,6 +82,16 @@ def init_aiter_dist(config: Config) -> None:
     assert (
         config.plugin_config.is_plugin_mode
     ), "Make sure ATOM is running in plugin mode"
+
+    if config.plugin_config.is_vllm:
+        from atom.plugin.vllm.tp_group_reuse import init_aiter_tp_from_vllm
+
+        if init_aiter_tp_from_vllm(tensor_parallel_size):
+            return
+
+    # Fallback: create aiter's own groups (vLLM reuse failed or non-vLLM plugin)
+    from aiter import init_dist_env
+    from aiter.dist.utils import get_distributed_init_method
 
     if config.plugin_config.is_vllm:
         dp_master_ip = config.parallel_config.data_parallel_master_ip

@@ -107,6 +107,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=False,
+            has_bias=False,
             prefix=f"{prefix}.experts",
             config=config,
         )
@@ -182,6 +183,7 @@ class Qwen3MoeAttention(nn.Module):
             self.total_num_kv_heads,
             bias=qkv_bias,
             quant_config=atom_config.quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.o_proj = RowParallelLinear(
@@ -190,6 +192,7 @@ class Qwen3MoeAttention(nn.Module):
             bias=False,
             quant_config=atom_config.quant_config,
             reduce_results=not ENABLE_ALLREDUCE_RMSNORM_FUSION,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -244,9 +247,13 @@ class Qwen3MoeAttention(nn.Module):
                 query=q, key=k, value=v, positions=positions, q_scale=None, qkv=qkv
             )
         else:
-            # Add qk-norm
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+            # Add qk-norm (per-head)
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+                -1, self.num_heads * self.head_dim
+            )
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+                -1, self.num_kv_heads * self.head_dim
+            )
 
             attn_output = self.attn(
                 query=q, key=k, value=v, positions=positions, **model_kwargs
