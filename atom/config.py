@@ -800,7 +800,9 @@ class SpeculativeConfig:
 # DSV4 multi-request guard (issue #37) — guard helpers live in
 # atom.utils.dsv4_guard so unit tests can import them without the
 # conftest stub of atom.config short-circuiting the import chain.
-from atom.utils.dsv4_guard import validate_dsv4_multireq as _validate_dsv4_multireq  # noqa: E402
+from atom.utils.dsv4_guard import (
+    validate_dsv4_multireq as _validate_dsv4_multireq,
+)  # noqa: E402
 
 
 @dataclass

@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # Import the production helpers directly. If this import fails, the
 # tests fail at collection time — which is the right behavior (better
 # than tests passing because we silently fell back to a copy).
@@ -67,9 +66,7 @@ class TestValidateDsv4Multireq:
 
     def test_dsv4_arch_accepts_max_num_seqs_1(self):
         # No env override needed; should be silent.
-        _validate_dsv4_multireq(
-            architectures=["DeepseekV4ForCausalLM"], max_num_seqs=1
-        )
+        _validate_dsv4_multireq(architectures=["DeepseekV4ForCausalLM"], max_num_seqs=1)
 
     def test_dsv4_arch_with_override_accepts_max_num_seqs_4(self):
         with patch.dict(os.environ, {"ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1"}):
@@ -101,9 +98,7 @@ class TestValidateDsv4Multireq:
                 "DeepseekV4ForCausalLM_MLA",
             ]:
                 with pytest.raises(ValueError, match="max_num_seqs=1"):
-                    _validate_dsv4_multireq(
-                        architectures=[arch], max_num_seqs=2
-                    )
+                    _validate_dsv4_multireq(architectures=[arch], max_num_seqs=2)
 
     def test_empty_architectures_unaffected(self):
         # Configs with no architectures list (rare; warmup paths) skip guard.
@@ -163,9 +158,9 @@ class TestConfigIntegration:
             "so Config.__post_init__ uses the same code path tests exercise."
         )
         # Assert __post_init__ actually CALLS the re-exported guard
-        assert "_validate_dsv4_multireq(" in text, (
-            "atom/config.py Config.__post_init__ must call _validate_dsv4_multireq."
-        )
+        assert (
+            "_validate_dsv4_multireq(" in text
+        ), "atom/config.py Config.__post_init__ must call _validate_dsv4_multireq."
 
 
 class TestDSV4UnsafeMultireqDevEnv:

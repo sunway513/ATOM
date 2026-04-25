@@ -23,9 +23,7 @@ def is_dsv4_arch(architectures: list[str]) -> bool:
     return any("DeepseekV4" in a or "DeepSeekV4" in a for a in architectures)
 
 
-def validate_dsv4_multireq(
-    architectures: list[str], max_num_seqs: int
-) -> None:
+def validate_dsv4_multireq(architectures: list[str], max_num_seqs: int) -> None:
     """DSV4 multi-request guard (issue #37).
 
     lingpeng's PR1 DSV4 reference uses a B=1-implicit `register_buffer`
