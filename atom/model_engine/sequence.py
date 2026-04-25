@@ -57,7 +57,11 @@ class Sequence:
         self.num_prompt_tokens = len(token_ids)
         self.num_rejected = 0
         self.num_cached_tokens = 0
-        self.block_table = []
+        # Per-pool block tables (RFC §6.2.1 / §6.2.4). Keyed by logical
+        # cache name. Single-pool / non-DSV4 models use only "main".
+        # `self.block_table` (below as a property) aliases "main" for
+        # backwards compat with all existing call sites.
+        self.block_tables: dict[str, list[int]] = {"main": []}
         self.mamba_state_slot = -1  # per-request recurrent state slot index
         self.temperature = sampling_params.temperature
         self.top_k = sampling_params.top_k
@@ -109,6 +113,22 @@ class Sequence:
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
+
+    @property
+    def block_table(self) -> list[int]:
+        """Backwards-compat alias for ``self.block_tables["main"]``.
+
+        Lets every pre-DSV4 call site keep using ``seq.block_table``
+        unchanged. Reads return the same list object so ``.append()`` /
+        ``.clear()`` are seen by both APIs.
+        """
+        return self.block_tables["main"]
+
+    @block_table.setter
+    def block_table(self, value: list[int]) -> None:
+        # Whole-list assignments (e.g. ``seq.block_table = [0]`` in
+        # model_runner warmup) redirect to "main".
+        self.block_tables["main"] = value
 
     @property
     def num_completion_tokens(self):
