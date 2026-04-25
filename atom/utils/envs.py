@@ -93,6 +93,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable gradient tracking on model parameters.  Default "0" (disabled)
     # is correct for inference; set to "1" only for training / fine-tuning.
     "ATOM_REQUIRES_GRAD": lambda: os.getenv("ATOM_REQUIRES_GRAD", "0") == "1",
+    # --- DSV4 multi-request guard ---
+    # DSV4 inherits lingpeng's PR1 single-request skeleton (B=1-implicit
+    # `register_buffer` flat KV cache + scalar `start_pos`); multi-request
+    # support requires the W4 SGLang-isomorphic refactor (see issue #37).
+    # Until W4 lands, the engine refuses `max_num_seqs > 1` for DSV4
+    # architectures unless this dev override is set. Setting it returns
+    # silently-broken cross-talk output (RFC §3.1, Evidence A-G); only use
+    # for kernel-level perf experiments where output correctness is not
+    # being measured.
+    "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": lambda: (
+        os.getenv("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", "0") == "1"
+    ),
 }
 
 

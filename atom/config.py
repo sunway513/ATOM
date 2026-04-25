@@ -959,6 +959,33 @@ class Config:
                     f"num_speculative_tokens must be between 1 and 4, got {num_spec}."
                 )
 
+        # --- DSV4 multi-request guard (issue #37) ---
+        # lingpeng's PR1 DSV4 reference uses a B=1-implicit
+        # `register_buffer` flat KV cache + scalar `start_pos`. The W3.2
+        # iteration chain (v3-v6.1) confirmed at least 4 architectural
+        # walls preventing correct multi-request decode: row collision,
+        # cu_seqlens_q packed input, allocator eviction, scalar position
+        # in RoPE. Full fix requires the W4 SGLang-isomorphic refactor
+        # (positions:Tensor + engine-owned KV pools). Until W4 lands,
+        # refuse multi-request configs to prevent silently-broken output.
+        archs = getattr(self.hf_config, "architectures", None) or []
+        if any("DeepseekV4" in a or "DeepSeekV4" in a for a in archs) and (
+            self.max_num_seqs > 1
+        ):
+            from atom.utils import envs
+
+            if not envs.ATOM_DSV4_UNSAFE_MULTIREQ_DEV:
+                raise ValueError(
+                    "DSV4 architectures currently support only "
+                    f"max_num_seqs=1 (got max_num_seqs={self.max_num_seqs}). "
+                    "Multi-request support is in development on the W4 branch "
+                    "(feat/dsv4-forward-batch-paged-kv); see "
+                    "https://github.com/sunway513/ATOM/issues/37 for context. "
+                    "To bypass this guard for kernel-level perf experiments "
+                    "where output correctness is NOT being measured, set "
+                    "ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1."
+                )
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
