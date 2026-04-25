@@ -815,7 +815,15 @@ class Config:
     eos_token_id: int = -1
     stop_token_ids: list[int] = field(default_factory=list)
     kv_cache_block_size: int = 16
+    # Legacy single-pool block budget. Kept for backwards compatibility;
+    # in multi-pool mode this should resolve to sum(
+    # kv_cache_pool_blocks.values()) (RFC §6.2.1 Q6.2.1).
     num_kvcache_blocks: int = -1
+    # Per-pool block budget keyed by physical_pool_key (RFC §6.2.1).
+    # Populated by ModelRunner.get_kv_cache_pool_blocks() when the model
+    # declares multiple KVCacheSpec entries; empty dict in legacy
+    # single-pool mode (every non-DSV4 model today).
+    kv_cache_pool_blocks: dict = field(default_factory=dict)
     kv_cache_dtype: str = "bf16"
     enable_prefix_caching: bool = False
     port: int = 8006

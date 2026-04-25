@@ -71,6 +71,23 @@ _cr = types.ModuleType("atom.utils.custom_register")
 _cr.direct_register_custom_op = lambda **kwargs: None
 sys.modules["atom.utils.custom_register"] = _cr
 
+# ── 4c. Stub aiter heavy chain for dsv4 spec tests ────────────────────────
+# atom/models/deepseek_v4.py imports `from aiter.dist.parallel_state import
+# get_tensor_model_parallel_world_size`, which pulls in torch_compile_guard
+# etc. that the base rocm/atom-dev image's aiter doesn't ship. Stub the
+# minimum surface that get_kv_cache_spec() and the smaller helpers need.
+_aiter = sys.modules.setdefault("aiter", types.ModuleType("aiter"))
+_aiter_dist = types.ModuleType("aiter.dist")
+_aiter_ps = types.ModuleType("aiter.dist.parallel_state")
+_aiter_ps.get_tensor_model_parallel_world_size = lambda: 1
+_aiter_ps.get_tensor_model_parallel_rank = lambda: 0
+_aiter_ps.get_tp_group = lambda: None
+sys.modules["aiter.dist"] = _aiter_dist
+sys.modules["aiter.dist.parallel_state"] = _aiter_ps
+# Preserve any pre-existing aiter attrs but ensure the dist subpackage
+# is reachable via attribute lookup.
+_aiter.dist = _aiter_dist
+
 # ── 5. Stub xxhash with a hashlib-based fallback ──────────────────────────
 
 if importlib.util.find_spec("xxhash") is None:

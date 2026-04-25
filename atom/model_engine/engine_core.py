@@ -88,15 +88,27 @@ class EngineCore:
                 config,
             )
             block_info = self.runner_mgr.call_func("get_num_blocks", wait_out=True)
-            num_blocks = block_info["num_kvcache_blocks"]
             config.mamba_equiv_per_req = block_info.get("mamba_equiv_per_req", 0)
             config.num_mamba_groups = block_info.get("num_mamba_groups", 0)
-            ret = self.runner_mgr.call_func(
-                "allocate_kv_cache", num_blocks, wait_out=True
-            )
+            # Multi-pool path (RFC §6.2.1): if the runner returned per-pool
+            # block counts, plumb the dict through to allocate_kv_cache and
+            # populate config.kv_cache_pool_blocks. Legacy single-pool
+            # models ship only "num_kvcache_blocks" (scalar) and take the
+            # else branch — pre-reform behavior preserved.
+            pool_blocks = block_info.get("kv_cache_pool_blocks")
+            if pool_blocks:
+                config.kv_cache_pool_blocks = pool_blocks
+                config.num_kvcache_blocks = sum(pool_blocks.values())
+                ret = self.runner_mgr.call_func(
+                    "allocate_kv_cache", pool_blocks, wait_out=True
+                )
+            else:
+                num_blocks = block_info["num_kvcache_blocks"]
+                config.num_kvcache_blocks = num_blocks
+                ret = self.runner_mgr.call_func(
+                    "allocate_kv_cache", num_blocks, wait_out=True
+                )
             assert ret, "Failed to allocate kv cache"
-
-            config.num_kvcache_blocks = num_blocks
             if not config.enforce_eager:
                 # Start profiler before cudagraph capture only if mark-trace is enabled.
                 if self.profile_enbaled and self.mark_trace:

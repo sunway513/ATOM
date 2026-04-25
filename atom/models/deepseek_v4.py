@@ -27,6 +27,10 @@ from torch import nn
 from aiter.dist.parallel_state import get_tensor_model_parallel_world_size
 from atom.config import Config
 from atom.model_ops.embed_head import VocabParallelEmbedding
+from atom.v1.kv_cache_interface import (
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from atom.model_ops.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -373,18 +377,25 @@ def _get_window_topk_idxs(
             ],
             dim=0,
         )
+        # W3.1 (RFC §14 Week 3 Codex final-pass critical path): tile 1D
+        # window pattern to [seqlen, window_size] so multi-token decode
+        # (M = seqlen > 1) gets one row per query token.
+        matrix = matrix.unsqueeze(0).expand(seqlen, -1)
     elif start_pos > 0:
         matrix = F.pad(
             torch.arange(start_pos + 1, **kw),
             (0, window_size - start_pos - 1),
             value=-1,
         )
+        # W3.1: same tile-to-seqlen as above branch.
+        matrix = matrix.unsqueeze(0).expand(seqlen, -1)
     else:
         base = torch.arange(seqlen, **kw).unsqueeze(1)
         matrix = (base - window_size + 1).clamp(0) + torch.arange(
             min(seqlen, window_size), **kw
         )
         matrix = torch.where(matrix > base, -1, matrix)
+        # Already 2D [seqlen, K] — no tile needed.
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
 
 
@@ -405,6 +416,9 @@ def _get_compress_topk_idxs(
     kw = dict(device=device) if device is not None else {}
     if start_pos > 0:
         matrix = torch.arange(0, (start_pos + 1) // ratio, **kw) + offset
+        # W3.1 (RFC §14 Week 3): tile 1D pattern to [seqlen, K] so
+        # multi-token decode (M = seqlen > 1) gets one row per query.
+        matrix = matrix.unsqueeze(0).expand(seqlen, -1)
     else:
         matrix = torch.arange(seqlen // ratio, **kw).repeat(seqlen, 1)
         mask = matrix >= torch.arange(1, seqlen + 1, **kw).unsqueeze(1) // ratio
@@ -493,6 +507,34 @@ class Compressor(nn.Module):
             persistent=False,
         )
 
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> SlidingWindowMLASpec:
+        """RFC §6.2.1 Compressor spec — registers compressor state as
+        sliding-window MLA-style KV with `sliding_window = coff *
+        compress_ratio` (8 for C4, 128 for C128). The block manager
+        will register one BlockPool per `physical_pool_key` of these
+        specs and allocate paged compressor state per request.
+        """
+        coff = 1 + self.overlap
+        head_size = self.head_dim
+        num_kv_heads = 1
+        # Estimate page bytes for the manager's budget allocator.
+        # storage_block_size = block_size // compress_ratio.
+        storage_block_size = block_size // self.compress_ratio
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        return SlidingWindowMLASpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=self.compress_ratio,
+            sliding_window=coff * self.compress_ratio,
+        )
+
     def overlap_transform(
         self, tensor: torch.Tensor, value: float = 0.0
     ) -> torch.Tensor:
@@ -569,23 +611,29 @@ class Compressor(nn.Module):
             kv = (kv * score.softmax(dim=2)).sum(dim=2)
         else:
             # ===== Decode path (start_pos > 0, seqlen == 1) =====
+            # W3.1: comment "seqlen == 1" only holds in B=1; under
+            # multi-request batched decode kv arrives as
+            # [1, batch_decode, head_dim]. Use dim-1 batch + squeeze(0).
             should_compress = (start_pos + 1) % self.compress_ratio == 0
             score = score + self.ape[start_pos % ratio]
+            batch_decode = kv.shape[1]
             if overlap:
-                self.kv_state[:bsz, ratio + start_pos % ratio] = kv.squeeze(1)
-                self.score_state[:bsz, ratio + start_pos % ratio] = score.squeeze(1)
+                self.kv_state[:batch_decode, ratio + start_pos % ratio] = kv.squeeze(0)
+                self.score_state[:batch_decode, ratio + start_pos % ratio] = (
+                    score.squeeze(0)
+                )
                 if should_compress:
                     kv_state = torch.cat(
                         [
-                            self.kv_state[:bsz, :ratio, :d],
-                            self.kv_state[:bsz, ratio:, d:],
+                            self.kv_state[:batch_decode, :ratio, :d],
+                            self.kv_state[:batch_decode, ratio:, d:],
                         ],
                         dim=1,
                     )
                     score_state = torch.cat(
                         [
-                            self.score_state[:bsz, :ratio, :d],
-                            self.score_state[:bsz, ratio:, d:],
+                            self.score_state[:batch_decode, :ratio, :d],
+                            self.score_state[:batch_decode, ratio:, d:],
                         ],
                         dim=1,
                     )
@@ -593,14 +641,26 @@ class Compressor(nn.Module):
                         dim=1, keepdim=True
                     )
                     # Roll: the just-completed window becomes the next overlap window.
-                    self.kv_state[:bsz, :ratio] = self.kv_state[:bsz, ratio:]
-                    self.score_state[:bsz, :ratio] = self.score_state[:bsz, ratio:]
+                    self.kv_state[:batch_decode, :ratio] = self.kv_state[
+                        :batch_decode, ratio:
+                    ]
+                    self.score_state[:batch_decode, :ratio] = self.score_state[
+                        :batch_decode, ratio:
+                    ]
             else:
-                self.kv_state[:bsz, start_pos % ratio] = kv.squeeze(1)
-                self.score_state[:bsz, start_pos % ratio] = score.squeeze(1)
+                # W3.1 (RFC §6.2.1 bug source #1): same B=1-implicit shape
+                # bug as DeepseekV4Attention. kv arrives as
+                # [1, batch_decode, head_dim] under multi-request decode;
+                # the original kv.squeeze(1) was a single-decode-token
+                # (S=1) trick. Squeeze the implicit B=1 instead and use
+                # dim 1 as the real batch.
+                batch_decode = kv.shape[1]
+                self.kv_state[:batch_decode, start_pos % ratio] = kv.squeeze(0)
+                self.score_state[:batch_decode, start_pos % ratio] = score.squeeze(0)
                 if should_compress:
                     kv = (
-                        self.kv_state[:bsz] * self.score_state[:bsz].softmax(dim=1)
+                        self.kv_state[:batch_decode]
+                        * self.score_state[:batch_decode].softmax(dim=1)
                     ).sum(dim=1, keepdim=True)
 
         if not should_compress:
@@ -626,7 +686,12 @@ class Compressor(nn.Module):
         if start_pos == 0:
             self.kv_cache[:bsz, : seqlen // ratio] = kv
         else:
-            self.kv_cache[:bsz, start_pos // ratio] = kv.squeeze(1)
+            # W3.1: kv from the decode aggregation has shape
+            # [batch_decode, 1, head_dim] (sum(dim=1, keepdim=True)).
+            # Use the dim-0 batch directly via batch_decode in scope from
+            # the decode branch above. squeeze(1) here removes the
+            # genuine size-1 aggregation dim.
+            self.kv_cache[:batch_decode, start_pos // ratio] = kv.squeeze(1)
         return kv
 
 
@@ -692,6 +757,28 @@ class Indexer(nn.Module):
         )
         self.freqs_cis: Optional[torch.Tensor] = None
 
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> MLAAttentionSpec:
+        """RFC §6.2.1 Indexer spec — registers indexer KV under
+        MLAAttentionSpec with `compress_ratio` so storage_block_size =
+        block_size // compress_ratio (64 for C4 default).
+        """
+        head_size = self.head_dim
+        num_kv_heads = 1
+        storage_block_size = block_size // self.compress_ratio
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        return MLAAttentionSpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=self.compress_ratio,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -738,9 +825,27 @@ class Indexer(nn.Module):
         ).unsqueeze(0)
 
         # ----- Index score -----
-        index_score = torch.einsum(
-            "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
-        )
+        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode
+        # (start_pos > 0 AND multiple decode tokens), each token belongs
+        # to a distinct sequence — read each sequence's OWN row of
+        # self.kv_cache rather than row 0. Transpose q to [N, 1, H, D],
+        # slice kv_cache[:N], compute einsum, transpose back.
+        # Gate on start_pos > 0 so warmup / prefill (where multi-token
+        # input is one sequence) keeps the B=1-implicit path and does
+        # not over-slice kv_cache (max_batch_size << seqlen during
+        # warmup).
+        bsz_idx = q.shape[1]
+        if start_pos > 0 and bsz_idx > 1:
+            q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio]  # [N, t, head_dim]
+            index_score = torch.einsum(
+                "bshd,btd->bsht", q_per_seq, kv_per_seq
+            )  # [N, 1, H, t]
+            index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
+        else:
+            index_score = torch.einsum(
+                "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
+            )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
         # ----- Top-k selection over compressed positions -----
@@ -909,6 +1014,31 @@ class DeepseekV4Attention(nn.Module):
         )
         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
 
+    def get_kv_cache_spec(
+        self,
+        block_size: int = 256,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> MLAAttentionSpec:
+        """RFC §6.2.1 main MLA attention spec. compress_ratio=0 in this
+        layer's args means "dense" (no compression); we map it to
+        compress_ratio=1 for the spec so storage_block_size == block_size.
+        compress_ratio=4 (C4) and compress_ratio>=8 (C128/HCA) flow
+        through unchanged.
+        """
+        head_size = self.head_dim
+        num_kv_heads = 1
+        cr = self.compress_ratio if self.compress_ratio else 1
+        storage_block_size = block_size // cr
+        page_size_bytes = storage_block_size * num_kv_heads * head_size * dtype.itemsize
+        return MLAAttentionSpec(
+            block_size=block_size,
+            page_size_bytes=page_size_bytes,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+            compress_ratio=cr,
+        )
+
     def process_weights_after_loading(self) -> None:
         """Dequant wo_a (FP8 + e8m0 block scale) → BF16 in place.
 
@@ -1037,32 +1167,69 @@ class DeepseekV4Attention(nn.Module):
         # compressed entries; decode writes one slot in window ring buffer
         # then reads from the persistent kv_cache. (kv_cache slot 0 = our
         # implicit B=1.) -----
+        # W3.1 (RFC §6.2.1): replace 5 hardcoded [:1] writes/reads with
+        # slices matching the RHS batch dim. For the lingpeng B=1-implicit
+        # path this is a no-op; for batched decode (where kv arrives as
+        # [B, 1, head_dim] from the model_runner) this stops the dim-
+        # mismatch crash at the previous :1054. Module-level buffer
+        # sharing across requests (the deeper bug source #1-#5) is
+        # unfixed here and will be handled in W3.2 with proper slot
+        # mapping.
+        bsz_kv = kv.shape[0]
         if start_pos == 0:
             if seqlen <= win:
-                self.kv_cache[:1, :seqlen] = kv
+                self.kv_cache[:bsz_kv, :seqlen] = kv
             else:
                 cutoff = seqlen % win
                 (
-                    self.kv_cache[:1, cutoff:win],
-                    self.kv_cache[:1, :cutoff],
-                ) = kv[
-                    :, -win:
-                ].split([win - cutoff, cutoff], dim=1)
+                    self.kv_cache[:bsz_kv, cutoff:win],
+                    self.kv_cache[:bsz_kv, :cutoff],
+                ) = kv[:, -win:].split([win - cutoff, cutoff], dim=1)
             if self.compress_ratio:
                 if (kv_compress := self.compressor(x, start_pos)) is not None:
                     kv = torch.cat([kv, kv_compress], dim=1)
             o = sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
-            self.kv_cache[:1, start_pos % win] = kv.squeeze(1)
+            # W3.1 (RFC §6.2.1): in batched decode, kv arrives as
+            # [1, batch_decode_tokens, head_dim] (implicit B=1, S=batch).
+            # squeeze(0) gives [batch_decode, head_dim], write into
+            # kv_cache[:batch_decode, start_pos%win].
+            batch_decode = kv.shape[1]
+            kv_decode = kv.squeeze(0)  # [batch_decode, head_dim]
+            self.kv_cache[:batch_decode, start_pos % win] = kv_decode
             if self.compress_ratio:
                 self.compressor(x, start_pos)
-            o = sparse_attn(
-                q,
-                self.kv_cache[:1],
-                self.attn_sink,
-                topk_idxs,
-                self.softmax_scale,
-            )
+            # W3.2 (RFC §3.1 cross-talk fix): for multi-request lockstep
+            # decode (batch_decode > 1) each token belongs to a distinct
+            # sequence. Transpose q from [1, N, H, D] -> [N, 1, H, D],
+            # read per-sequence kv_cache slices, and call sparse_attn with
+            # B=N. This eliminates the "every request reads row 0" cross-
+            # talk that polluted W3.2-v1 idx>0 outputs.
+            #
+            # topk_idxs from helpers is [1, N, K]; transpose to [N, 1, K].
+            # sparse_attn output [N, 1, H, D] is transposed back to
+            # [1, N, H, D] so the downstream RoPE/o_proj path (which
+            # assumes B=1 implicit) sees the same shape it always did.
+            if batch_decode > 1:
+                q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+                kv_per_seq = self.kv_cache[:batch_decode]  # [N, max_seq, head_dim]
+                topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
+                o = sparse_attn(
+                    q_per_seq,
+                    kv_per_seq,
+                    self.attn_sink,
+                    topk_per_seq,
+                    self.softmax_scale,
+                )
+                o = o.transpose(0, 1).contiguous()  # [1, N, H, D]
+            else:
+                o = sparse_attn(
+                    q,
+                    self.kv_cache[:1],
+                    self.attn_sink,
+                    topk_idxs,
+                    self.softmax_scale,
+                )
 
         # Inverse RoPE on output's rope dims to remove absolute-position contribution
         # carried in by the value-side RoPE of the KV entries.
@@ -1207,10 +1374,12 @@ class MoE(nn.Module):
     `FusedMoE.select_experts(scoring_func="sqrtsoftplus", e_score_correction_bias=...)`,
     which we extended in atom/model_ops/moe.py to add the V4 path.
 
-    Hash routing for `layer_id < n_hash_layers` (first 3 V4 layers) is NOT yet
-    wired through FusedMoE — the `tid2eid` buffer is declared so weight loading
-    completes, but inference uses the standard sqrtsoftplus path. Hash layers
-    will produce incorrect routing; correct hash routing lands in PR3+.
+    Hash routing for `layer_id < n_hash_layers` (first 3 V4 layers) IS wired
+    through FusedMoE: the gate sets `custom_routing_function=self._hash_topk`
+    (via lingpeng commit 3c37b76), and FusedMoE.select_experts honors it. The
+    `tid2eid` buffer is loaded from the checkpoint and indexed per token at
+    `_hash_topk` (line ~1294). Topk weights are scaled by `route_scale=2.5`
+    per the official V4 spec (PR#650 hero-prompt verified rc=0).
     """
 
     def __init__(self, layer_id: int, args: DeepseekV4Args, prefix: str = ""):
@@ -1646,14 +1815,18 @@ class ParallelHead(nn.Module):
         )
 
     def get_logits(self, x: torch.Tensor) -> torch.Tensor:
-        """Project the last-token slice of `x` to vocab logits.
+        """Project rows of `x` to vocab logits.
 
         Accepts either:
-          - 2D [num_tokens, D]: takes last row → [vocab]
-          - 3D [B, S, D] (legacy): takes x[:, -1, :] → [B, vocab]
+          - 2D [N_sample_positions, D]: projects ALL rows. Caller is
+            responsible for slicing to the sample positions (last-token-
+            of-each-sequence per cu_seqlens_q). Multi-request decode +
+            prefill both flow through this path; the model forward
+            slices via `cu_seqlens_q[1:] - 1` before calling the head.
+          - 3D [B, S, D] (legacy): takes `x[:, -1, :]` → `[B, vocab]`.
         """
         if x.dim() == 2:
-            return F.linear(x[-1:].float(), self.weight)
+            return F.linear(x.float(), self.weight)
         return F.linear(x[:, -1].float(), self.weight)
 
     def hc_head(
@@ -1850,6 +2023,25 @@ class DeepseekV4Model(nn.Module):
 
         for layer in self.layers:
             h = layer(h, start_pos, input_ids)
+
+        # W3.2 (RFC §14 Week 3): slice h to last-token-of-each-sequence
+        # using cu_seqlens_q from attn_metadata before the LM head, so a
+        # decode batch of N requests yields [N, vocab] (one sample row per
+        # request). Without this, ParallelHead.get_logits would project
+        # only the trailing row, giving 1 sample for any N — exactly the
+        # IndexError@scheduler.py:609 RFC §3.1 #7 evidence chain captured
+        # in W3.2-DEBUG (len(prev_token_ids)=1, len(req_ids)=4).
+        try:
+            from atom.utils.forward_context import get_forward_context
+
+            ctx = get_forward_context()
+            attn_meta = getattr(ctx, "attn_metadata", None)
+            cu = getattr(attn_meta, "cu_seqlens_q", None)
+        except Exception:
+            cu = None
+        if cu is not None and cu.numel() >= 2:
+            last_token_indices = cu[1:] - 1
+            h = h[last_token_indices]
 
         logits = self.head(
             h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
