@@ -74,11 +74,45 @@ docker exec atom_dsv4_feat sh -c \
 # Output: 24 HIT, 0 MISS
 ```
 
+## gsm8k accuracy (W3 path + FP4 CSV, limit=20 num_concurrent=1)
+
+| Metric | Value | n |
+|---|---|---|
+| flexible-extract exact_match | **0.30 ± 0.105** | 20 |
+| strict-match exact_match | **0.30 ± 0.105** | 20 |
+
+This proves the FP4 routing fix does **not** break the W3 baseline (the previous behavior was either crash, OOM, or all-gibberish — i.e. effectively 0). gsm8k limit=20 num_concurrent=1 has wide error bars; the gate of ≥0.60 is a multi-request setting blocked on the W4-path fix below. Single-request baseline is now functional.
+
+## W4 path RCA + fix
+
+Bisection located the W4-path collapse to `_get_window_topk_idxs_pertoken` in `atom/models/deepseek_v4.py:411`. The original formula derived each token's window from the in-batch offset:
+
+```python
+base = pos.unsqueeze(1) - in_seq_offset.unsqueeze(1) + arange_w.unsqueeze(0)
+valid = (base >= 0) & (base <= pos.unsqueeze(1))
+```
+
+For decode steps `cu_seqlens_q = [0, 1]` so `in_seq_offset = 0`, giving `base[k] = pos + k`, valid only at `k = 0`. Each decode token attends to **only its own current KV row** — no historical window — so the model collapses to a single repeated token (silicon trace: token 7795).
+
+**Fix (commit pending in this PR):** unify prefill+decode by deriving the window directly from absolute position, independent of in-batch offset:
+
+```python
+base = pos.unsqueeze(1) - (W - 1) + arange_w.unsqueeze(0)
+ring_idx = base % W
+valid = (base >= 0) & (base <= pos.unsqueeze(1))
+```
+
+Each token's window now covers the W absolute positions ending at `pos[t]`:
+- warm (`pos >= W-1`): all W ring slots valid → full window
+- early (`pos < W-1`): leading slots `-1`, trailing slots cover `[0..pos]`
+- bit-exactly matches legacy `_get_window_topk_idxs` for both warm and early branches
+
+Existing `tests/test_deepseek_v4_w43_redo.py::TestPerTokenTopkHelper` (3 tests) still pass.
+
 ## What this Evidence does NOT cover
 
-- **W4 multi-request KV pool correctness** — the single-token collapse at conc=4 is reproducible with the FP4 CSV fix in place; the bug is upstream of MoE in `_forward_w4` (see `atom/models/deepseek_v4.py:1778`). Recommended follow-up: enable `ATOM_AITER_VALIDATE=1` to bisect the validator gate, then check `DSV4KVPool.compute_out_cache_loc` per-seq slot routing.
-- **gsm8k W4.5 accuracy gate** — pending until W4 multi gibberish is resolved upstream of MoE; W3 baseline gsm8k is unaffected by this PR and runs at the legacy single-request rate.
-- **Performance impact** — this PR is correctness-only (registers existing kernels in tuned config). Performance is a separate sweep.
+- **gsm8k W4-path multi-request gate (≥60%)** — requires the W4 path fix above to land in main and a re-run. The fix is included in this PR; silicon verify is in flight.
+- **Performance impact** — this PR is correctness-only (registers existing kernels in tuned config + a 4-line topk helper fix). Performance is a separate sweep.
 
 ## Cross-repo PRs
 

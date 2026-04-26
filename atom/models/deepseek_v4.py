@@ -462,24 +462,20 @@ def _get_window_topk_idxs_pertoken(
     if T == 0:
         return torch.zeros(0, W, dtype=torch.long, device=device)
 
-    cu_long = cu_seqlens_q.to(device=device, dtype=torch.long)
-    # token_idx → seq_idx via right-bucketize on cu[1:].
-    token_idx = torch.arange(T, dtype=torch.long, device=device)
-    seg_id = torch.bucketize(token_idx, cu_long[1:], right=True)
-    seq_starts = cu_long[seg_id]  # first token-idx of this token's seq
-    in_seq_offset = token_idx - seq_starts  # 0-based within the seq
-
     pos = positions.to(device=device, dtype=torch.long)
-    # Per-token row template:
-    #   out[t, k] = (start_p + k) % W,  start_p = pos[t] - in_seq_offset[t]
-    # plus a causal mask on the early prefill rows.
     arange_w = torch.arange(W, dtype=torch.long, device=device)
 
-    # Rotated window for "fully-warm" tokens (pos >= W-1): unrolled with
-    # the modular arithmetic used by `_get_window_topk_idxs`'s warm
-    # branch, this is identical. Early-prefill (pos < W-1) → invalid
-    # future slots = -1.
-    base = pos.unsqueeze(1) - in_seq_offset.unsqueeze(1) + arange_w.unsqueeze(0)
+    # Each token's window covers the W absolute positions ending at pos[t]:
+    #   absolute[k] = pos[t] - (W-1) + k    for k in 0..W-1
+    # Valid slots are those whose absolute position is in [0, pos[t]];
+    # for warm tokens (pos[t] >= W-1) all W are valid (full ring); for
+    # early-prefill tokens (pos[t] < W-1) the leading slots are invalid
+    # (-1). This unifies prefill+decode without referring to the seq's
+    # in-batch start, which was the W3.2-v6 bug: in-batch offset is 0 in
+    # decode steps even though the seq has been running for many tokens,
+    # so any formula that derives `start_p = pos - in_seq_offset` collapses
+    # decode to "look only at the current pos" → KV-cache read-skew.
+    base = pos.unsqueeze(1) - (W - 1) + arange_w.unsqueeze(0)
     ring_idx = base % W
     valid = (base >= 0) & (base <= pos.unsqueeze(1))
     out = torch.where(valid, ring_idx, torch.full_like(ring_idx, -1))

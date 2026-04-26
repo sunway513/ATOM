@@ -1,0 +1,27 @@
+2026-04-26:16:35:59 WARNING  [config.evaluate_config:281] --limit SHOULD ONLY BE USED FOR TESTING. REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.
+2026-04-26:16:36:01 INFO     [_cli.run:376] Selected Tasks: ['gsm8k']
+2026-04-26:16:36:02 INFO     [evaluator:211] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+2026-04-26:16:36:02 INFO     [evaluator:236] Initializing local-completions model, with arguments: {'model': '/data/hf_models/deepseek-ai/DeepSeek-V4-Pro', 'base_url': 'http://localhost:8000/v1/completions', 'num_concurrent': 1, 'max_retries': 3, 'tokenized_requests': False}
+2026-04-26:16:36:02 INFO     [models.openai_completions:42] Remote tokenizer not supported. Using huggingface tokenizer backend.
+2026-04-26:16:36:02 INFO     [models.api_models:172] Using max length 2048 - 1
+2026-04-26:16:36:02 INFO     [models.api_models:175] Concurrent requests are disabled. To enable concurrent requests, set `num_concurrent` > 1.
+2026-04-26:16:36:02 INFO     [models.api_models:193] Using tokenizer huggingface
+You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-26:16:36:05 INFO     [tasks:700] Selected tasks:
+2026-04-26:16:36:05 INFO     [tasks:691] Task: gsm8k (gsm8k/gsm8k.yaml)
+2026-04-26:16:36:05 INFO     [evaluator:314] gsm8k: Using gen_kwargs: {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}
+2026-04-26:16:36:05 WARNING  [evaluator:333] Overwriting default num_fewshot of gsm8k from 5 to 5
+2026-04-26:16:36:05 INFO     [api.task:311] Building contexts for gsm8k on rank 0...
+  0%|          | 0/20 [00:00<?, ?it/s]100%|██████████| 20/20 [00:00<00:00, 706.16it/s]
+2026-04-26:16:36:05 INFO     [evaluator:584] Running generate_until requests
+2026-04-26:16:36:05 INFO     [models.api_models:733] Tokenized requests are disabled. Context + generation length is not checked.
+Requesting API:   0%|          | 0/20 [00:00<?, ?it/s]Requesting API:   5%|▌         | 1/20 [00:25<08:07, 25.64s/it]Requesting API:  10%|█         | 2/20 [00:36<05:07, 17.09s/it]Requesting API:  15%|█▌        | 3/20 [00:55<05:06, 18.06s/it]Requesting API:  20%|██        | 4/20 [01:08<04:11, 15.74s/it]Requesting API:  25%|██▌       | 5/20 [01:51<06:24, 25.63s/it]Requesting API:  30%|███       | 6/20 [02:02<04:52, 20.89s/it]Requesting API:  35%|███▌      | 7/20 [02:25<04:37, 21.34s/it]Requesting API:  40%|████      | 8/20 [02:52<04:38, 23.25s/it]Requesting API:  45%|████▌     | 9/20 [03:28<04:58, 27.13s/it]Requesting API:  50%|█████     | 10/20 [03:44<03:58, 23.89s/it]Requesting API:  55%|█████▌    | 11/20 [04:17<03:58, 26.54s/it]Requesting API:  60%|██████    | 12/20 [04:36<03:14, 24.25s/it]Requesting API:  65%|██████▌   | 13/20 [04:51<02:30, 21.56s/it]Requesting API:  70%|███████   | 14/20 [05:40<02:57, 29.66s/it]Requesting API:  75%|███████▌  | 15/20 [06:02<02:17, 27.52s/it]Requesting API:  80%|████████  | 16/20 [06:12<01:28, 22.19s/it]Requesting API:  85%|████████▌ | 17/20 [06:40<01:11, 23.78s/it]Requesting API:  90%|█████████ | 18/20 [06:54<00:42, 21.03s/it]Requesting API:  95%|█████████▌| 19/20 [07:27<00:24, 24.45s/it]Requesting API: 100%|██████████| 20/20 [07:41<00:00, 21.44s/it]Requesting API: 100%|██████████| 20/20 [07:41<00:00, 23.08s/it]
+fatal: not a git repository: /home/pensun/ATOM/.git/worktrees/ATOM-lingpeng
+2026-04-26:16:43:47 INFO     [loggers.evaluation_tracker:247] Saving results aggregated
+local-completions ({'model': '/data/hf_models/deepseek-ai/DeepSeek-V4-Pro', 'base_url': 'http://localhost:8000/v1/completions', 'num_concurrent': 1, 'max_retries': 3, 'tokenized_requests': False}), gen_kwargs: ({}), limit: 20.0, num_fewshot: 5, batch_size: 1
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
+|gsm8k|      3|flexible-extract|     5|exact_match|↑  |  0.3|±  |0.1051|
+|     |       |strict-match    |     5|exact_match|↑  |  0.3|±  |0.1051|
+
