@@ -1010,48 +1010,109 @@ class Compressor(nn.Module):
             self.score_state.dtype
         )
 
-        # Per-seq compress-boundary: a seq triggers iff its LAST token in
-        # this batch satisfies ``(pos + 1) % ratio == 0``. cu_seqlens_q
-        # gives us each seq's last-token index in the packed buffer.
+        # Per-token compress-boundary: every token t where
+        # ``(positions[t] + 1) % ratio == 0`` triggers a compress emission.
+        # Bug 2 root cause: the prior code checked only each seq's LAST token,
+        # emitting at most one entry per seq and silently skipping all
+        # intermediate block boundaries during prefill.
         num_seqs = cu.numel() - 1
         if num_seqs == 0:
             return None
-        last_token_idx = cu[1:] - 1  # [num_seqs]
-        last_positions = positions[last_token_idx]  # [num_seqs]
-        compress_mask = (last_positions + 1) % ratio == 0  # [num_seqs] bool
-        compress_seqs = compress_mask.nonzero(as_tuple=False).flatten()
-        if compress_seqs.numel() == 0:
+
+        compress_token_mask = (positions + 1) % ratio == 0  # [num_tokens] bool
+        compress_token_indices = compress_token_mask.nonzero(as_tuple=False).flatten()
+        if compress_token_indices.numel() == 0:
             return None
 
         compressed_outputs: List[torch.Tensor] = []
-        for s_idx in compress_seqs.tolist():
-            slot = int(slot_indices[s_idx].item())
-            p_last = int(last_positions[s_idx].item())
-            if overlap:
-                state_slot = self.kv_state[slot]  # [ring_len, inner]
-                score_slot = self.score_state[slot]
-                kv_state_concat = torch.cat(
-                    [state_slot[:ratio, :d], state_slot[ratio:, d:]], dim=0
-                )
-                score_state_concat = torch.cat(
-                    [score_slot[:ratio, :d], score_slot[ratio:, d:]], dim=0
-                )
-                kv_seq = (kv_state_concat * score_state_concat.softmax(dim=0)).sum(
-                    dim=0, keepdim=True
-                )  # [1, d]
-                # Roll: just-completed window becomes the next overlap.
-                self.kv_state[slot, :ratio] = state_slot[ratio:]
-                self.score_state[slot, :ratio] = score_slot[ratio:]
-            else:
-                state_slot = self.kv_state[slot]
-                score_slot = self.score_state[slot]
-                kv_seq = (state_slot * score_slot.softmax(dim=0)).sum(
-                    dim=0, keepdim=True
-                )  # [1, inner]
+        # For overlap mode: track per-slot previous-window data to chain
+        # consecutive boundary emissions within the same seq. Each window's
+        # roll feeds the next window's overlap half, so these must be
+        # processed in t_idx order (sequential dependency within a slot).
+        slot_prev_kv: dict = {}
+        slot_prev_score: dict = {}
 
-            # Norm + RoPE + QAT round-trip (matches the legacy decode emit).
+        for t_idx_t in compress_token_indices:
+            t_idx = int(t_idx_t.item())
+            slot = int(slot_per_token[t_idx].item())
+            p = int(positions[t_idx].item())
+
+            # Determine if the full window [p+1-ratio .. p] is in the current
+            # batch for this seq. If the seq's first position in this batch is
+            # ≤ p+1-ratio, every window token is available in kv/score tensors
+            # and we can pool directly — avoiding stale kv_state reads caused
+            # by the global scatter overwriting intermediate window rows.
+            seq_id = int(seg_id[t_idx].item())
+            seq_batch_start = int(cu[seq_id].item())
+            seq_pos_start = int(positions[seq_batch_start].item())
+            win_start_pos = p + 1 - ratio
+
+            if seq_pos_start <= win_start_pos:
+                # Full window in current batch: pool from raw kv/score tensors.
+                win_batch_start = seq_batch_start + (win_start_pos - seq_pos_start)
+                kv_win = kv[win_batch_start : t_idx + 1].float()  # [ratio, coff*d]
+                score_win = score_with_ape[win_batch_start : t_idx + 1].float()
+
+                if overlap:
+                    # Overlap half: use tracked previous-window data (from
+                    # earlier boundary in this same call) or persistent state
+                    # (overlap half is NOT touched by the global scatter since
+                    # scatter writes to rows ratio+ only).
+                    if slot in slot_prev_kv:
+                        prev_kv = slot_prev_kv[slot]
+                        prev_score = slot_prev_score[slot]
+                    else:
+                        prev_kv = self.kv_state[slot, :ratio].float()
+                        prev_score = self.score_state[slot, :ratio].float()
+
+                    kv_concat = torch.cat([prev_kv[:, :d], kv_win[:, d:]], dim=0)
+                    score_concat = torch.cat(
+                        [prev_score[:, :d], score_win[:, d:]], dim=0
+                    )
+                    kv_seq = (kv_concat * score_concat.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+                    # Roll: current window becomes next overlap for this slot.
+                    slot_prev_kv[slot] = kv_win
+                    slot_prev_score[slot] = score_win
+                    # Persist overlap half for the next decode call.
+                    self.kv_state[slot, :ratio] = kv_win.to(self.kv_state.dtype)
+                    self.score_state[slot, :ratio] = score_win.to(
+                        self.score_state.dtype
+                    )
+                else:
+                    kv_seq = (kv_win * score_win.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+            else:
+                # Partial window: earlier tokens are in kv_state from previous
+                # calls. Valid for decode (1 token/seq/call): after the global
+                # scatter the state has the full window including the new token.
+                if overlap:
+                    state_slot = self.kv_state[slot].float()
+                    score_slot = self.score_state[slot].float()
+                    kv_concat = torch.cat(
+                        [state_slot[:ratio, :d], state_slot[ratio:, d:]], dim=0
+                    )
+                    score_concat = torch.cat(
+                        [score_slot[:ratio, :d], score_slot[ratio:, d:]], dim=0
+                    )
+                    kv_seq = (kv_concat * score_concat.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+                    # Roll: just-completed window becomes the next overlap.
+                    self.kv_state[slot, :ratio] = state_slot[ratio:]
+                    self.score_state[slot, :ratio] = score_slot[ratio:]
+                else:
+                    state_slot = self.kv_state[slot].float()
+                    score_slot = self.score_state[slot].float()
+                    kv_seq = (state_slot * score_slot.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+
+            # Norm + RoPE + QAT round-trip (matches the legacy emit).
             kv_seq = self.norm(kv_seq.to(dtype))
-            freqs = self.freqs_cis[p_last + 1 - ratio].unsqueeze(0)
+            freqs = self.freqs_cis[p + 1 - ratio].unsqueeze(0)
             _apply_rotary_emb(kv_seq[..., -rd:], freqs)
             if self.rotate:
                 kv_seq = rotate_activation(kv_seq)
@@ -1059,20 +1120,14 @@ class Compressor(nn.Module):
             else:
                 act_quant_inplace(kv_seq[..., :-rd], 64, self.scale_fmt)
 
-            # Per-seq compressed write target: kv_cache[slot, p_last // ratio].
-            # ``self.kv_cache`` is bound by the owning Indexer/Attention to
-            # the appropriate pool view (``indexer_kv`` for the Indexer's
-            # inner compressor; layer-local fallback for a plain Compressor).
+            # Write to kv_cache[slot, p // ratio].
             assert self.kv_cache is not None
-            self.kv_cache[slot, p_last // ratio] = kv_seq.squeeze(0).to(
-                self.kv_cache.dtype
-            )
+            self.kv_cache[slot, p // ratio] = kv_seq.squeeze(0).to(self.kv_cache.dtype)
             compressed_outputs.append(kv_seq)
 
         if not compressed_outputs:
             return None
-        # Stack per-seq emissions in slot order for callers that want to
-        # consume them downstream. Shape: [num_emit, 1, head_dim].
+        # Stack per-boundary emissions. Shape: [num_emit, 1, head_dim].
         return torch.stack(compressed_outputs, dim=0)
 
 

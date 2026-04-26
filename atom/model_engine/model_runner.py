@@ -1800,6 +1800,15 @@ class ModelRunner:
         if getattr(self, "_dsv4_pool", None) is None:
             self._dsv4_pool = self._build_dsv4_pool()
 
+        # Free slots for seqs that finished in the previous forward pass.
+        # finished_seq_ids is populated by Scheduler._emit_finish and carried
+        # through ScheduledBatch, bridging the cross-process gap where
+        # register_finish_listener is a no-op (scheduler in EngineCore parent,
+        # pool in ModelRunner child).
+        if batch is not None:
+            for sid in getattr(batch, "finished_seq_ids", []):
+                self._dsv4_pool.finish_request(sid)
+
         # Admit any seqs in this batch the pool hasn't seen yet. Idempotent
         # under re-admit (DSV4KVPool.admit_request returns the same slot).
         seq_ids: list[int] = []

@@ -285,3 +285,112 @@ class TestNoDsv4ScheduleListener:
             assert "register_finish_listener" in src or "scheduler" in src.lower()
         else:
             pytest.skip("_build_dsv4_pool not yet implemented")
+
+
+# ---------------------------------------------------------------------------
+# Sequential admit/finish lifecycle (Bug 3 regression guard)
+# ---------------------------------------------------------------------------
+
+
+class TestSequentialAdmitFinish:
+    """Regression guard for Bug 3: pool slots must be reusable after finish.
+
+    Root cause: in production the scheduler (EngineCore parent) and the
+    DSV4KVPool (ModelRunner child) live in separate processes.
+    ``register_finish_listener`` is a no-op there, so finish_request was
+    never called and pool slots were never recycled. The fix propagates
+    finished_seq_ids through ScheduledBatch so ModelRunner processes them
+    before admitting the next round.
+
+    This test exercises the pool directly (unit-level) to confirm the
+    admit→finish→re-admit contract is satisfied for sequential workloads.
+    """
+
+    def _make_pool(self, max_active_seqs: int = 1):
+        import torch
+
+        from atom.engine.kv_pool.dsv4_pool import DSV4KVPool, DSV4KVPoolConfig
+
+        cfg = DSV4KVPoolConfig(
+            max_active_seqs=max_active_seqs,
+            num_layers=2,
+            num_c4_layers=1,
+            num_c128_layers=1,
+            head_dim=32,
+            rope_head_dim=16,
+            window_size=32,
+            max_seq_len=128,
+            ring_size_main=32,
+            ring_size_compressor=8,
+            ring_size_indexer=32,
+            compress_ratio_per_layer=[4, 128],
+            state_inner_dim=32,
+            dtype=torch.float32,
+            state_dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+        return DSV4KVPool(cfg)
+
+    def test_sequential_admits_release_slots(self):
+        """max_active_seqs=1: admit req0, finish req0, admit req1 … must not raise.
+
+        This is the exact scenario that triggered Bug 3: lm_eval sequential
+        requests with a tight pool capacity crashed on request 2 because
+        finish_request was never called (cross-process no-op wiring).
+        """
+        pool = self._make_pool(max_active_seqs=1)
+
+        for seq_id in range(5):
+            slot = pool.admit_request(seq_id=seq_id)
+            assert (
+                0 <= slot < pool.max_active_seqs
+            ), f"slot {slot} out of range for seq_id={seq_id}"
+            pool.finish_request(seq_id=seq_id)
+
+        # After all 5 sequential requests the pool must be fully free again.
+        assert len(pool._free) == pool.max_active_seqs
+
+    def test_sequential_admits_no_slot_leak(self):
+        """Slots returned to the free list after finish_request (no leak)."""
+        pool = self._make_pool(max_active_seqs=2)
+
+        pool.admit_request(seq_id=10)
+        pool.admit_request(seq_id=11)
+        assert len(pool._free) == 0
+
+        pool.finish_request(seq_id=10)
+        assert len(pool._free) == 1
+
+        pool.finish_request(seq_id=11)
+        assert len(pool._free) == 2
+
+        # Both slots freed — a third pair must also succeed.
+        pool.admit_request(seq_id=20)
+        pool.admit_request(seq_id=21)
+        assert len(pool._free) == 0
+
+    def test_finished_seq_ids_processed_before_admit(self):
+        """ModelRunner must call finish_request BEFORE admit for the same batch.
+
+        Simulates the cross-process path: ScheduledBatch carries finished_seq_ids
+        from the previous round; _maybe_setup_dsv4_forward_batch must drain
+        them before calling admit_request for the new seqs.
+        """
+        import inspect
+
+        from atom.model_engine.model_runner import ModelRunner
+
+        src = inspect.getsource(ModelRunner._maybe_setup_dsv4_forward_batch)
+        # finished_seq_ids processing must appear before admit_request call.
+        finish_pos = src.find("finished_seq_ids")
+        admit_pos = src.find("admit_request")
+        assert (
+            finish_pos != -1
+        ), "finished_seq_ids not found in _maybe_setup_dsv4_forward_batch"
+        assert (
+            admit_pos != -1
+        ), "admit_request not found in _maybe_setup_dsv4_forward_batch"
+        assert finish_pos < admit_pos, (
+            "finish_request processing must precede admit_request in "
+            "_maybe_setup_dsv4_forward_batch (Bug 3 ordering invariant)"
+        )
