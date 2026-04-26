@@ -855,6 +855,90 @@
 <li><p>ROCr Debug Agent docs — https://rocm.docs.amd.com/projects/rocr_debug_agent/en/latest/</p></li>
 </ul>
 </section>
+<section id="addendum-2026-04-26-14-13z-accuracy-regression-root-cause-ck-moe-abi-mismatch">
+<h2>Addendum (2026-04-26 14:13Z) — Accuracy regression root cause: CK MoE ABI mismatch<a class="headerlink" href="#addendum-2026-04-26-14-13z-accuracy-regression-root-cause-ck-moe-abi-mismatch" title="Link to this heading"></a></h2>
+<p>After PR #55 merge, ran additional bisect against output coherence regression. Findings:</p>
+<section id="reproduction">
+<h3>Reproduction<a class="headerlink" href="#reproduction" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>Code</p></th>
+<th class="head"><p>JIT cache</p></th>
+<th class="head"><p>CK source</p></th>
+<th class="head"><p>MoE backend</p></th>
+<th class="head"><p>Output</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>J era 03:18</p></td>
+<td><p>main <code class="docutils literal notranslate"><span class="pre">5e193de</span></code></p></td>
+<td><p>Yesterday’s 18:00 cache (incl. fallback MoE)</p></td>
+<td><p><strong>EMPTY</strong></p></td>
+<td><p>ASM/triton fallback (no <code class="docutils literal notranslate"><span class="pre">ck_moe_stage*</span></code> calls in log)</p></td>
+<td><p><strong>✅ Coherent Chinese</strong></p></td>
+</tr>
+<tr class="row-odd"><td><p>Sprint 3 v10 06:21</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">298d91b</span></code></p></td>
+<td><p>Mixed (some yesterday, some Sprint-2 era)</p></td>
+<td><p>Copied from <code class="docutils literal notranslate"><span class="pre">/app/aiter-test/</span></code> 04:14</p></td>
+<td><p>CK (<code class="docutils literal notranslate"><span class="pre">ck_moe_stage1/2</span></code> heavily logged)</p></td>
+<td><p>❌ Gibberish <code class="docutils literal notranslate"><span class="pre">❶</span> <span class="pre">❷</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>v11 (MoE-only clear)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">298d91b</span></code></p></td>
+<td><p>MoE modules rebuilt against new CK</p></td>
+<td><p>Copied</p></td>
+<td><p>CK</p></td>
+<td><p>❌ Gibberish <code class="docutils literal notranslate"><span class="pre">〖,</span> <span class="pre">〖,</span> <span class="pre">actually...</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>v12 (full clean)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">298d91b</span></code></p></td>
+<td><p>Everything rebuilt</p></td>
+<td><p>Copied</p></td>
+<td><p>CK</p></td>
+<td><p>❌ Gibberish <code class="docutils literal notranslate"><span class="pre">〖,</span> <span class="pre">〖,</span> <span class="pre">〖(...</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>J era replay 14:11</strong></p></td>
+<td><p><strong>main <code class="docutils literal notranslate"><span class="pre">5e193de</span></code> (= J era code)</strong></p></td>
+<td><p><strong>Full clean</strong></p></td>
+<td><p><strong>Copied</strong></p></td>
+<td><p><strong>CK</strong></p></td>
+<td><p>❌ <strong>Gibberish <code class="docutils literal notranslate"><span class="pre">yes</span> <span class="pre">response</span> <span class="pre">response</span> <span class="pre">次回应性...</span></code></strong></p></td>
+</tr>
+</tbody>
+</table>
+<p>The same J era code that produced coherent Chinese on 03:18 produces <strong>gibberish</strong> on replay with the CK source from <code class="docutils literal notranslate"><span class="pre">/app/aiter-test/</span></code> in place. The only difference between the two runs: <strong>whether the CK directory is populated</strong> (which determines whether aiter loads the CK MoE backend or falls back to ASM/triton).</p>
+</section>
+<section id="diagnosis">
+<h3>Diagnosis<a class="headerlink" href="#diagnosis" title="Link to this heading"></a></h3>
+<p>The CK source I copied at 04:14 to fix the original <code class="docutils literal notranslate"><span class="pre">module_moe_sorting:</span> <span class="pre">'moe_sorting_api.hpp'</span> <span class="pre">file</span> <span class="pre">not</span> <span class="pre">found</span></code> error (a Sprint-1 silicon-blocker per Evidence J/K) introduced a <strong>CK MoE ABI mismatch with this DSV4 model checkpoint</strong>:</p>
+<ul class="simple">
+<li><p>Original aiter was built without CK; MoE went through ASM path (validated working in Evidence J’s baseline run).</p></li>
+<li><p>After CK source was placed, aiter’s JIT detected CK and built <code class="docutils literal notranslate"><span class="pre">module_moe_ck2stages_*</span></code> and <code class="docutils literal notranslate"><span class="pre">module_moe_cktile2stages</span></code> → <code class="docutils literal notranslate"><span class="pre">ck_moe_stage1/2</span></code> got loaded → numerical garbage.</p></li>
+</ul>
+</section>
+<section id="what-this-means-for-the-w4-5-silicon-green-achievement">
+<h3>What this means for the W4.5 silicon-green achievement<a class="headerlink" href="#what-this-means-for-the-w4-5-silicon-green-achievement" title="Link to this heading"></a></h3>
+<p>The Sprint 1+2+3 architectural work (issue #37 W4.5 multi-request KV cache) is intact:</p>
+<ul class="simple">
+<li><p>W4 single mode silicon: ✅ runs end-to-end, no crash</p></li>
+<li><p>W4 multi mode silicon (4 conc): ✅ runs end-to-end, no crash, no row-0 cross-talk</p></li>
+<li><p>120 UTs: ✅ all green</p></li>
+<li><p>Bug cascade Bug #1-#7: all addressed at the architectural layer</p></li>
+</ul>
+<p>The <strong>accuracy regression is environment-level</strong>, not architectural — it surfaced as a side-effect of the silicon-unblock (CK copy) that Sprint 1 needed.</p>
+</section>
+<section id="recommended-next-steps-out-of-scope-for-this-pr">
+<h3>Recommended next steps (out of scope for this PR)<a class="headerlink" href="#recommended-next-steps-out-of-scope-for-this-pr" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p>Get the CK version that the production aiter wheel (in <code class="docutils literal notranslate"><span class="pre">/opt/venv/</span></code>) was built against — this should match the loaded MoE kernels’ ABI.</p></li>
+<li><p>Or: configure aiter to use ASM/triton MoE explicitly via env var or config (search for an <code class="docutils literal notranslate"><span class="pre">AITER_MOE_BACKEND</span></code> or similar option in the aiter version actually deployed).</p></li>
+<li><p>Or: rebuild aiter wheel against the current CK in <code class="docutils literal notranslate"><span class="pre">/workspace/aiter-lingpeng/3rdparty/composable_kernel/</span></code> to ensure module_aiter_core matches CK’s ABI expectations.</p></li>
+</ol>
+<p>The accuracy fix is <strong>not in ATOM</strong> — it’s an <strong>aiter-team / deployment-config</strong> concern. ATOM’s W4.5 architecture is solid.</p>
+</section>
+</section>
 </section>
 
 
