@@ -12,10 +12,12 @@
 
 **Fix:** New `aiter/configs/model_configs/dsv4_fp4_tuned_fmoe.csv` (16 rows, adapted from `kimik2_fp4_tuned_fmoe.csv` with topk 9→6) routes every DSV4 MoE call to a registered FlyDSL FP4 stage1 kernel + CK FP4 stage2 kernel.
 
-**Status:**
+**Status (final after Sprint 4):**
 - ✅ aiter LOOKUP: 24 HIT / 0 MISS (was 24 MISS / 0 HIT)
 - ✅ W3 path single-mode silicon: gibberish "〖,〖" → real Chinese tokens "回覆"
-- ⚠️ W4 path multi-request still produces single-token collapse (token 7795 repeated) — **independent ATOM W4 KV-cache bug, not MoE**. Filed as follow-up sub-issue #37.W4-pool-collision.
+- ✅ W4 path bisected to 3 distinct bugs, all fixed in commits `3468abd` + `8fa0129`
+- ✅ W4 multi conc=4 silicon: distinct coherent outputs per request; idx=2 (Fibonacci prompt) returns fluent English
+- ✅ gsm8k W4-mode (USE_W4_PATH=1) end-to-end: **0.35 / 0.35** flexible/strict at limit=20 num_concurrent=1 (vs W3 baseline 0.30 / 0.30)
 
 ## Diagnostic timeline
 
@@ -189,3 +191,23 @@ Initial silicon retry showed `RuntimeError: DSV4KVPool: no free slot (max_active
 6. ✅ Silicon trace before claiming closure — caught the FP8→FP4 dispatch surprise that would have made the v1 port irrelevant
 
 The most expensive lesson: **`config.json` `weight_block_size:[128,128]` is the source-of-truth for the model card, not for the dispatch path.** ATOM's quant_v4 layer rewrites the dispatch dtype after model load. Future plans involving aiter MoE routing **must** trace `AITER_FMOE_DEBUG_LOOKUP=1` against silicon before assuming the dispatch dtype.
+
+## Sprint 4.5 — gsm8k v2 with max_gen_toks=1024
+
+After user comparison data (SGLang on B300 n=100: **0.96 ± 0.020**) revealed a real correctness gap, reran gsm8k with `max_gen_toks=1024` to test the truncation hypothesis (lm_eval default 256 is too short for V4 long-CoT).
+
+| Run | flexible-extract | strict-match | max_tokens | n | log |
+|---|---|---|---|---|---|
+| W4 v1 (default) | 0.35 ± 0.109 | 0.35 ± 0.109 | 256 | 20 | `m_gsm8k_w4_fp4.log` |
+| **W4 v2** | **0.40 ± 0.112** | 0.35 ± 0.109 | **1024** | 20 | `m_gsm8k_w4_v2_max_tokens_1024.log` |
+| SGLang B300 (ref) | 0.96 ± 0.020 | 0.96 ± 0.020 | (larger) | 100 | external |
+
+**Conclusion**: `max_gen_toks=1024` improves flexible-extract by 5pp but not strict-match. The truncation hypothesis is **partially confirmed** but **not the dominant gap factor** (still 56pp short of SGLang). Requests 14-20 took 30-72s vs 17-25s for early requests, consistent with longer CoT being generated to completion.
+
+Remaining gap candidates (still unresolved):
+- `apply_chat_template` — V4 chat template not applied via `tokenized_requests=False`
+- InferenceX-customized `gsm8k.yaml` with explicit `#### [number]` instruction
+- MXFP4 scale layout vs SGLang `flashinfer_mxfp4` backend
+- larger `max_gen_toks` (4096) — diminishing returns expected but worth confirming
+
+Evidence: `docs/evidence/dsv4_w45/artifacts/m_gsm8k_w4_v2_max_tokens_1024.log`
