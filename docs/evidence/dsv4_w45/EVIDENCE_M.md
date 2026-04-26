@@ -109,10 +109,25 @@ Each token's window now covers the W absolute positions ending at `pos[t]`:
 
 Existing `tests/test_deepseek_v4_w43_redo.py::TestPerTokenTopkHelper` (3 tests) still pass.
 
+## W4 fix silicon verify (single-request, USE_W4_PATH=1, post-topk-helper-fix)
+
+| Run | Output (first 16 token ids) | Pattern |
+|---|---|---|
+| W4 single (pre-fix) | 8385,6328,289,7795×N | single-token collapse on 7795 |
+| W4 single (post-fix) | 16520,33,7242,7242,7242,1613,7242,1613,…,7242,1613 | two-token alternation 7242↔1613 |
+
+Decoded: 7242="并且", 1613="...". The model now reads a fuller window (the topk helper fix is verified to take effect — the single-token attractor is gone), but still locks into a degenerate two-token loop. **This proves the topk helper was a real bug and the fix is directionally correct, but the W4 path has at least one additional independent bug** below this layer. Candidates ranked by likelihood:
+
+1. **Compressor / Indexer per-token state writes** under the W4 path (`Compressor._forward_w4`, `Indexer.forward` on the W4 branch). These were rewritten in W4.4 Sprint 2/3 to use the engine pool and may carry analogous index-skew bugs.
+2. **KV scatter target** under multi-step decode — `out_cache_loc = slot * ring_main + (positions % ring_main)` is correct for fresh prefill but the write/read symmetry assumes positions monotonically increase across forward calls. Worth verifying against actual `forward_batch.positions` per decode step.
+3. **Inverse RoPE on output** — `_apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)` uses `freqs_cis[positions]`; if `positions` for a decode step doesn't match the position at which the KV was originally scattered, the inverse RoPE removes the wrong rotation.
+
+These are W4-path issues and orthogonal to this PR's MoE scope. The topk-helper fix is committed in this PR (commit `3468abd`) because it is a small, contained bisection-driven fix with unit tests passing — incremental progress on #37 — but reaching the gsm8k W4 multi-request ≥60% gate is gated on the additional fix(es) above.
+
 ## What this Evidence does NOT cover
 
-- **gsm8k W4-path multi-request gate (≥60%)** — requires the W4 path fix above to land in main and a re-run. The fix is included in this PR; silicon verify is in flight.
-- **Performance impact** — this PR is correctness-only (registers existing kernels in tuned config + a 4-line topk helper fix). Performance is a separate sweep.
+- **gsm8k W4-path multi-request gate (≥60%)** — requires the additional W4-path fix(es) above. The topk helper fix in this PR is necessary but not sufficient.
+- **Performance impact** — this PR is correctness-only (CSV rows + topk helper). Performance is a separate sweep.
 
 ## Cross-repo PRs
 
