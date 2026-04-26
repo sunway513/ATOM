@@ -397,6 +397,40 @@ class Scheduler:
 
         self.kv_connector = get_kvconnector("scheduler", config)
 
+        # W4.3 (issue #37 P2.2): seq lifecycle event registry. ModelRunner
+        # subscribes its KV pool admit/finish methods here. Scheduler is
+        # pool-agnostic — it must not import or reference any concrete pool.
+        self._admit_listeners: list = []
+        self._finish_listeners: list = []
+
+    def register_admit_listener(self, fn) -> None:
+        """Subscribe a callable(seq_id: int) -> None to be invoked on admit.
+
+        Used by ModelRunner to wire pool admit_request without leaking
+        pool dependencies into the scheduler.
+        """
+        self._admit_listeners.append(fn)
+
+    def register_finish_listener(self, fn) -> None:
+        """Subscribe a callable(seq_id: int) -> None to be invoked on finish/preempt."""
+        self._finish_listeners.append(fn)
+
+    def _emit_admit(self, seq_id: int) -> None:
+        for listener in self._admit_listeners:
+            try:
+                listener(seq_id)
+            except Exception as e:
+                logger.warning("Seq admit listener %s raised %s; ignoring", listener, e)
+
+    def _emit_finish(self, seq_id: int) -> None:
+        for listener in self._finish_listeners:
+            try:
+                listener(seq_id)
+            except Exception as e:
+                logger.warning(
+                    "Seq finish listener %s raised %s; ignoring", listener, e
+                )
+
     def is_finished(self):
         return not self.waiting and not self.running
 
@@ -467,6 +501,7 @@ class Scheduler:
                 seq.status = SequenceStatus.RUNNING
                 seq.is_first_decode = True
                 self.running.append(seq)
+                self._emit_admit(seq.id)
                 continue
 
             num_seqs_prefill += 1
@@ -479,6 +514,7 @@ class Scheduler:
             self.running.append(seq)
             scheduled_seqs[seq.id] = seq
             num_scheduled_tokens.append(num_new_tokens)
+            self._emit_admit(seq.id)
 
         if skipped_waiting_requests:
             logger.debug(
@@ -577,6 +613,8 @@ class Scheduler:
         seq.spec_token_ids = np.array([], dtype=np.int32)
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
+        # Notify lifecycle subscribers: seq is no longer running.
+        self._emit_finish(seq.id)
 
     def postprocess(
         self,
@@ -729,6 +767,8 @@ class Scheduler:
             else:
                 self.block_manager.deallocate(seq)
             self.running.remove(seq)
+            # Notify lifecycle subscribers: seq has finished.
+            self._emit_finish(seq.id)
         return finished_seqs
 
     def _update_waiting_for_remote_kv(self, seq: Sequence) -> bool:
