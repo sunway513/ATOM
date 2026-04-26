@@ -1868,17 +1868,6 @@ class ModelRunner:
         if not self._is_dsv4_model():
             return None, None
 
-        # Hotfix (issue #37 W4.5 silicon evidence): warmup runs a dummy
-        # MAX_BATCHED_TOKENS-sized forward to allocate workspaces. Routing
-        # warmup through the W4 (multi-request) path triggers an HSA
-        # exception 0x1016 in sparse_attn / KV-scatter kernels because the
-        # dummy seq_lens / positions don't match the pool's slot-mapping
-        # contract. Skip W4 entirely on dummy runs — the legacy single-
-        # request fallback in deepseek_v4.py handles warmup zeros tensors
-        # correctly.
-        if batch is not None and getattr(batch, "is_dummy_run", False):
-            return None, None
-
         if not hasattr(self, "_dsv4_pool") or self._dsv4_pool is None:
             self._dsv4_pool = self._build_dsv4_pool()
 
