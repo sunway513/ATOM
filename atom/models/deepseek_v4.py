@@ -18,7 +18,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Iterable, Literal, Optional, Tuple
+from typing import Any, Iterable, List, Literal, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -555,35 +555,29 @@ class Compressor(nn.Module):
         self.norm = _RMSNorm(self.head_dim, args.norm_eps)
 
         # External tensors — assigned by the owning Attention / Indexer at first forward.
+        # Pre-W4.4 the decode-phase state below was held in two
+        # ``register_buffer``s (``kv_state`` / ``score_state``). Under
+        # multi-request concurrent decode that single buffer collided
+        # across requests (every seq overwrote row 0). W4.4-redo (issue
+        # sunway513/atom#37 Tasks 11/12) LIFTS ownership to the engine
+        # ``DSV4KVPool``: when the owning layer runs under a
+        # ``forward_batch`` with a pool, state is rebound to the pool's
+        # per-layer ``kv_state`` / ``score_state`` slabs (zero-copy
+        # ``view_for_layer``). The legacy single-request path lazy-
+        # allocates a layer-local buffer matching the pre-W4.4 shape,
+        # preserving PR1 toy / warmup bit-exactness.
         self.kv_cache: Optional[torch.Tensor] = None
         self.freqs_cis: Optional[torch.Tensor] = None
-
-        # Decode-phase state buffers. With overlap: state[:, :ratio] holds the
-        # overlapping window from the previous compression block; state[:, ratio:]
-        # holds the current in-progress window.
-        self.register_buffer(
-            "kv_state",
-            torch.zeros(
-                args.max_batch_size,
-                coff * compress_ratio,
-                coff * self.head_dim,
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "score_state",
-            torch.full(
-                (
-                    args.max_batch_size,
-                    coff * compress_ratio,
-                    coff * self.head_dim,
-                ),
-                float("-inf"),
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
+        # Plain attributes (NOT register_buffer):
+        #  - ``"kv_state" not in dict(model.named_buffers())``
+        #  - ``"score_state" not in dict(model.named_buffers())``
+        # Verified by tests/test_deepseek_v4_w44_state_redo.py.
+        self.kv_state: Optional[torch.Tensor] = None
+        self.score_state: Optional[torch.Tensor] = None
+        # Cached shapes for the legacy lazy allocator.
+        self._state_max_batch = args.max_batch_size
+        self._state_ring_len = coff * compress_ratio
+        self._state_inner_dim = coff * self.head_dim
 
     def get_kv_cache_spec(
         self,
@@ -628,19 +622,118 @@ class Compressor(nn.Module):
         new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
         return new_tensor
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> Optional[torch.Tensor]:
+    def _ensure_legacy_state(self, device: torch.device) -> None:
+        """Lazy-allocate the legacy single-request fallback state buffers.
+
+        W4.4-redo (issue sunway513/atom#37 Tasks 11/12): pre-W4.4 these
+        were ``register_buffer``s owned by the Compressor module. With
+        ownership lifted to ``DSV4KVPool``, the legacy single-request
+        path (PR1 toy / warmup) needs a local fallback that matches the
+        pre-W4.4 layout. Allocated on first forward when no pool is
+        available.
+
+        When ``forward_batch.kv_pool`` is provided, ``forward()`` rebinds
+        ``self.kv_state`` / ``self.score_state`` to the pool's per-layer
+        view BEFORE calling this — this method is a no-op on that path.
+        """
+        if self.kv_state is not None and self.score_state is not None:
+            return
+        self.kv_state = torch.zeros(
+            self._state_max_batch,
+            self._state_ring_len,
+            self._state_inner_dim,
+            dtype=torch.float32,
+            device=device,
+        )
+        self.score_state = torch.full(
+            (
+                self._state_max_batch,
+                self._state_ring_len,
+                self._state_inner_dim,
+            ),
+            float("-inf"),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def _bind_state_from_pool(
+        self, forward_batch: Optional[Any], layer_id: Optional[int]
+    ) -> bool:
+        """W4.4-redo path: rebind state to the pool's per-layer view.
+
+        Returns True iff the pool view was bound (caller is on the W4
+        multi-request path); False iff the legacy path applies.
+        """
+        if (
+            forward_batch is None
+            or getattr(forward_batch, "kv_pool", None) is None
+            or layer_id is None
+        ):
+            return False
+        view = forward_batch.kv_pool.view_for_layer(layer_id)
+        kv_state_view = view.get("kv_state")
+        score_state_view = view.get("score_state")
+        if kv_state_view is None or score_state_view is None:
+            return False
+        self.kv_state = kv_state_view
+        self.score_state = score_state_view
+        return True
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int = 0,
+        forward_batch: Optional[Any] = None,
+        layer_id: Optional[int] = None,
+    ) -> Optional[torch.Tensor]:
         """Compress KV for the input tokens. Writes into self.kv_cache when a
         compression block boundary is hit; otherwise just buffers state and returns None.
+
+        Two operating modes (W4.4-redo — issue sunway513/atom#37 Tasks 11/12):
+
+        - **W4 multi-request path** (``forward_batch`` carries a
+          ``DSV4KVPool``): per-token state writes via per-token slot/row
+          indexing into the pool's ``kv_state`` / ``score_state`` slab;
+          per-seq compress-boundary check ``(positions[t] + 1) % ratio
+          == 0`` (mirrors SGLang ``compressor.py:236``'s stateless ring-
+          slot math). Compressed entries land in ``kv_cache[slot, p_last
+          // ratio]`` so two seqs cannot share a write target.
+        - **Legacy single-request path** (``forward_batch`` is None):
+          identical to the pre-W4.4 ``forward(x, start_pos)`` semantics
+          using lazy-allocated local state buffers. Preserves PR1 toy /
+          warmup / single-seq-eager bit-exactness.
 
         Args:
             x: [num_tokens, dim] (2D, ATOM convention) or [B, S, dim] (3D, legacy).
                 2D input is treated as a single sequence (B=1 implicit).
             start_pos: starting position in the absolute sequence (0 = prefill).
+                Ignored when ``forward_batch`` drives the W4 path.
+            forward_batch: optional ``DSV4ForwardBatch`` enabling the W4
+                multi-request path with pool-owned state.
+            layer_id: optional global layer id used to fetch the pool's
+                per-layer state view. Required iff
+                ``forward_batch.kv_pool`` is not None.
         Returns:
             Compressed KV slice that was just written ([1, S/ratio, head_dim] in
             prefill, or [1, 1, head_dim] in decode), or None if no compression
             boundary was hit on this call.
         """
+        # W4.4-redo: bind state to the pool view (or fall back to legacy local).
+        bound_pool = self._bind_state_from_pool(forward_batch, layer_id)
+        if not bound_pool:
+            self._ensure_legacy_state(x.device)
+
+        # On the W4 path, dispatch to the dedicated per-token write
+        # branch. ``self.kv_cache`` is bound by the owning module
+        # (Indexer / Attention) BEFORE this call.
+        if (
+            forward_batch is not None
+            and getattr(forward_batch, "kv_pool", None) is not None
+            and bound_pool
+            and self.kv_cache is not None
+        ):
+            return self._forward_w4(x, forward_batch, layer_id)
+
         assert self.kv_cache is not None, "compressor.kv_cache must be set by owner"
         assert self.freqs_cis is not None, "compressor.freqs_cis must be set by owner"
         if x.dim() == 2:
@@ -772,6 +865,150 @@ class Compressor(nn.Module):
             self.kv_cache[:batch_decode, start_pos // ratio] = kv.squeeze(1)
         return kv
 
+    def _forward_w4(
+        self,
+        x: torch.Tensor,
+        forward_batch: Any,
+        layer_id: int,
+    ) -> Optional[torch.Tensor]:
+        """W4.4-redo multi-request Compressor forward (issue sunway513/atom#37 Tasks 11/12).
+
+        Implements per-token state scatter into the engine pool's
+        ``kv_state`` / ``score_state`` slabs and per-seq compress-boundary
+        emission. Mirrors SGLang ``compressor.py:236``'s ring-slot math:
+        each token writes to its OWN seq's slot row, the compress trigger
+        is checked per-seq using the seq's last-token absolute position,
+        and the compressed result lands in ``kv_cache[slot, p_last //
+        ratio]`` so two seqs can never share a write target.
+
+        Returns the compressed slice (per-seq packed in slot order) if
+        any seq triggered compression on this step, otherwise ``None``.
+        Per-seq concatenation with the window KV at the attention layer
+        is silicon territory; this method only owns state writes and
+        the per-seq compressed-cache scatter.
+        """
+        assert self.kv_state is not None and self.score_state is not None
+        assert self.freqs_cis is not None, "compressor.freqs_cis must be set by owner"
+
+        if x.dim() == 2:
+            # [num_tokens, dim] is the W4 packed-batch ATOM convention.
+            x_flat = x
+        else:
+            # Legacy 3D arrival — flatten the implicit batch dim.
+            x_flat = x.reshape(-1, x.size(-1))
+
+        ratio = self.compress_ratio
+        overlap = self.overlap
+        d = self.head_dim
+        rd = self.rope_head_dim
+        dtype = x.dtype if x.dim() == 2 else x.flatten(0, 1).dtype
+
+        # All compressor math runs in fp32 for stability (matches legacy).
+        x_f32 = x_flat.float()
+        kv = self.wkv(x_f32)  # [num_tokens, coff*d]
+        score = self.wgate(x_f32)  # [num_tokens, coff*d]
+
+        device = x.device
+        positions = forward_batch.positions.to(device=device, dtype=torch.long)
+        cu = forward_batch.cu_seqlens_q.to(device=device, dtype=torch.long)
+        slot_indices = forward_batch.req_pool_indices.to(
+            device=device, dtype=torch.long
+        )
+        num_tokens = positions.numel()
+        if num_tokens == 0:
+            return None
+
+        # Per-token slot lookup (same bucketize used by compute_out_cache_loc).
+        token_idx = torch.arange(num_tokens, dtype=torch.long, device=device)
+        seg_id = torch.bucketize(token_idx, cu[1:], right=True)
+        slot_per_token = slot_indices[seg_id]  # [num_tokens]
+
+        # Add APE per-token (legacy decode adds ape[start_pos % ratio] per
+        # decode step; W4 generalizes to per-token absolute position).
+        score_with_ape = score + self.ape[positions % ratio]
+
+        # Per-token state row index. In overlap mode every "live" token
+        # writes into the current half at offset ``ratio + (pos % ratio)``.
+        # The previous-window half is rolled at compress-boundary triggers
+        # below. In non-overlap mode tokens go straight to ``pos % ratio``.
+        if overlap:
+            row_in_state = ratio + (positions % ratio)
+        else:
+            row_in_state = positions % ratio
+
+        # Per-token scatter via 2D advanced indexing into kv_state /
+        # score_state. (slot_per_token, row_in_state) is a paired index;
+        # PyTorch broadcasts these into a single advanced-index gather/put.
+        self.kv_state[slot_per_token, row_in_state] = kv.to(self.kv_state.dtype)
+        self.score_state[slot_per_token, row_in_state] = score_with_ape.to(
+            self.score_state.dtype
+        )
+
+        # Per-seq compress-boundary: a seq triggers iff its LAST token in
+        # this batch satisfies ``(pos + 1) % ratio == 0``. cu_seqlens_q
+        # gives us each seq's last-token index in the packed buffer.
+        num_seqs = cu.numel() - 1
+        if num_seqs == 0:
+            return None
+        last_token_idx = cu[1:] - 1  # [num_seqs]
+        last_positions = positions[last_token_idx]  # [num_seqs]
+        compress_mask = (last_positions + 1) % ratio == 0  # [num_seqs] bool
+        compress_seqs = compress_mask.nonzero(as_tuple=False).flatten()
+        if compress_seqs.numel() == 0:
+            return None
+
+        compressed_outputs: List[torch.Tensor] = []
+        for s_idx in compress_seqs.tolist():
+            slot = int(slot_indices[s_idx].item())
+            p_last = int(last_positions[s_idx].item())
+            if overlap:
+                state_slot = self.kv_state[slot]  # [ring_len, inner]
+                score_slot = self.score_state[slot]
+                kv_state_concat = torch.cat(
+                    [state_slot[:ratio, :d], state_slot[ratio:, d:]], dim=0
+                )
+                score_state_concat = torch.cat(
+                    [score_slot[:ratio, :d], score_slot[ratio:, d:]], dim=0
+                )
+                kv_seq = (kv_state_concat * score_state_concat.softmax(dim=0)).sum(
+                    dim=0, keepdim=True
+                )  # [1, d]
+                # Roll: just-completed window becomes the next overlap.
+                self.kv_state[slot, :ratio] = state_slot[ratio:]
+                self.score_state[slot, :ratio] = score_slot[ratio:]
+            else:
+                state_slot = self.kv_state[slot]
+                score_slot = self.score_state[slot]
+                kv_seq = (state_slot * score_slot.softmax(dim=0)).sum(
+                    dim=0, keepdim=True
+                )  # [1, inner]
+
+            # Norm + RoPE + QAT round-trip (matches the legacy decode emit).
+            kv_seq = self.norm(kv_seq.to(dtype))
+            freqs = self.freqs_cis[p_last + 1 - ratio].unsqueeze(0)
+            _apply_rotary_emb(kv_seq[..., -rd:], freqs)
+            if self.rotate:
+                kv_seq = rotate_activation(kv_seq)
+                fp4_act_quant_inplace(kv_seq, _FP4_BLOCK_SIZE)
+            else:
+                act_quant_inplace(kv_seq[..., :-rd], 64, self.scale_fmt)
+
+            # Per-seq compressed write target: kv_cache[slot, p_last // ratio].
+            # ``self.kv_cache`` is bound by the owning Indexer/Attention to
+            # the appropriate pool view (``indexer_kv`` for the Indexer's
+            # inner compressor; layer-local fallback for a plain Compressor).
+            assert self.kv_cache is not None
+            self.kv_cache[slot, p_last // ratio] = kv_seq.squeeze(0).to(
+                self.kv_cache.dtype
+            )
+            compressed_outputs.append(kv_seq)
+
+        if not compressed_outputs:
+            return None
+        # Stack per-seq emissions in slot order for callers that want to
+        # consume them downstream. Shape: [num_emit, 1, head_dim].
+        return torch.stack(compressed_outputs, dim=0)
+
 
 class Indexer(nn.Module):
     """Selects top-k compressed KV positions for sparse attention via learned scoring.
@@ -824,15 +1061,22 @@ class Indexer(nn.Module):
             rotate=True,
             prefix=f"{prefix}.compressor",
         )
-        self.register_buffer(
-            "kv_cache",
-            torch.zeros(
-                args.max_batch_size,
-                args.max_seq_len // compress_ratio,
-                self.head_dim,
-            ),
-            persistent=False,
-        )
+        # ----- KV cache lifetime — W4.4-redo (issue sunway513/atom#37 Tasks 11/12) -----
+        # Pre-W4.4 this was a ``register_buffer("kv_cache", ...)`` owned
+        # by the Indexer. Under multi-request decode that single buffer
+        # collided across requests (every seq overwrote slot 0). W4.4-redo
+        # lifts ownership to the engine ``DSV4KVPool``: when the model
+        # runs under a ``forward_batch`` with a pool, the layer rebinds
+        # ``self.kv_cache`` to the pool's per-layer ``indexer_kv`` view
+        # at every forward (zero-copy slice). The legacy single-request
+        # path lazy-allocates a layer-local buffer matching the pre-W4.4
+        # shape. Plain attribute (NOT register_buffer):
+        #   - ``"kv_cache" not in dict(model.named_buffers())``
+        #   - W4 multi-request path uses the pool view
+        #   - Legacy / warmup path uses the lazy local fallback
+        self.kv_cache: Optional[torch.Tensor] = None
+        self._kv_cache_legacy_max_batch = args.max_batch_size
+        self._kv_cache_legacy_len = args.max_seq_len // compress_ratio
         self.freqs_cis: Optional[torch.Tensor] = None
 
     def get_kv_cache_spec(
@@ -857,14 +1101,60 @@ class Indexer(nn.Module):
             compress_ratio=self.compress_ratio,
         )
 
+    def _ensure_legacy_kv_cache(self, device: torch.device, dtype: torch.dtype) -> None:
+        """Lazy-allocate the legacy single-request fallback ``kv_cache``.
+
+        W4.4-redo (issue sunway513/atom#37 Tasks 11/12): when running
+        without an engine pool we need a layer-local buffer matching
+        the pre-W4.4 ``register_buffer`` layout. Allocate on first
+        forward when ``self.kv_cache is None``. On the W4 path the
+        per-layer pool view is bound BEFORE this method runs, so it's
+        a no-op.
+        """
+        if self.kv_cache is not None:
+            return
+        self.kv_cache = torch.zeros(
+            self._kv_cache_legacy_max_batch,
+            self._kv_cache_legacy_len,
+            self.head_dim,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _bind_kv_cache_from_pool(
+        self, forward_batch: Optional[Any], layer_id: Optional[int]
+    ) -> bool:
+        """W4.4-redo path: rebind ``self.kv_cache`` to the pool's indexer view."""
+        if (
+            forward_batch is None
+            or getattr(forward_batch, "kv_pool", None) is None
+            or layer_id is None
+        ):
+            return False
+        view = forward_batch.kv_pool.view_for_layer(layer_id)
+        indexer_view = view.get("indexer_kv")
+        if indexer_view is None:
+            return False
+        self.kv_cache = indexer_view
+        return True
+
     def forward(
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
         start_pos: int,
         offset: int,
+        forward_batch: Optional[Any] = None,
+        layer_id: Optional[int] = None,
     ) -> torch.Tensor:
         """Compute sparse top-k indices over the indexer's compressed KV cache.
+
+        W4.4-redo (issue sunway513/atom#37 Tasks 11/12): when
+        ``forward_batch`` carries an engine ``DSV4KVPool``,
+        ``self.kv_cache`` is rebound to the pool's per-layer indexer
+        view (zero-copy) and the inner Compressor consumes the pool's
+        compressor state slab via per-token writes. The legacy single-
+        request path keeps the lazy-allocated layer-local buffer.
 
         Args:
             x: [num_tokens, dim] input hidden states (for compressor + weights_proj).
@@ -872,6 +1162,8 @@ class Indexer(nn.Module):
             start_pos: absolute sequence start position.
             offset: offset added to returned indices to land them in the
                 concatenated (window || compressed) KV layout consumed by sparse_attn.
+            forward_batch: optional ``DSV4ForwardBatch`` for the W4 path.
+            layer_id: global layer id (required iff ``forward_batch`` has a pool).
         Returns:
             topk_idxs: [1, num_tokens, K] int (B=1 implicit). -1 = future-masked.
         """
@@ -883,9 +1175,19 @@ class Indexer(nn.Module):
         rd = self.rope_head_dim
         end_pos = start_pos + seqlen
 
-        # Lazy plumb the indexer's kv_cache + freqs_cis into its compressor.
-        if self.compressor.kv_cache is None:
+        # W4.4-redo: rebind kv_cache to the pool view if available; else
+        # ensure legacy local buffer is allocated.
+        bound_pool = self._bind_kv_cache_from_pool(forward_batch, layer_id)
+        if not bound_pool:
+            self._ensure_legacy_kv_cache(x.device, x.dtype)
+
+        # Plumb the inner compressor's kv_cache (write target) and
+        # freqs_cis. On the W4 path the inner compressor's W4 forward
+        # uses ``self.kv_cache`` already bound to the pool's indexer
+        # view, so we propagate that binding here too.
+        if self.compressor.kv_cache is None or bound_pool:
             self.compressor.kv_cache = self.kv_cache
+        if self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
 
         # ----- Indexer Q (2D Linear, then add B=1 dim for RoPE / einsum) -----
@@ -896,7 +1198,15 @@ class Indexer(nn.Module):
         fp4_act_quant_inplace(q, _FP4_BLOCK_SIZE)
 
         # ----- Indexer KV (Compressor takes 2D, mutates kv_cache) -----
-        self.compressor(x, start_pos)
+        # On the W4 path the inner Compressor consumes forward_batch +
+        # layer_id directly, performing per-token state writes through
+        # the pool views. Legacy path keeps the (x, start_pos) signature.
+        if bound_pool:
+            self.compressor(
+                x, start_pos=start_pos, forward_batch=forward_batch, layer_id=layer_id
+            )
+        else:
+            self.compressor(x, start_pos)
         # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
             self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
@@ -1246,15 +1556,25 @@ class DeepseekV4Attention(nn.Module):
         # forward (seqlen=MAX_BATCHED_TOKENS with zeros) fills these buffers
         # with garbage. Real prefill only overwrites a few slots, leaving
         # stale warmup data that poisons decode attention.
+        # W4.4-redo: Compressor state and Indexer kv_cache are now plain
+        # attributes lazy-allocated by ``_ensure_legacy_state`` /
+        # ``_ensure_legacy_kv_cache`` on the first compressor/indexer
+        # call. Guard the reset on ``is not None`` for the very first
+        # forward where they haven't been allocated yet.
         if start_pos == 0:
             self.kv_cache.zero_()
             if self.compress_ratio:
-                self.compressor.kv_state.zero_()
-                self.compressor.score_state.fill_(float("-inf"))
+                if self.compressor.kv_state is not None:
+                    self.compressor.kv_state.zero_()
+                if self.compressor.score_state is not None:
+                    self.compressor.score_state.fill_(float("-inf"))
                 if self.indexer is not None:
-                    self.indexer.kv_cache.zero_()
-                    self.indexer.compressor.kv_state.zero_()
-                    self.indexer.compressor.score_state.fill_(float("-inf"))
+                    if self.indexer.kv_cache is not None:
+                        self.indexer.kv_cache.zero_()
+                    if self.indexer.compressor.kv_state is not None:
+                        self.indexer.compressor.kv_state.zero_()
+                    if self.indexer.compressor.score_state is not None:
+                        self.indexer.compressor.score_state.fill_(float("-inf"))
 
         # ----- Q: low-rank projection + per-head RMSNorm + partial RoPE -----
         # ATOM TP linears require 2D inputs; subsequent ops (RoPE, sparse_attn)
@@ -1399,11 +1719,12 @@ class DeepseekV4Attention(nn.Module):
         eliminating the row-0 collision class of bugs documented in
         W3.2 v3..v6.1.
 
-        Compressor / Indexer state remains ``register_buffer``-owned in
-        Task 10 (lifted to the pool by Tasks 11/12). The W4 path here
-        skips compressor/indexer activations and uses window-only
-        topk_idxs. Compressed-attention multi-request prefill is
-        explicitly out of scope until Tasks 11/12.
+        Compressor / Indexer state has been migrated to the engine pool
+        in Tasks 11/12 (W4.4-redo). For HCA-only layers (compress_ratio
+        >= 8 with no Indexer) the standalone Compressor's per-token
+        state writes happen here via ``forward_batch + layer_id``. For
+        C4 layers (Indexer present) the Indexer wraps the inner
+        Compressor and is invoked during topk build.
 
         Args:
             x: ``[num_tokens, dim]`` flat ATOM convention.
@@ -1423,12 +1744,22 @@ class DeepseekV4Attention(nn.Module):
 
         positions = forward_batch.positions  # [num_tokens] long
         rd = self.rope_head_dim
+        win = self.window_size
+        ratio = self.compress_ratio
 
         # Per-layer pool view: [num_active_seqs, ring_main, head_dim].
         # Zero-copy slice; rebound every step.
         pool_view = forward_batch.kv_pool.view_for_layer(self.layer_id)
         kv_cache_view = pool_view["kv_cache"]
         n_slots, ring_main, head_dim = kv_cache_view.shape
+
+        # W4.4-redo: plumb freqs_cis to the compressor/indexer (state
+        # is engine-pool-owned; only freqs_cis still flows from here).
+        if self.compress_ratio:
+            if self.compressor is not None and self.compressor.freqs_cis is None:
+                self.compressor.freqs_cis = self.freqs_cis
+            if self.indexer is not None and self.indexer.freqs_cis is None:
+                self.indexer.freqs_cis = self.freqs_cis
 
         # ---- Per-token RoPE (CRITICAL — was the W3.2-v5 wall) ----
         # Gather one row per token by absolute position. Under
@@ -1474,6 +1805,43 @@ class DeepseekV4Attention(nn.Module):
 
         # ---- Per-token window topk_idxs ----
         topk_idxs = self._build_topk_per_token(forward_batch)  # [1, T, win] int64
+
+        # W4.4-redo (Tasks 11/12): drive Compressor / Indexer per-token
+        # state writes through the pool. For C4 layers the Indexer
+        # wraps the inner Compressor and emits its compress topk_idxs;
+        # for HCA-only layers we drive the standalone Compressor's
+        # state writes here and use the helper-built compress topk.
+        if self.compress_ratio:
+            offset = win
+            # Use first token's position as the legacy-compatible
+            # start_pos for the Indexer's mask construction; the W4
+            # path's per-seq state writes are driven by
+            # forward_batch.positions internally.
+            sp = int(positions[0].item()) if positions.numel() > 0 else 0
+            if self.indexer is not None:
+                compress_topk_idxs = self.indexer(
+                    x,
+                    qr,
+                    sp,
+                    offset,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                )
+            else:
+                # Standalone Compressor (HCA-only). Drive its per-token
+                # state writes via the W4 path, then build the compress
+                # topk via the legacy helper (the helper only needs
+                # ratio + start_pos to enumerate compressed positions).
+                self.compressor(
+                    x,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                )
+                compress_topk_idxs = _get_compress_topk_idxs(
+                    ratio, 1, seqlen, sp, offset, device=x.device
+                )
+            topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
+
         topk_idxs = topk_idxs.int()
 
         # ---- Build per-token KV slabs: each token attends to its OWN
