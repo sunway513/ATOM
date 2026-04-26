@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: MIT
-"""W3.2-final / Path 2 (issue #37): DSV4 multi-request guard.
+"""W4.3 / Path 2 (issue #37): DSV4 multi-request guard.
 
-These tests exercise the **production** guard `_validate_dsv4_multireq`
-(module-level helper in `atom.config`) directly, so they cannot drift
-from the actual code path Config.__post_init__ takes. A separate
-integration test instantiates Config via `object.__new__(Config)` and
-exercises the same call site.
+Behavior contract (post-W4.3 PR landing):
+
+- The guard NO LONGER raises for DSV4 + ``max_num_seqs > 1`` by default.
+  The W4 path (DSV4KVPool + DSV4ForwardBatch + DeepseekV4Attention.forward
+  consuming both) makes multi-request safe.
+- The guard emits a one-time INFO log on the first DSV4 multi-request
+  config seen.
+- The legacy ``ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`` env override is still
+  honored as a short-circuit (skips even the log).
+- An ``ATOM_DSV4_FORCE_STRICT_GUARD=1`` debug knob restores the
+  pre-W4.3 raise, used only for regression bisection.
+
+These tests exercise the production helpers directly, so they cannot
+drift from the actual code path Config.__post_init__ takes.
 """
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -22,6 +32,17 @@ from atom.utils.dsv4_guard import (
     is_dsv4_arch as _is_dsv4_arch,
     validate_dsv4_multireq as _validate_dsv4_multireq,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_emit_once_flag():
+    """Each test starts with a fresh _INFO_LOG_EMITTED state."""
+    import atom.utils.dsv4_guard as g_mod
+
+    prev = g_mod._INFO_LOG_EMITTED
+    g_mod._INFO_LOG_EMITTED = False
+    yield
+    g_mod._INFO_LOG_EMITTED = prev
 
 
 class TestIsDsv4Arch:
@@ -52,25 +73,32 @@ class TestIsDsv4Arch:
         assert not _is_dsv4_arch([])
 
 
-class TestValidateDsv4Multireq:
-    """Production guard truth-table coverage (calls real
-    `_validate_dsv4_multireq`, not a copy)."""
+class TestValidateDsv4MultireqRelaxed:
+    """W4.3+ relaxed-guard truth-table coverage."""
 
-    def test_dsv4_arch_rejects_max_num_seqs_2(self):
+    def test_dsv4_arch_accepts_max_num_seqs_2(self, caplog):
+        """W4.3 unlock: max_num_seqs > 1 no longer raises."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
-            with pytest.raises(ValueError, match="max_num_seqs=1"):
+            os.environ.pop("ATOM_DSV4_FORCE_STRICT_GUARD", None)
+            with caplog.at_level(logging.INFO, logger="atom"):
+                # No raise expected
                 _validate_dsv4_multireq(
                     architectures=["DeepseekV4ForCausalLM"], max_num_seqs=2
                 )
+            # The W4.3 INFO log is emitted exactly once on the first
+            # DSV4 multi-request config seen.
+            assert any(
+                "W4 path" in rec.getMessage() for rec in caplog.records
+            ), "Expected a W4 multi-request INFO log on first call"
 
     def test_dsv4_arch_accepts_max_num_seqs_1(self):
-        # No env override needed; should be silent.
+        # max_num_seqs == 1 is silent (no log, no raise)
         _validate_dsv4_multireq(architectures=["DeepseekV4ForCausalLM"], max_num_seqs=1)
 
-    def test_dsv4_arch_with_override_accepts_max_num_seqs_4(self):
+    def test_dsv4_arch_with_legacy_override_accepts_max_num_seqs_4(self):
+        """Legacy env override is still honored (defensive backward compat)."""
         with patch.dict(os.environ, {"ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1"}):
-            # Re-import envs so the lazy lambda re-reads os.environ.
             import importlib
 
             from atom.utils import envs as envs_mod
@@ -89,32 +117,88 @@ class TestValidateDsv4Multireq:
         ]:
             _validate_dsv4_multireq(architectures=[arch], max_num_seqs=512)
 
-    def test_dsv4_arch_name_variants(self):
+    def test_dsv4_arch_name_variants_all_accept(self):
+        """All DSV4 arch name variants accept multi-request."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
+            os.environ.pop("ATOM_DSV4_FORCE_STRICT_GUARD", None)
             for arch in [
                 "DeepseekV4ForCausalLM",
                 "DeepSeekV4ForCausalLM",
                 "DeepseekV4ForCausalLM_MLA",
             ]:
-                with pytest.raises(ValueError, match="max_num_seqs=1"):
-                    _validate_dsv4_multireq(architectures=[arch], max_num_seqs=2)
+                # No raise expected
+                _validate_dsv4_multireq(architectures=[arch], max_num_seqs=2)
 
     def test_empty_architectures_unaffected(self):
         # Configs with no architectures list (rare; warmup paths) skip guard.
         _validate_dsv4_multireq(architectures=[], max_num_seqs=4)
 
-    def test_error_message_points_users_to_remediation(self):
+    def test_info_log_emitted_only_once_per_process(self, caplog):
+        """The migration INFO log is emitted at most once per process."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
-            with pytest.raises(ValueError) as exc_info:
+            os.environ.pop("ATOM_DSV4_FORCE_STRICT_GUARD", None)
+            with caplog.at_level(logging.INFO, logger="atom"):
+                _validate_dsv4_multireq(
+                    architectures=["DeepseekV4ForCausalLM"], max_num_seqs=2
+                )
                 _validate_dsv4_multireq(
                     architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
                 )
-            msg = str(exc_info.value)
-            assert "issues/37" in msg
-            assert "ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1" in msg
-            assert "feat/dsv4-forward-batch-paged-kv" in msg
+                _validate_dsv4_multireq(
+                    architectures=["DeepseekV4ForCausalLM"], max_num_seqs=8
+                )
+            w4_msgs = [rec for rec in caplog.records if "W4 path" in rec.getMessage()]
+            assert len(w4_msgs) == 1, (
+                f"Expected exactly 1 W4 INFO log across 3 calls, got "
+                f"{len(w4_msgs)}: {[m.getMessage() for m in w4_msgs]}"
+            )
+
+
+class TestForceStrictGuardEscapeHatch:
+    """ATOM_DSV4_FORCE_STRICT_GUARD=1 restores legacy raise for bisection."""
+
+    def test_force_strict_re_enables_raise(self):
+        with patch.dict(
+            os.environ,
+            {"ATOM_DSV4_FORCE_STRICT_GUARD": "1"},
+            clear=False,
+        ):
+            os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
+            with pytest.raises(ValueError, match="strict guard re-enabled"):
+                _validate_dsv4_multireq(
+                    architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+                )
+
+    def test_force_strict_off_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
+            os.environ.pop("ATOM_DSV4_FORCE_STRICT_GUARD", None)
+            # No raise (default off)
+            _validate_dsv4_multireq(
+                architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+            )
+
+    def test_force_strict_short_circuited_by_legacy_unsafe_override(self):
+        """If user set BOTH the legacy override and the strict guard, the
+        legacy override wins (it's the earlier exit branch)."""
+        with patch.dict(
+            os.environ,
+            {
+                "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1",
+                "ATOM_DSV4_FORCE_STRICT_GUARD": "1",
+            },
+        ):
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            # No raise: the legacy short-circuit wins.
+            _validate_dsv4_multireq(
+                architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+            )
 
 
 class TestConfigIntegration:

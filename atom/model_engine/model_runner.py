@@ -1812,6 +1812,16 @@ class ModelRunner:
             reqs_across_dp,
         )
 
+        # W4.3 (issue #37 Path 3): for DeepseekV4, lazy-init the engine-
+        # owned KV pool, admit any new seqs in this batch, and stash both
+        # the pool + (optionally) a prebuilt DSV4ForwardBatch into the
+        # ForwardContext so the model layers can consume them.
+        dsv4_pool, dsv4_forward_batch = self._maybe_setup_dsv4_forward_batch(
+            batch=batch,
+            attn_metadata=attn_metadata,
+            positions=positions,
+        )
+
         set_forward_context(
             attn_metadata=attn_metadata,
             atom_config=self.config,
@@ -1820,8 +1830,170 @@ class ModelRunner:
             num_tokens_across_dp=num_tokens_across_dp,
             spec_decode_metadata=spec_decode_metadata,
             ubatch_slices=ubatch_slices,
+            dsv4_forward_batch=dsv4_forward_batch,
+            dsv4_pool=dsv4_pool,
         )
         return graph_bs
+
+    # ------------------------------------------------------------------
+    # W4.3: DSV4-specific helpers (issue #37 Path 3).
+    # ------------------------------------------------------------------
+
+    def _is_dsv4_model(self) -> bool:
+        """True iff the active model is a DeepSeek-V4 architecture."""
+        archs = getattr(self.config.hf_config, "architectures", []) or []
+        return any("DeepseekV4" in a or "DeepSeekV4" in a for a in archs)
+
+    def _maybe_setup_dsv4_forward_batch(
+        self,
+        batch: Optional[ScheduledBatch],
+        attn_metadata,
+        positions: torch.Tensor,
+    ):
+        """W4.3 (issue #37 Path 3): wire DSV4 pool + ForwardBatch into the
+        forward step.
+
+        Lazy-init the pool on first call. On every step, admit any seqs
+        in this batch that the pool hasn't seen yet — keeps slot rows
+        stable across decode iterations. Finishing seqs are freed by
+        :meth:`finish_dsv4_request` invoked from the scheduler-side glue
+        in :meth:`postprocess`/the engine-core finalization path.
+
+        Returns
+        -------
+        ``(pool, forward_batch)`` — both are ``None`` for non-DSV4
+        models, so callers can pass the result straight to
+        ``set_forward_context`` without further branching.
+        """
+        if not self._is_dsv4_model():
+            return None, None
+
+        if not hasattr(self, "_dsv4_pool") or self._dsv4_pool is None:
+            self._dsv4_pool = self._build_dsv4_pool()
+
+        # Admit any seqs in this batch the pool hasn't seen yet. The pool
+        # ``admit_request`` is idempotent so it's safe to call every step.
+        seq_ids: list[int] = []
+        if batch is not None:
+            seq_ids = list(batch.req_ids)
+            for sid in seq_ids:
+                self._dsv4_pool.admit_request(sid)
+
+        # Build the per-step DSV4ForwardBatch. It's OK to defer this to
+        # the model wrapper (which calls from_attn_metadata) — but doing
+        # it here once means the model side avoids redundant rebuilds.
+        forward_batch = None
+        if attn_metadata is not None and positions is not None:
+            try:
+                from atom.utils.dsv4_forward_batch import DSV4ForwardBatch
+
+                forward_batch = DSV4ForwardBatch.from_attn_metadata(
+                    attn_metadata,
+                    positions,
+                    seq_ids=seq_ids if seq_ids else None,
+                    pool=self._dsv4_pool,
+                )
+            except Exception as e:
+                # Defensive: if FB construction fails for an edge-case
+                # batch shape, fall back to None so the model uses its
+                # legacy single-request path. We still return the pool
+                # so the model layers can do per-token writes if they
+                # build a FB from forward_context themselves.
+                logger.warning(
+                    "DSV4: failed to build ForwardBatch from attn_metadata "
+                    "(%s); falling back to legacy start_pos path",
+                    e,
+                )
+                forward_batch = None
+        return self._dsv4_pool, forward_batch
+
+    def _build_dsv4_pool(self):
+        """Allocate a :class:`DSV4KVPool` sized from the loaded model.
+
+        Reads layer count, head dim, window size, compress ratios, etc.
+        from the model's ``args`` (a ``DeepseekV4Args`` dataclass). One
+        pool per ModelRunner (= one per TP rank).
+        """
+        from atom.engine.kv_pool import DSV4KVPool, DSV4KVPoolConfig
+
+        # Find the underlying DeepseekV4Model. The model can be wrapped
+        # in UBatchWrapper / torch.compile; descend until we find `.args`.
+        m = self.model
+        # Unwrap up to 3 layers of wrappers.
+        for _ in range(3):
+            if hasattr(m, "args"):
+                break
+            for attr in ("model", "module", "_orig_mod"):
+                child = getattr(m, attr, None)
+                if child is not None:
+                    m = child
+                    break
+        args = getattr(m, "args", None)
+        if args is None:
+            raise RuntimeError(
+                "DSV4 model lacks `.args` (DeepseekV4Args) attribute; "
+                "cannot size the engine KV pool."
+            )
+
+        compress_ratios = list(args.compress_ratios)
+        # Pad/truncate to n_layers in case the HF config under-specifies.
+        if len(compress_ratios) < args.n_layers:
+            compress_ratios = compress_ratios + [0] * (
+                args.n_layers - len(compress_ratios)
+            )
+        compress_ratios = compress_ratios[: args.n_layers]
+        num_c4 = sum(1 for r in compress_ratios if r == 4)
+        num_c128 = sum(1 for r in compress_ratios if r == 128)
+
+        # Ring sizing: main = window_size; compressor / indexer follow
+        # SGLang's get_compress_state_ring_size (4→8, 128→128).
+        ring_main = max(args.window_size, 1)
+        ring_comp = 8  # works for both compress_ratio=4 (overlap=2) and 128
+        ring_idx = max(args.max_seq_len // 4 if num_c4 > 0 else 1, 1)
+        # Cap ring_idx to a reasonable upper bound to avoid huge allocs
+        # in toy / small-model tests.
+        ring_idx = min(ring_idx, 1 << 20)
+
+        cfg = DSV4KVPoolConfig(
+            max_active_seqs=self.config.max_num_seqs,
+            num_layers=args.n_layers,
+            num_c4_layers=num_c4,
+            num_c128_layers=num_c128,
+            head_dim=args.head_dim,
+            rope_head_dim=args.rope_head_dim,
+            window_size=args.window_size,
+            max_seq_len=args.max_seq_len,
+            ring_size_main=ring_main,
+            ring_size_compressor=ring_comp,
+            ring_size_indexer=ring_idx,
+            compress_ratio_per_layer=compress_ratios,
+            state_inner_dim=args.head_dim,
+            dtype=self.config.torch_dtype,
+            state_dtype=torch.float32,
+            device=self.device,
+        )
+        logger.info(
+            "DSV4 KV pool: n_layers=%d c4=%d c128=%d max_active_seqs=%d "
+            "ring_main=%d device=%s",
+            args.n_layers,
+            num_c4,
+            num_c128,
+            cfg.max_active_seqs,
+            ring_main,
+            self.device,
+        )
+        return DSV4KVPool(cfg)
+
+    def finish_dsv4_request(self, seq_id: int) -> None:
+        """W4.3: scheduler-callable hook to release a finished seq's slot.
+
+        No-op for non-DSV4 models or when the pool has not been built
+        yet (warmup). Idempotent on the pool side.
+        """
+        pool = getattr(self, "_dsv4_pool", None)
+        if pool is None:
+            return
+        pool.finish_request(seq_id)
 
     def prepare_sample(
         self, batch: ScheduledBatch

@@ -329,6 +329,14 @@ class ForwardContext:
 
     ubatch_slices: Optional[list[Any]] = None
 
+    # W4.3 (issue #37): DSV4 ForwardBatch + KV pool surface that the
+    # DeepseekV4 model layers consume to do per-token RoPE / per-seq KV
+    # scatter. Lazy-populated by ModelRunner before each forward when the
+    # active model is DSV4; remains None for all other architectures so
+    # this is a strict-superset addition.
+    dsv4_forward_batch: Optional[Any] = None
+    dsv4_pool: Optional[Any] = None
+
     def __post_init__(self):
         if not hasattr(self, "no_compile_layers") or self.no_compile_layers is None:
             self.no_compile_layers = {}
@@ -366,6 +374,8 @@ def set_forward_context(
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
     ubatch_slices: Optional[list[Any]] = None,
+    dsv4_forward_batch: Optional[Any] = None,
+    dsv4_pool: Optional[Any] = None,
 ) -> None:
     global _forward_context
     dp_metadata: Optional[DPMetadata] = None
@@ -385,6 +395,8 @@ def set_forward_context(
         dp_metadata=dp_metadata,
         spec_decode_metadata=spec_decode_metadata,
         ubatch_slices=ubatch_slices,
+        dsv4_forward_batch=dsv4_forward_batch,
+        dsv4_pool=dsv4_pool,
     )  # _forward_context.attn_metadata = attn_metadata
     # _forward_context.no_compile_layers = atom_config.compilation_config.static_forward_context
     # _forward_context = ForwardContext(no_compile_layers=atom_config.compilation_config.static_forward_context, attn_metadata=attn_metadata)
