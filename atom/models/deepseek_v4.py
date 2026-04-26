@@ -399,91 +399,6 @@ def _get_window_topk_idxs(
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
 
 
-def _get_window_topk_idxs_pertoken(
-    window_size: int,
-    positions: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    device: Optional[torch.device] = None,
-) -> torch.Tensor:
-    """Per-token sliding-window topk indices for multi-seq packed batches.
-
-    W4.3 (issue #37 Path 3): the cached ``_get_window_topk_idxs`` helper
-    above assumes a single ``start_pos`` scalar per call — fine for the
-    legacy B=1-implicit single-sequence path, but fundamentally wrong
-    when 4 different sequences have 4 different per-seq positions in the
-    same packed batch. This per-token variant builds one row per token
-    using the token's actual absolute ``positions[t]`` value, eliminating
-    the cross-talk that the W3.2 v3..v6.1 archive chain repeatedly tried
-    to patch around.
-
-    Args
-    ----
-    window_size: ring size of the sliding-window KV cache.
-    positions: ``[num_tokens]`` long, absolute token positions
-        (``DSV4ForwardBatch.positions``).
-    cu_seqlens_q: ``[num_seqs+1]`` long, cumulative-tokens-per-seq prefix.
-        Used to (a) determine which seq each token belongs to and (b)
-        compute the in-seq query offset so prefill rows still span only
-        the seq's own keys.
-    device: target device for the returned tensor.
-
-    Returns
-    -------
-    ``[num_tokens, window_size]`` int64 tensor where ``-1`` marks a
-    masked (causal-future) slot. The returned tensor is unsqueezed to
-    ``[1, num_tokens, window_size]`` upstream when the caller wants the
-    legacy 3D B=1-implicit shape.
-
-    Semantics
-    ---------
-    - For decode tokens (one new token per seq, position p):
-      ``out[t] = [(p+1) % W, (p+2) % W, ..., (p+W) % W]``  modulo window
-      with the row matching what the legacy helper produced for that
-      single seq.
-    - For prefill tokens within a seq (positions 0..S-1):
-      same as the legacy helper's `else` branch (causal mask) — each
-      query at offset i sees only positions [max(0, i-W+1) .. i].
-
-    The two branches are unified by computing each row from its absolute
-    ``positions[t]`` and the per-seq starting position, regardless of
-    whether the seq is in prefill or decode.
-    """
-    if device is None:
-        device = positions.device
-    T = positions.numel()
-    W = window_size
-    if T == 0:
-        return torch.zeros(0, W, dtype=torch.long, device=device)
-
-    cu_long = cu_seqlens_q.to(device=device, dtype=torch.long)
-    # token_idx → seq_idx via right-bucketize on cu[1:].
-    token_idx = torch.arange(T, dtype=torch.long, device=device)
-    seg_id = torch.bucketize(token_idx, cu_long[1:], right=True)
-    seq_starts = cu_long[seg_id]  # first token-idx of this token's seq
-    in_seq_offset = token_idx - seq_starts  # 0-based within the seq
-
-    pos = positions.to(device=device, dtype=torch.long)
-    # Per-token row template:
-    #   out[t, k] = (start_p + k) % W,  start_p = pos[t] - in_seq_offset[t]
-    # plus a causal mask on the early prefill rows.
-    arange_w = torch.arange(W, dtype=torch.long, device=device)
-
-    # Rotated window pattern for the "fully-warm" tokens (pos >= W-1):
-    #   row_t = [(start+1)%W, (start+2)%W, ..., (start+W)%W] where
-    #   start = (pos[t] % W). When unrolled with the modular arithmetic
-    #   used by `_get_window_topk_idxs`'s warm branch, this is identical.
-    # For early-prefill tokens (pos < W-1), invalid future slots = -1.
-    base = pos.unsqueeze(1) - in_seq_offset.unsqueeze(1) + arange_w.unsqueeze(0)
-    # row index in the ring buffer:
-    ring_idx = base % W
-    # Validity: a slot is valid iff base[t,k] <= pos[t] (causal) AND
-    # base[t,k] >= 0. We only invalidate the (rare) negative case for
-    # prefill at offset 0 with k > pos[t]+1.
-    valid = (base >= 0) & (base <= pos.unsqueeze(1))
-    out = torch.where(valid, ring_idx, torch.full_like(ring_idx, -1))
-    return out
-
-
 @lru_cache(2)
 def _get_compress_topk_idxs(
     ratio: int,
@@ -1069,30 +984,15 @@ class DeepseekV4Attention(nn.Module):
             self.compressor = None
             self.indexer = None
 
-        # ----- KV cache lifetime — W4.3 (issue #37 Path 3) -----
-        # Pre-W4.3 this was a `register_buffer("kv_cache", ...)` owned by
-        # the layer. Under multi-request concurrent decode that buffer
-        # collided across requests (every seq overwrote slot 0), forcing
-        # the W3.2 v3..v6.1 patch chain. W4.3 LIFTS ownership out of the
-        # nn.Module: when the engine provides a `DSV4KVPool`, the layer
-        # consumes a per-layer view (`pool.view_for_layer(layer_id)
-        # ["kv_cache"]`) that has one stable row per active seq.
-        #
-        # We keep `self.kv_cache` as a plain attribute (NOT register_buffer)
-        # so:
-        #  - state_dict / named_buffers no longer publish a stale layer-
-        #    owned KV (`"kv_cache" not in dict(model.named_buffers())`).
-        #  - The legacy single-request fallback path (no pool, e.g. the
-        #    PR1 toy validation harness) still works via lazy-allocate-
-        #    on-first-forward — see `_ensure_local_kv_cache_for_legacy`.
-        self.kv_cache: Optional[torch.Tensor] = None
-        # Cached size used by the legacy lazy allocator + by Compressor /
-        # Indexer plumbing (which slice the compressed-half of the legacy
-        # buffer at `[:, win:]`).
-        self._kv_cache_legacy_size = args.window_size + (
+        # ----- KV cache: [B, window_size + max_seq_len/ratio, head_dim] -----
+        kv_cache_size = args.window_size + (
             args.max_seq_len // self.compress_ratio if self.compress_ratio else 0
         )
-        self._kv_cache_legacy_max_batch = args.max_batch_size
+        self.register_buffer(
+            "kv_cache",
+            torch.zeros(args.max_batch_size, kv_cache_size, self.head_dim),
+            persistent=False,
+        )
 
         # ----- RoPE freqs (own freqs, not shared): YaRN for compressed
         # attention layers (long context), plain rope for dense (window-only) -----
@@ -1191,177 +1091,47 @@ class DeepseekV4Attention(nn.Module):
 
         self.wo_a.quant_type = _QT.No
 
-    def _ensure_local_kv_cache_for_legacy(
-        self, x: torch.Tensor, forward_batch: Optional[Any] = None
-    ) -> None:
-        """Lazy-allocate the legacy single-request fallback KV buffer.
-
-        W4.3 (issue #37): when running under the legacy ``forward(x,
-        start_pos)`` signature (no ``forward_batch``, no engine pool),
-        we need a layer-local kv_cache shaped exactly like the pre-W4.3
-        ``register_buffer`` produced. Allocate it on first forward when
-        ``self.kv_cache is None``. This path is exercised by the PR1 toy
-        validation harness and by the no-pool warmup paths.
-
-        When ``forward_batch.kv_pool`` is provided we skip allocation —
-        the per-layer view from ``pool.view_for_layer(layer_id)`` is the
-        canonical KV storage for the W4 multi-request path.
-        """
-        if (
-            forward_batch is not None
-            and getattr(forward_batch, "kv_pool", None) is not None
-        ):
-            # W4 path — pool owns the storage. Layer-local kv_cache stays None
-            # and is rebound in `forward()` to the pool's per-layer view.
-            return
-        if self.kv_cache is not None:
-            return
-        # Legacy path: allocate a layer-local buffer matching the pre-W4.3
-        # register_buffer layout. Lives on the same device/dtype as `x`.
-        self.kv_cache = torch.zeros(
-            self._kv_cache_legacy_max_batch,
-            self._kv_cache_legacy_size,
-            self.head_dim,
-            device=x.device,
-            dtype=x.dtype if x.dtype != torch.bfloat16 else torch.bfloat16,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int = 0,
-        forward_batch: Optional[Any] = None,
-    ) -> torch.Tensor:
-        """Compute attention for ``x``.
-
-        Two operating modes (W4.3 — issue #37 Path 3):
-
-        - **W4 multi-request path** (``forward_batch is not None`` and
-          carries an engine ``DSV4KVPool``): the layer's KV storage is a
-          per-layer slice of the pool's main_kv tensor; per-token RoPE
-          uses ``self.freqs_cis[forward_batch.positions]``; per-token KV
-          scatter uses ``forward_batch.kv_pool.compute_out_cache_loc(
-          ..., ring="main")``. Stable per-seq slot rows eliminate the
-          row-collision class of bugs documented in W3.2 v3..v6.1.
-
-        - **Legacy single-request path** (``forward_batch is None``):
-          falls back to the pre-W4.3 ``forward(x, start_pos)`` semantics
-          using a lazy-allocated local ``self.kv_cache``. Preserves PR1
-          toy / warmup / single-seq-eager paths bit-for-bit.
+    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
+        """Compute attention for `x` at absolute position `start_pos`.
 
         Args:
-            x: ``[num_tokens, dim]`` flat ATOM convention.
-            start_pos: legacy scalar position (ignored when
-                ``forward_batch`` is provided).
-            forward_batch: optional ``DSV4ForwardBatch``. When provided,
-                drives the W4 multi-request path.
+            x: [num_tokens, dim] flat ATOM convention. Single-sequence
+                (B=1 implicit; multi-sequence batching needs attn_metadata,
+                deferred until ATOM's scheduler integration).
+            start_pos: absolute position of the first token in this batch.
         Returns:
-            ``[num_tokens, dim]`` attention output (BF16).
+            [num_tokens, dim] attention output (BF16).
         """
         assert (
             x.dim() == 2
         ), f"DeepseekV4Attention expects 2D [num_tokens, dim], got {x.shape}"
-
-        # Bind kv_cache to the correct backing storage for this step.
-        # Two cases:
-        #   (a) forward_batch with pool → take the per-layer pool view
-        #       (rebind every step; cheap zero-copy slice).
-        #   (b) legacy path → lazy-allocate a layer-local buffer once.
-        if (
-            forward_batch is not None
-            and getattr(forward_batch, "kv_pool", None) is not None
-        ):
-            pool = forward_batch.kv_pool
-            view = pool.view_for_layer(self.layer_id)
-            # Pool's main_kv has shape [N, ring_main, head_dim]; semantics
-            # of ring_main (window_size) match the layer's first-half
-            # legacy slot range. The compressor still owns its own state
-            # buffers in W4.3 (lifted to the pool fully in W4.4).
-            self.kv_cache = view["kv_cache"]
-        else:
-            self._ensure_local_kv_cache_for_legacy(x, forward_batch)
-
         seqlen = x.size(0)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         win = self.window_size
         ratio = self.compress_ratio
         rd = self.rope_head_dim
 
-        # ---- Per-token freqs_cis source ----
-        # W4 path: gather one row per token by absolute position. This
-        # is the W3.2 RFC §3.1 fix: under multi-request decode, the 4
-        # tokens in a packed batch belong to 4 distinct seqs at 4
-        # distinct positions; the legacy `freqs_cis[start_pos:start_pos+S]`
-        # contiguous slice silently gave every seq the same frequency.
-        # Legacy path: keep the contiguous slice (single-seq correctness).
-        if forward_batch is not None:
-            freqs_cis = self.freqs_cis[forward_batch.positions]
-        else:
-            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
-
         # First-call plumbing: hand the (compressed-half) KV cache + freqs_cis
         # to the compressor / indexer.
-        # Under the W4 pool path we DON'T slice from self.kv_cache (the
-        # pool view's `kv_cache` is just the main ring; compressor state
-        # is still register_buffer-owned in W4.3 — W4.4 lifts it).
         if self.compress_ratio and self.compressor.kv_cache is None:
-            if forward_batch is not None and forward_batch.kv_pool is not None:
-                # Compressor consumes its own state pool view. The
-                # `compressor.kv_cache` field still holds the compressed-
-                # half slab of the legacy main buffer when in legacy mode;
-                # in W4 mode we rebind it to the pool's compressor slab
-                # (exposed under the indexer cache view per W4.2 layout).
-                # NOTE: in W4.3 the compressor's per-layer compressed-KV
-                # write target is still its register_buffer; only the
-                # main attention KV is fully migrated. W4.4 finishes
-                # lifting compressor / indexer state.
-                # For the model forward to remain correct, we still need
-                # the legacy compressed-half buffer. Lazy-allocate one.
-                if self.kv_cache is not None and self.kv_cache.shape[1] >= win:
-                    # Pool main view doesn't contain the compressor tail;
-                    # allocate a side buffer for the compressor in W4 mode.
-                    pass
-                # Defer compressor compressed-half allocation to a side
-                # buffer so the W4 pool can stay layout-stable.
-                if not hasattr(self, "_compressor_legacy_tail"):
-                    self._compressor_legacy_tail = torch.zeros(
-                        self._kv_cache_legacy_max_batch,
-                        max(1, self._kv_cache_legacy_size - win),
-                        self.head_dim,
-                        device=x.device,
-                        dtype=x.dtype,
-                    )
-                self.compressor.kv_cache = self._compressor_legacy_tail
-                self.compressor.freqs_cis = self.freqs_cis
-                if self.indexer is not None:
-                    self.indexer.freqs_cis = self.freqs_cis
-            else:
-                self.compressor.kv_cache = self.kv_cache[:, win:]
-                self.compressor.freqs_cis = self.freqs_cis
-                if self.indexer is not None:
-                    self.indexer.freqs_cis = self.freqs_cis
+            self.compressor.kv_cache = self.kv_cache[:, win:]
+            self.compressor.freqs_cis = self.freqs_cis
+            if self.indexer is not None:
+                self.indexer.freqs_cis = self.freqs_cis
 
-        # Reset all KV buffers on new prefill.
-        # - Legacy path: trigger reset on `start_pos == 0` (warmup-poison
-        #   recovery). Same as pre-W4.3.
-        # - W4 path: reset only on the W4 forward_batch's PREFILL mode
-        #   AND only zero the layer-local non-pool buffers (compressor
-        #   state, indexer state). The pool view is NOT zeroed here;
-        #   the pool's slot allocator guarantees one per-seq row, so
-        #   stale data in unused rows cannot leak into an active seq.
-        if forward_batch is None:
-            if start_pos == 0:
-                if self.kv_cache is not None:
-                    self.kv_cache.zero_()
-                if self.compress_ratio:
-                    self.compressor.kv_state.zero_()
-                    self.compressor.score_state.fill_(float("-inf"))
-                    if self.indexer is not None:
-                        self.indexer.kv_cache.zero_()
-                        self.indexer.compressor.kv_state.zero_()
-                        self.indexer.compressor.score_state.fill_(float("-inf"))
-        else:
-            # W4 prefill: rely on per-seq slot isolation; no global reset.
-            pass
+        # Reset all KV buffers on new prefill (start_pos==0). The ATOM warmup
+        # forward (seqlen=MAX_BATCHED_TOKENS with zeros) fills these buffers
+        # with garbage. Real prefill only overwrites a few slots, leaving
+        # stale warmup data that poisons decode attention.
+        if start_pos == 0:
+            self.kv_cache.zero_()
+            if self.compress_ratio:
+                self.compressor.kv_state.zero_()
+                self.compressor.score_state.fill_(float("-inf"))
+                if self.indexer is not None:
+                    self.indexer.kv_cache.zero_()
+                    self.indexer.compressor.kv_state.zero_()
+                    self.indexer.compressor.score_state.fill_(float("-inf"))
 
         # ----- Q: low-rank projection + per-head RMSNorm + partial RoPE -----
         # ATOM TP linears require 2D inputs; subsequent ops (RoPE, sparse_attn)
@@ -1380,184 +1150,86 @@ class DeepseekV4Attention(nn.Module):
         _apply_rotary_emb(kv[..., -rd:], freqs_cis)
         act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
-        # ----- Build topk_idxs -----
-        # W4 path: per-token rows derived from forward_batch.positions
-        # so each token's window selects its OWN seq's keys, not seq-0's.
-        # Legacy path: cached single-start_pos lookup (correct for B=1).
-        if forward_batch is not None:
-            topk_idxs_2d = _get_window_topk_idxs_pertoken(
-                win,
-                forward_batch.positions,
-                forward_batch.cu_seqlens_q,
-                device=x.device,
-            )  # [num_tokens, win]
-            # Add the [B=1] front dim so the rest of the pipeline keeps the
-            # `[1, N, K]` shape it has always assumed downstream.
-            topk_idxs = topk_idxs_2d.unsqueeze(0)  # [1, num_tokens, win]
-            if self.compress_ratio:
-                # Compressor / Indexer state is still register_buffer-owned
-                # in W4.3 (full lift in W4.4); fall back to the legacy
-                # per-batch helper using start_pos=0 for the offset math.
-                # Multi-request prefill of compressed-attention layers is
-                # explicitly out of W4.3 scope — emit a single sparse-attn-
-                # only build with no compressed-half concat, mirroring the
-                # legacy decode-only behavior.
-                offset = win
-                if self.indexer is not None:
-                    compress_topk_idxs = self.indexer(
-                        x, qr, int(forward_batch.positions[0].item()), offset
-                    )
-                else:
-                    compress_topk_idxs = _get_compress_topk_idxs(
-                        ratio,
-                        1,
-                        seqlen,
-                        int(forward_batch.positions[0].item()),
-                        offset,
-                        device=x.device,
-                    )
-                topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
-        else:
-            topk_idxs = _get_window_topk_idxs(
-                win, 1, seqlen, start_pos, device=x.device
-            )
-            if self.compress_ratio:
-                offset = kv.size(1) if start_pos == 0 else win
-                if self.indexer is not None:
-                    compress_topk_idxs = self.indexer(x, qr, start_pos, offset)
-                else:
-                    compress_topk_idxs = _get_compress_topk_idxs(
-                        ratio, 1, seqlen, start_pos, offset, device=x.device
-                    )
-                topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
+        # ----- Build topk_idxs (B=1 implicit) -----
+        topk_idxs = _get_window_topk_idxs(win, 1, seqlen, start_pos, device=x.device)
+        if self.compress_ratio:
+            offset = kv.size(1) if start_pos == 0 else win
+            if self.indexer is not None:
+                compress_topk_idxs = self.indexer(x, qr, start_pos, offset)
+            else:
+                compress_topk_idxs = _get_compress_topk_idxs(
+                    ratio, 1, seqlen, start_pos, offset, device=x.device
+                )
+            topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
         topk_idxs = topk_idxs.int()
 
-        # ----- Attention -----
-        # W4 path (forward_batch present): per-token KV scatter into the
-        # pool's main ring + per-seq sparse_attn read with one row per
-        # active seq. The pool's slot allocator + compute_out_cache_loc
-        # combine to make this multi-request-correct without any of the
-        # row-collision patches the W3.2 v3..v6.1 archive piled up.
-        if forward_batch is not None and forward_batch.kv_pool is not None:
-            pool = forward_batch.kv_pool
-            # Per-token write index into the flat [N*ring, head_dim] view
-            # of the layer's main_kv slab.
-            # `out_cache_loc` is precomputed by `from_attn_metadata`/
-            # `from_engine_state`; if absent (callers built the
-            # ForwardBatch by hand for testing), recompute on the fly.
-            if forward_batch.out_cache_loc is not None:
-                flat_loc = forward_batch.out_cache_loc.to(
-                    device=x.device, dtype=torch.long
-                )
+        # ----- Attention: prefill writes window KV linearly + concats fresh
+        # compressed entries; decode writes one slot in window ring buffer
+        # then reads from the persistent kv_cache. (kv_cache slot 0 = our
+        # implicit B=1.) -----
+        # W3.1 (RFC §6.2.1): replace 5 hardcoded [:1] writes/reads with
+        # slices matching the RHS batch dim. For the lingpeng B=1-implicit
+        # path this is a no-op; for batched decode (where kv arrives as
+        # [B, 1, head_dim] from the model_runner) this stops the dim-
+        # mismatch crash at the previous :1054. Module-level buffer
+        # sharing across requests (the deeper bug source #1-#5) is
+        # unfixed here and will be handled in W3.2 with proper slot
+        # mapping.
+        bsz_kv = kv.shape[0]
+        if start_pos == 0:
+            if seqlen <= win:
+                self.kv_cache[:bsz_kv, :seqlen] = kv
             else:
-                flat_loc = pool.compute_out_cache_loc(
-                    positions=forward_batch.positions,
-                    slot_indices=forward_batch.req_pool_indices,
-                    cu_seqlens_q=forward_batch.cu_seqlens_q,
-                    ring="main",
-                )
-            # `kv` arrived as [1, num_tokens, head_dim] from the unsqueeze
-            # earlier. Flatten to [num_tokens, head_dim] to match the
-            # flat pool view's row layout.
-            kv_tok = kv.squeeze(0)  # [num_tokens, head_dim]
-            # `self.kv_cache` is the per-layer pool view of shape
-            # [N, ring_main, head_dim]. Flatten to [N*ring_main, head_dim]
-            # to scatter by `flat_loc`. The flat view is a zero-copy
-            # reshape — pool storage is contiguous.
-            n_slots, ring_main, head_dim = self.kv_cache.shape
-            kv_flat = self.kv_cache.view(n_slots * ring_main, head_dim)
-            # Cast scatter source to pool dtype to avoid dtype-mismatch
-            # silent zero-out on copy_.
-            kv_flat[flat_loc] = kv_tok.to(kv_flat.dtype)
-
-            # W4.3 leaves Compressor/Indexer state on register_buffer
-            # (W4.4 lifts them). Skip compressor calls in the W4 path
-            # for now — the compressed-attention concat is correctly
-            # masked to "window-only" via the topk_idxs above (no
-            # compressed_topk_idxs path was taken when compressor is
-            # absent in the layer config; for compressed layers the
-            # legacy register_buffer state is reused, which is W4.4's
-            # cleanup target).
-            #
-            # sparse_attn read: per-token query attends to its OWN seq's
-            # KV slab. Build per-seq view from the pool: kv_pool[slot_t]
-            # rows in the order the tokens appear, i.e., one [ring_main,
-            # head_dim] slab per token. Then transpose to [num_tokens, 1,
-            # H, D] and run sparse_attn with B=num_tokens.
-            num_tokens = kv_tok.shape[0]
-            # Map each token to its owning seq's slot (same bucketize as
-            # compute_out_cache_loc).
-            token_idx = torch.arange(num_tokens, dtype=torch.long, device=x.device)
-            cu = forward_batch.cu_seqlens_q.to(device=x.device, dtype=torch.long)
-            seg_id = torch.bucketize(token_idx, cu[1:], right=True)
-            slot_per_token = forward_batch.req_pool_indices.to(
-                device=x.device, dtype=torch.long
-            )[seg_id]
-            kv_per_token = self.kv_cache[slot_per_token]  # [T, ring_main, D]
-            q_per_token = q.transpose(0, 1).contiguous()  # [T, 1, H, D]
-            topk_per_token = topk_idxs.transpose(0, 1).contiguous()  # [T, 1, K]
-            o = sparse_attn(
-                q_per_token,
-                kv_per_token,
-                self.attn_sink,
-                topk_per_token,
-                self.softmax_scale,
-            )
-            o = o.transpose(0, 1).contiguous()  # back to [1, T, H, D]
+                cutoff = seqlen % win
+                (
+                    self.kv_cache[:bsz_kv, cutoff:win],
+                    self.kv_cache[:bsz_kv, :cutoff],
+                ) = kv[:, -win:].split([win - cutoff, cutoff], dim=1)
+            if self.compress_ratio:
+                if (kv_compress := self.compressor(x, start_pos)) is not None:
+                    kv = torch.cat([kv, kv_compress], dim=1)
+            o = sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
         else:
-            # ===== Legacy single-request path (forward_batch is None) =====
-            # Identical to the pre-W4.3 code. Preserves PR1 toy / warmup /
-            # single-seq-eager bit-exactness.
-            bsz_kv = kv.shape[0]
-            if start_pos == 0:
-                if seqlen <= win:
-                    self.kv_cache[:bsz_kv, :seqlen] = kv
-                else:
-                    cutoff = seqlen % win
-                    (
-                        self.kv_cache[:bsz_kv, cutoff:win],
-                        self.kv_cache[:bsz_kv, :cutoff],
-                    ) = kv[:, -win:].split([win - cutoff, cutoff], dim=1)
-                if self.compress_ratio:
-                    if (kv_compress := self.compressor(x, start_pos)) is not None:
-                        kv = torch.cat([kv, kv_compress], dim=1)
-                o = sparse_attn(q, kv, self.attn_sink, topk_idxs, self.softmax_scale)
+            # W3.1 (RFC §6.2.1): in batched decode, kv arrives as
+            # [1, batch_decode_tokens, head_dim] (implicit B=1, S=batch).
+            # squeeze(0) gives [batch_decode, head_dim], write into
+            # kv_cache[:batch_decode, start_pos%win].
+            batch_decode = kv.shape[1]
+            kv_decode = kv.squeeze(0)  # [batch_decode, head_dim]
+            self.kv_cache[:batch_decode, start_pos % win] = kv_decode
+            if self.compress_ratio:
+                self.compressor(x, start_pos)
+            # W3.2 (RFC §3.1 cross-talk fix): for multi-request lockstep
+            # decode (batch_decode > 1) each token belongs to a distinct
+            # sequence. Transpose q from [1, N, H, D] -> [N, 1, H, D],
+            # read per-sequence kv_cache slices, and call sparse_attn with
+            # B=N. This eliminates the "every request reads row 0" cross-
+            # talk that polluted W3.2-v1 idx>0 outputs.
+            #
+            # topk_idxs from helpers is [1, N, K]; transpose to [N, 1, K].
+            # sparse_attn output [N, 1, H, D] is transposed back to
+            # [1, N, H, D] so the downstream RoPE/o_proj path (which
+            # assumes B=1 implicit) sees the same shape it always did.
+            if batch_decode > 1:
+                q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
+                kv_per_seq = self.kv_cache[:batch_decode]  # [N, max_seq, head_dim]
+                topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
+                o = sparse_attn(
+                    q_per_seq,
+                    kv_per_seq,
+                    self.attn_sink,
+                    topk_per_seq,
+                    self.softmax_scale,
+                )
+                o = o.transpose(0, 1).contiguous()  # [1, N, H, D]
             else:
-                # W3.1 (RFC §6.2.1): in batched decode, kv arrives as
-                # [1, batch_decode_tokens, head_dim] (implicit B=1, S=batch).
-                # squeeze(0) gives [batch_decode, head_dim], write into
-                # kv_cache[:batch_decode, start_pos%win].
-                batch_decode = kv.shape[1]
-                kv_decode = kv.squeeze(0)  # [batch_decode, head_dim]
-                self.kv_cache[:batch_decode, start_pos % win] = kv_decode
-                if self.compress_ratio:
-                    self.compressor(x, start_pos)
-                # W3.2 (RFC §3.1 cross-talk fix): for multi-request lockstep
-                # decode (batch_decode > 1) each token belongs to a distinct
-                # sequence. Transpose q from [1, N, H, D] -> [N, 1, H, D],
-                # read per-sequence kv_cache slices, and call sparse_attn with
-                # B=N. This eliminates the "every request reads row 0" cross-
-                # talk that polluted W3.2-v1 idx>0 outputs.
-                if batch_decode > 1:
-                    q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
-                    kv_per_seq = self.kv_cache[:batch_decode]  # [N, max_seq, head_dim]
-                    topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
-                    o = sparse_attn(
-                        q_per_seq,
-                        kv_per_seq,
-                        self.attn_sink,
-                        topk_per_seq,
-                        self.softmax_scale,
-                    )
-                    o = o.transpose(0, 1).contiguous()  # [1, N, H, D]
-                else:
-                    o = sparse_attn(
-                        q,
-                        self.kv_cache[:1],
-                        self.attn_sink,
-                        topk_idxs,
-                        self.softmax_scale,
-                    )
+                o = sparse_attn(
+                    q,
+                    self.kv_cache[:1],
+                    self.attn_sink,
+                    topk_idxs,
+                    self.softmax_scale,
+                )
 
         # Inverse RoPE on output's rope dims to remove absolute-position contribution
         # carried in by the value-side RoPE of the KV entries.
@@ -2096,7 +1768,6 @@ class Block(nn.Module):
         x: torch.Tensor,
         start_pos: int,
         input_ids: Optional[torch.Tensor],
-        forward_batch: Optional[Any] = None,
     ) -> torch.Tensor:
         # ----- Attention sub-layer with mHC mixing -----
         residual = x
@@ -2104,10 +1775,7 @@ class Block(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x = self.attn_norm(x)
-        # W4.3 (issue #37 Path 3): pass the per-step DSV4ForwardBatch
-        # through to Attention. Legacy single-request path (no
-        # forward_batch) keeps the scalar `start_pos` semantics.
-        x = self.attn(x, start_pos, forward_batch=forward_batch)
+        x = self.attn(x, start_pos)
         x = self.hc_post(x, residual, post, comb)
 
         # ----- FFN sub-layer with mHC mixing -----
@@ -2331,7 +1999,6 @@ class DeepseekV4Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         start_pos: int = 0,
-        forward_batch: Optional[Any] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
         """Forward.
@@ -2340,54 +2007,41 @@ class DeepseekV4Model(nn.Module):
             input_ids: 1D `[num_tokens]` (ATOM 2D-flat convention) OR 2D
                 `[B, S]` (legacy reference convention; treated as a single
                 sequence of B*S tokens — only correct for B=1).
-            start_pos: absolute position of the first token (legacy single-
-                request fallback). Ignored when ``forward_batch`` is provided.
-            forward_batch: optional :class:`DSV4ForwardBatch` carrying the
-                W4 multi-request metadata (per-token positions, slot
-                indices, kv pool). When None, falls back to the legacy
-                single-request path driven by ``start_pos``.
+            start_pos: absolute position of the first token.
         Returns:
-            Logits per sample row: `[N_sample, vocab]` for the W4 path
-            (one row per active seq) or the legacy single-request path
-            via ``ParallelHead.get_logits``.
+            Logits of the last token: `[vocab]` (1D path) or `[B, vocab]` (2D path).
         """
         # Normalize input_ids to 1D [num_tokens] for the 2D internal convention.
         if input_ids.dim() == 2:
-            if forward_batch is None:
-                # Legacy assert: only B=1 supported in the start_pos path.
-                assert (
-                    input_ids.size(0) == 1
-                ), "B>1 batched input_ids needs forward_batch (W4 path)"
+            assert (
+                input_ids.size(0) == 1
+            ), "B>1 batched input_ids needs attn_metadata; not supported yet"
             input_ids = input_ids.flatten()
         h = self.embed(input_ids)  # [num_tokens, dim]
         # Expand to hc_mult copies for Hyper-Connections: [num_tokens, hc, dim]
         h = h.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
-        # W4.3: a single straight pass through all blocks. The pre-W4.3
-        # outer cu_seqlens_q split-loop has been removed — per-token
-        # correctness now lives inside DeepseekV4Attention via the
-        # forward_batch's per-token positions / per-seq slot rows.
         for layer in self.layers:
-            h = layer(h, start_pos, input_ids, forward_batch=forward_batch)
+            h = layer(h, start_pos, input_ids)
 
-        # Slice h to last-token-of-each-sequence using cu_seqlens_q so a
-        # decode/prefill batch of N requests yields [N, vocab] (one
-        # sample row per request).
-        cu = None
-        if forward_batch is not None:
-            cu = forward_batch.cu_seqlens_q
-        else:
-            try:
-                from atom.utils.forward_context import get_forward_context
+        # W3.2 (RFC §14 Week 3): slice h to last-token-of-each-sequence
+        # using cu_seqlens_q from attn_metadata before the LM head, so a
+        # decode batch of N requests yields [N, vocab] (one sample row per
+        # request). Without this, ParallelHead.get_logits would project
+        # only the trailing row, giving 1 sample for any N — exactly the
+        # IndexError@scheduler.py:609 RFC §3.1 #7 evidence chain captured
+        # in W3.2-DEBUG (len(prev_token_ids)=1, len(req_ids)=4).
+        try:
+            from atom.utils.forward_context import get_forward_context
 
-                ctx = get_forward_context()
-                attn_meta = getattr(ctx, "attn_metadata", None)
-                cu = getattr(attn_meta, "cu_seqlens_q", None)
-            except Exception:
-                cu = None
+            ctx = get_forward_context()
+            attn_meta = getattr(ctx, "attn_metadata", None)
+            cu = getattr(attn_meta, "cu_seqlens_q", None)
+        except Exception:
+            cu = None
         if cu is not None and cu.numel() >= 2:
             last_token_indices = cu[1:] - 1
-            h = h[last_token_indices.to(h.device)]
+            h = h[last_token_indices]
 
         logits = self.head(
             h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
@@ -2466,65 +2120,6 @@ class DeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
-        """W4.3 (issue #37 Path 3): build a :class:`DSV4ForwardBatch` from
-        the engine's ForwardContext and pass it through to the model.
-
-        The runtime side (``ModelRunner.run_model``) is responsible for
-        stashing both the engine pool (``dsv4_pool``) and a
-        prebuilt-or-None ``DSV4ForwardBatch`` into the ForwardContext
-        before invoking ``self.model(input_ids, positions)``.
-
-        Three resolution paths:
-
-        1. Caller supplied ``forward_batch=...`` in ``model_kwargs``
-           (used by unit tests). Pass through verbatim.
-        2. ForwardContext has a populated ``dsv4_forward_batch``.
-           Promote to the W4 path.
-        3. Otherwise: fall back to the legacy ``start_pos`` scalar path.
-        """
-        # Path 1: explicit kwarg from a test caller.
-        explicit_fb = model_kwargs.pop("forward_batch", None)
-
-        # Path 2: pull from the engine's ForwardContext.
-        if explicit_fb is None:
-            try:
-                from atom.utils.forward_context import get_forward_context
-
-                ctx = get_forward_context()
-                explicit_fb = getattr(ctx, "dsv4_forward_batch", None)
-                # Adapter path: the runtime may stash only the pool +
-                # rely on ``from_attn_metadata`` here. Build the FB
-                # lazily from attn_metadata when the runtime hasn't
-                # built one already.
-                if explicit_fb is None and positions is not None:
-                    pool = getattr(ctx, "dsv4_pool", None)
-                    attn_meta = getattr(ctx, "attn_metadata", None)
-                    if pool is not None and attn_meta is not None:
-                        from atom.utils.dsv4_forward_batch import (
-                            DSV4ForwardBatch as _DSV4FB,
-                        )
-
-                        # ``seq_ids`` may be available via context; if
-                        # not, fall back to W4.1 placeholder mapping
-                        # (block_tables[:, 0]) which is structurally OK
-                        # in the runtime path because the pool's
-                        # admit/finish wiring already produced unique
-                        # rows for active seqs.
-                        seq_ids_attr = getattr(ctx, "dsv4_seq_ids", None)
-                        explicit_fb = _DSV4FB.from_attn_metadata(
-                            attn_meta, positions, seq_ids=seq_ids_attr, pool=pool
-                        )
-            except Exception:
-                explicit_fb = None
-
-        if explicit_fb is not None:
-            return self.model(
-                input_ids=input_ids,
-                start_pos=0,
-                forward_batch=explicit_fb,
-                **model_kwargs,
-            )
-        # Path 3: legacy scalar start_pos.
         start_pos = int(positions[0].item()) if positions is not None else 0
         return self.model(input_ids=input_ids, start_pos=start_pos, **model_kwargs)
 
