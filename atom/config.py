@@ -18,6 +18,7 @@ from atom.quant_spec import (
 )
 from atom.utils import envs, get_open_port
 from atom.utils.distributed.utils import stateless_init_torch_distributed_process_group
+from atom.utils.dsv4_guard import validate_dsv4_multireq as _validate_dsv4_multireq
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import AutoConfig, GenerationConfig, PretrainedConfig
 
@@ -958,6 +959,13 @@ class Config:
                 raise ValueError(
                     f"num_speculative_tokens must be between 1 and 4, got {num_spec}."
                 )
+
+        # --- DSV4 multi-request guard (issue #37) ---
+        archs = getattr(self.hf_config, "architectures", None) or []
+        _validate_dsv4_multireq(
+            architectures=archs,
+            max_num_seqs=self.max_num_seqs,
+        )
 
     def compute_hash(self) -> str:
         """
