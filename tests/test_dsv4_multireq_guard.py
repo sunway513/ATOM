@@ -193,3 +193,32 @@ class TestDSV4UnsafeMultireqDevEnv:
 
             importlib.reload(envs_mod)
             assert envs_mod.ATOM_DSV4_UNSAFE_MULTIREQ_DEV is False
+
+    def test_use_w4_path_default_false(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ATOM_DSV4_USE_W4_PATH", None)
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            assert envs_mod.ATOM_DSV4_USE_W4_PATH is False
+
+    def test_use_w4_path_set_true(self):
+        with patch.dict(os.environ, {"ATOM_DSV4_USE_W4_PATH": "1"}):
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            assert envs_mod.ATOM_DSV4_USE_W4_PATH is True
+
+    def test_aiter_validate_default_false(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ATOM_AITER_VALIDATE", None)
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            assert envs_mod.ATOM_AITER_VALIDATE is False
