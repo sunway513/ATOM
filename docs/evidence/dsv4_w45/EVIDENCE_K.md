@@ -142,13 +142,63 @@ The `dsv4_validate` ABI contract (sunway513/aiter#60) is correct as a `sparse_at
 - W4.5 owner accuracy gate (gsm8k limit=20 conc=4 ≥ 60%) — blocked on Bug #2/#3 (pool slab split + per-layer ring/inner sizing).
 - AITER-side reproducer — **not needed**: the bug is not in AITER. Sprint 1's plan to write an AITER standalone reproducer is canceled.
 
-## Sprint 2 next steps
+## Sprint 2 progress (commit `d53c103`)
 
-1. Split `DSV4KVPool._compressor_state` / `_compressor_score` into per-ratio slabs (c4 / c128) with correct ring_size + state_inner_dim.
-2. Update `compute_out_cache_loc` and `view_for_layer` to dispatch into the right slab by layer's compress_ratio.
-3. UTs covering both ratios (currently only c4 path was implicitly exercised by Indexer; c128 was uncovered).
-4. Re-run silicon `--mode single` then `--mode multi` after Bug #2 fix; both should reach decode + ALL DONE.
-5. Run gsm8k accuracy gate post-silicon-green for the W4.5 owner sign-off.
+Sprint 2 split the unified Sprint-1 compressor pool into per-ratio slabs and fixed two more bugs that surfaced during silicon iteration:
+
+| # | Bug | Status |
+|---|-----|--------|
+| 1 | `ring_size_compressor` collapsed PER-LAYER SGLang sizes into a single value (c128 row OOB) | ✅ Fixed in `d528147` |
+| 2 | `state_inner_dim` shared between c4 (256) and c128 (512) — shape mismatch | ✅ Fixed in `d53c103` (per-ratio slabs) |
+| 3 | Pool allocator architecture: ONE slab for both ratios — fundamentally wrong | ✅ Fixed in `d53c103` (split into `_compressor_state_c4` + `_compressor_state_c128` with separate index maps) |
+| 4 | `_apply_rotary_emb` crashed on 2D `[B, D]` input (compressor compress-boundary emit) | ✅ Fixed in `d53c103` |
+| 5 | `_indexer_kv` slab last-dim was `head_dim=512` but Indexer needs `index_head_dim=128` | ✅ Fixed in `d53c103` (added `cfg.index_head_dim`) |
+| 6 | `kv_per_token` doesn't concat compressed KV but `topk_idxs` includes compressed positions → AITER validator catches `topk_idxs.max=130 >= kv.size(N)=128` | ⏸️ Deferred — W4 attention logic, not pool sizing. Separate PR. |
+
+All 61 pre-existing UTs pass unchanged on `d53c103`. Backward-compat shim keeps Sprint-1 single-value config fields (`ring_size_compressor`, `state_inner_dim`) working.
+
+## Silicon iteration log (single mode, 12-token prefill, max-tokens=32)
+
+| Run | Action | Result |
+|-----|--------|--------|
+| v1 (Evidence J) | Sprint 1 main | HSA 0x1016, kernel UNKNOWN |
+| v2 | + ROCr Debug Agent | HSA 0x1016, kernel = `at::native::index_put_kernel_impl` ASSERT_TRAP |
+| v3 | + Python scatter asserts | `ValueError: W4 Compressor kv_state scatter OOB row=11/cap=8` (Bug #1) |
+| v4 | + ring_size_compressor 8→128 | `RuntimeError: shape [12,256] vs [12,512]` (Bug #2 surfaced) |
+| v5 | (same as v4 — confirmed Bug #1 fixed) | (same Bug #2) |
+| v6 | + per-ratio pool slabs (Sprint 2) | `RuntimeError: shape '[1,32,1,32]' invalid for size 32` — RoPE 2D (Bug #4) |
+| v7 | + RoPE 2D fix | `RuntimeError: expanded size (512) must match (128)` — Indexer head_dim (Bug #5) |
+| v8 | + Indexer head_dim fix | AITER validator: `topk_idxs.max=130 >= kv.size(N)=128` (Bug #6 — DEFERRED) |
+
+Each iteration **proves the prior fix works** (no regression of earlier symptom) before exposing the next layer.
+
+## Bug #6 — what's left for the next PR
+
+`atom/models/deepseek_v4.py:1885` does:
+
+```python
+topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)  # [1, T, win + compress_K]
+...
+kv_per_token = kv_cache_view[slot_per_token]  # [T, ring_main=128, D]   ← only main, missing compressed
+...
+o = sparse_attn(q_per_token, kv_per_token, ..., topk_per_token, ...)
+```
+
+The `compress_topk_idxs` references compressed-cache positions `[128, 128+max_K)`, but `kv_per_token` is sized for the main ring only. The fix requires:
+
+1. Gather per-seq compressed KV from the indexer/compressor pool slab (already fed by Sprint 2).
+2. Concatenate to `kv_per_token` along dim=1 so it becomes `[T, ring_main + max_compress, D]`.
+3. Adjust `compress_topk_idxs` to be relative to the concatenated boundary (i.e., `compress_topk_idxs += ring_main`).
+
+This is W4 attention logic, not pool sizing. Tracked for the next PR (`atom/models/deepseek_v4.py` change only — pool architecture is settled).
+
+## Remaining Sprint 2+ work
+
+- [ ] Bug #6: concatenate per-seq compressed KV into `kv_per_token` (W4 attention logic).
+- [ ] silicon `--mode single` reaches decode + ALL DONE.
+- [ ] silicon `--mode multi` reaches decode + ALL DONE.
+- [ ] gsm8k accuracy gate post-silicon-green (W4.5 owner sign-off).
+- [ ] Per-ratio UT coverage (Sprint-2 slab split is implicitly tested via existing UTs but explicit tests for divergent c4/c128 sizing would harden the contract).
 
 ## References
 
