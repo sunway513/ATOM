@@ -329,6 +329,16 @@ class ForwardContext:
 
     ubatch_slices: Optional[list[Any]] = None
 
+    # W4.3-redo (issue #37 P2.2): the per-step DSV4 KV pool + ForwardBatch.
+    # Both fields stay ``None`` for non-DSV4 models, for DSV4 in legacy single-
+    # request fallback, and for the warmup ``is_dummy_run`` path. Models read
+    # ``dsv4_forward_batch`` to dispatch into the W4 multi-request kernel chain
+    # and ``dsv4_pool`` if they need direct slot lookups (typed as ``Any`` to
+    # avoid a circular import on ``DSV4KVPool`` / ``DSV4ForwardBatch``).
+    dsv4_pool: Optional[Any] = None
+
+    dsv4_forward_batch: Optional[Any] = None
+
     def __post_init__(self):
         if not hasattr(self, "no_compile_layers") or self.no_compile_layers is None:
             self.no_compile_layers = {}
@@ -366,6 +376,8 @@ def set_forward_context(
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
     ubatch_slices: Optional[list[Any]] = None,
+    dsv4_pool: Optional[Any] = None,
+    dsv4_forward_batch: Optional[Any] = None,
 ) -> None:
     global _forward_context
     dp_metadata: Optional[DPMetadata] = None
@@ -385,6 +397,8 @@ def set_forward_context(
         dp_metadata=dp_metadata,
         spec_decode_metadata=spec_decode_metadata,
         ubatch_slices=ubatch_slices,
+        dsv4_pool=dsv4_pool,
+        dsv4_forward_batch=dsv4_forward_batch,
     )  # _forward_context.attn_metadata = attn_metadata
     # _forward_context.no_compile_layers = atom_config.compilation_config.static_forward_context
     # _forward_context = ForwardContext(no_compile_layers=atom_config.compilation_config.static_forward_context, attn_metadata=attn_metadata)
