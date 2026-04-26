@@ -248,3 +248,77 @@ Built a standalone task yaml at `/tmp/lm_eval_tasks_dsv4/gsm8k_dsv4.yaml` (valid
 | max_gen_toks=4096 | (untested) | — | diminishing returns expected |
 
 Evidence: `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v4.log`
+
+## Sprint 4.6 — MXFP4 weight/scale shuffle layout RCA
+
+After Sprint 4.5 ruled out prompt-side framing (51pp gap remained), audited the MoE weight quantization path end-to-end. Found a **layout mismatch** between ATOM's pre-shuffle and the FlyDSL FP4 kernel's expected layout.
+
+### Silicon dispatcher hit (from `m_lookup_keys_unique.log`)
+
+For DSV4-Pro on MI355X, the FMOE dispatcher resolves to:
+```
+ActivationType.Silu, q_dtype_a=torch.float4_e2m1fn_x2, q_dtype_w=torch.float4_e2m1fn_x2,
+QuantType.per_1x32, isG1U1=True
+→ HIT flydsl_moe1_afp4_wfp4_bf16_*_silu  (stage1)
+→ HIT moe_ck2stages_gemm2_*_FP4X2_FP4X2_B16  (stage2 at M=1)
+→ HIT flydsl_moe2_afp4_wfp4_bf16_*  (stage2 at M>=4)
+```
+
+So the runtime path is **FP4 acts × FP4 weights, per_1x32, Silu, FlyDSL stage1 + mixed stage2**.
+
+### ATOM's `Mxfp4MoEMethod.process_weights_after_loading` branch table
+
+In `atom/model_ops/moe.py:819` the post-load processing has three sibling branches:
+
+| Condition | Weight shuffle | Scale shuffle | Designed for |
+|---|---|---|---|
+| `use_triton` (line 828-854) | `_swizzle_mxfp4` (Triton) | inside swizzle | Triton MoE |
+| `activation == Swiglu` (line 856-882) | `permute(0,2,1,3)` interleave→stack + `shuffle_weight_a16w4(_, 16, gate_up)` | `permute(0,2,1,3)` + `shuffle_scale_a16w4(_, E, gate_up)` | **FlyDSL FP4 / a16w4 GPU tile** |
+| `quant_method == "quark"` (line 891-902) | `shuffle_weights` (CK 16x16) | `e8m0_shuffle` (CK 256x8 tile) | CK quark MoE |
+| `else` — DSV4 fallthrough (line 903-910) | `shuffle_weights` (CK 16x16) | `e8m0_shuffle` (CK 256x8 tile) | CK MoE |
+
+DSV4-Pro has `layer.activation == ActivationType.Silu` (NOT Swiglu — the FlyDSL kernel's name embeds the silu fusion as `..._silu`, but the Python-side `ActivationType` is Silu). It also doesn't match `quark`. So it falls to the **else** branch (line 903-910) and uses **CK-layout shuffles**.
+
+### The mismatch
+
+FlyDSL's stage1 contract (`aiter/ops/flydsl/moe_kernels.py:583-584`):
+> "For fp4 stage1, `w1`/`w1_scale` must use the same preshuffle layout as `shuffle_weight_a16w4(w1, 16, True)` and `shuffle_scale_a16w4(w1_scale, E, True)`."
+
+These two layouts (a16w4 vs CK) reshape & permute the tensors fundamentally differently:
+
+- `shuffle_weight` (CK): `view(BN, BK, ...).permute(0,1,3,4,2,5)` — for CK matrix-core tiles
+- `shuffle_weight_a16w4`: `view(experts_cnt, 2, N0, NLane=16, K0, KLane=4, KPack=16).permute(0,2,1,4,5,3,6)` — for FlyDSL FP4 GPU tiles
+- `e8m0_shuffle`: `view(m/32, 2, 16, n/8, 2, 4).permute(0,3,5,2,4,1)` — for CK 256-row × 8-col scale tile
+- `shuffle_scale_a16w4`: `view(E, N_Pack=2, N1, N_Lane=16, K1, K_Pack=2, K_Lane=4).permute(0,2,4,6,3,5,1)` — for FlyDSL scale tile
+
+ATOM hands FlyDSL a tensor pre-shuffled with **CK** layout. The kernel reads from positions assuming **a16w4** layout — every dequant fetches the wrong byte. The kernel doesn't crash (all reads are in-bounds), but **every per-block scale and every weight nibble is mis-mapped to wrong positions**. Compounding across 61 layers × 6 routed experts per token → severe accuracy loss with no error signal.
+
+### Why the SwiGLU branch worked (and DSV4-Pro doesn't)
+
+Models using `ActivationType.Swiglu` (e.g., GLM-4.5, Qwen3-MOE FP4) hit line 856-882 which DOES use `shuffle_weight_a16w4` + `shuffle_scale_a16w4`. They produce correct output. DSV4-Pro happens to use `ActivationType.Silu` because the FlyDSL kernel internalizes the silu+mul fusion under that name — even though semantically it's the same SwiGLU computation. The branch dispatch is fooled by the activation enum.
+
+### Secondary issue: stage1/stage2 layout conflict at M=1
+
+For decode (M=1), CSV row 1 dispatches:
+- stage1 → `flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_kb4_go_fp4` (needs a16w4 layout)
+- stage2 → `moe_ck2stages_gemm2_256x32x128x128_..._FP4X2_FP4X2_B16` (needs CK layout)
+
+These two kernels access the SAME `w2_weight` tensor — but each expects a DIFFERENT shuffle. Impossible to satisfy both with one tensor. For M>=4 the CSV uses `flydsl_moe2_afp4_wfp4_bf16_*` for stage2 (also needs a16w4) — consistent. So at M=1 (the gsm8k decode hot path), the conflict is structural.
+
+### Fix design (3 options, ordered by blast radius)
+
+1. **Surgical (Silu→a16w4 alias)** — extend line 856 condition to `activation == Swiglu OR (quant_type == per_1x32 AND get_gfx().startswith("gfx95"))`. Fixes stage1; stage2 at M=1 still mismatched.
+2. **CSV unification** — rewrite all CSV rows for M=1,2 stage2 to use FlyDSL kernels (`flydsl_moe2_afp4_wfp4_bf16_*` analogues). Then apply (1). Removes the stage1/stage2 layout conflict but may be slower at small M.
+3. **Disable W4 path for decode** — fall back to W3 path at M=1. Keeps W4 for prefill. Largest blast radius (defeats the W4.5 goal of multi-request KV).
+
+**Recommendation**: try (1) first as a single-day silicon test, measure if stage1-only fix narrows the gap (e.g. 0.45 → 0.70). If yes, escalate to (2) for full closure.
+
+### Cross-references
+
+- ATOM `Mxfp4MoEMethod`: `atom/model_ops/moe.py:676-913`
+- AITER FlyDSL stage1 contract: `aiter/ops/flydsl/moe_kernels.py:555-660`
+- AITER `shuffle_weight_a16w4`: `aiter/ops/shuffle.py:51-81`
+- AITER `shuffle_scale_a16w4`: `aiter/ops/shuffle.py:84-113`
+- AITER `e8m0_shuffle` (CK): `aiter/utility/fp4_utils.py:72-92`
+- ATOM `shuffle_weights` (CK alias): `atom/model_ops/utils.py:124-160`
+- Silicon FMOE lookup keys: `docs/evidence/dsv4_w45/artifacts/m_lookup_keys_unique.log`
