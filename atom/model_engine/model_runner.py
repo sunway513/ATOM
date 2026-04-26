@@ -1878,6 +1878,11 @@ class ModelRunner:
         state_inner_dim_c4 = 2 * index_head_dim
         state_inner_dim_c128 = args.head_dim
         ring_size_main = max(getattr(args, "window_size", 128), 64)
+        # Sprint 3 (Bug #6): outer Compressor's main-attention kv_cache
+        # max compressed positions per seq = ``max_seq_len // ratio``.
+        max_seq_len = getattr(args, "max_seq_len", 4096)
+        max_compressed_c4 = max(1, max_seq_len // 4)
+        max_compressed_c128 = max(1, max_seq_len // 128)
 
         cfg = DSV4KVPoolConfig(
             max_active_seqs=self.config.max_num_seqs,
@@ -1895,6 +1900,8 @@ class ModelRunner:
             state_inner_dim_c4=state_inner_dim_c4,
             state_inner_dim_c128=state_inner_dim_c128,
             index_head_dim=index_head_dim,
+            max_compressed_c4=max_compressed_c4,
+            max_compressed_c128=max_compressed_c128,
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
             device=self.device,

@@ -670,8 +670,19 @@ class Compressor(nn.Module):
     ) -> bool:
         """W4.4-redo path: rebind state to the pool's per-layer view.
 
-        Returns True iff the pool view was bound (caller is on the W4
-        multi-request path); False iff the legacy path applies.
+        Returns True iff a multi-request-safe state buffer is bound (either
+        from the pool view or from a layer-local fallback). False iff the
+        caller is on the legacy single-request path with no pool.
+
+        Sprint 3 (Bug #7): each layer can have TWO Compressor instances —
+        the OUTER one (``DSV4Attention.compressor``, head_dim=main attn) and
+        the INNER one (``Indexer.compressor``, head_dim=index_head_dim) —
+        with DIFFERENT ``_state_inner_dim``. The pool's
+        ``view_for_layer["kv_state"]`` is sized for ONE role (inner for c4,
+        outer for c128). If the view's shape doesn't match this Compressor's
+        expected ``_state_inner_dim``, lazy-allocate a layer-local buffer
+        sized for ``max_active_seqs`` so multi-request safety is preserved
+        without forcing the pool to know about every Compressor variant.
         """
         if (
             forward_batch is None
@@ -679,13 +690,47 @@ class Compressor(nn.Module):
             or layer_id is None
         ):
             return False
-        view = forward_batch.kv_pool.view_for_layer(layer_id)
+        kv_pool = forward_batch.kv_pool
+        view = kv_pool.view_for_layer(layer_id)
         kv_state_view = view.get("kv_state")
         score_state_view = view.get("score_state")
-        if kv_state_view is None or score_state_view is None:
-            return False
-        self.kv_state = kv_state_view
-        self.score_state = score_state_view
+        # Sprint 3 shape check: only bind if the view matches THIS Compressor's
+        # required inner_dim. Otherwise fall back to a layer-local buffer.
+        if (
+            kv_state_view is not None
+            and score_state_view is not None
+            and kv_state_view.shape[-1] == self._state_inner_dim
+            and kv_state_view.shape[-2] == self._state_ring_len
+        ):
+            self.kv_state = kv_state_view
+            self.score_state = score_state_view
+            return True
+        # Layer-local fallback: allocate ONCE, sized for the pool's
+        # max_active_seqs so per-seq slot indexing in _forward_w4 is safe.
+        N = getattr(kv_pool, "max_active_seqs", self._state_max_batch)
+        if self.kv_state is None or self.kv_state.shape != (
+            N,
+            self._state_ring_len,
+            self._state_inner_dim,
+        ):
+            device = (
+                kv_state_view.device
+                if kv_state_view is not None
+                else self.wkv.weight.device
+            )
+            self.kv_state = torch.zeros(
+                N,
+                self._state_ring_len,
+                self._state_inner_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            self.score_state = torch.full(
+                (N, self._state_ring_len, self._state_inner_dim),
+                float("-inf"),
+                dtype=torch.float32,
+                device=device,
+            )
         return True
 
     def forward(
@@ -1780,9 +1825,18 @@ class DeepseekV4Attention(nn.Module):
 
         # W4.4-redo: plumb freqs_cis to the compressor/indexer (state
         # is engine-pool-owned; only freqs_cis still flows from here).
+        # Sprint 3 (Bug #6): also bind the OUTER ``self.compressor``'s
+        # ``kv_cache`` to the pool's per-layer compressor_kv_cache slab.
+        # Without this binding, the compressor's compress-boundary write
+        # at ``kv_cache[slot, p_last // ratio] = kv_seq`` has no slab to
+        # land in (or hits a stale/wrong-shape buffer).
+        compressor_kv_cache_view = pool_view.get("compressor_kv_cache")
         if self.compress_ratio:
-            if self.compressor is not None and self.compressor.freqs_cis is None:
-                self.compressor.freqs_cis = self.freqs_cis
+            if self.compressor is not None:
+                if self.compressor.freqs_cis is None:
+                    self.compressor.freqs_cis = self.freqs_cis
+                if compressor_kv_cache_view is not None:
+                    self.compressor.kv_cache = compressor_kv_cache_view
             if self.indexer is not None and self.indexer.freqs_cis is None:
                 self.indexer.freqs_cis = self.freqs_cis
 
@@ -1869,6 +1923,15 @@ class DeepseekV4Attention(nn.Module):
                     forward_batch=forward_batch,
                     layer_id=self.layer_id,
                 )
+                # Sprint 3 (Bug #6): for c4 layer, ALSO drive the OUTER
+                # Compressor's state writes — its main-attention kv_cache
+                # is what gets concatenated below. Sprint-1/2 skipped this
+                # call so c4 layers had no compressed KV for main attention.
+                self.compressor(
+                    x,
+                    forward_batch=forward_batch,
+                    layer_id=self.layer_id,
+                )
             else:
                 # Standalone Compressor (HCA-only). Drive its per-token
                 # state writes via the W4 path, then build the compress
@@ -1896,6 +1959,16 @@ class DeepseekV4Attention(nn.Module):
             device=x.device, dtype=torch.long
         )[seg_id]
         kv_per_token = kv_cache_view[slot_per_token]  # [T, ring_main, D]
+        # Sprint 3 (Bug #6): concatenate per-seq compressed KV from the OUTER
+        # Compressor's pool slab. ``compressor_kv_cache_view`` shape is
+        # ``[N, max_compressed, head_dim]``. Per-token gather → ``[T, max_compressed, D]``,
+        # concatenate to main KV along dim=1 so ``topk_idxs`` (already offset
+        # by ``win = ring_main`` for compressed positions) lands in-bounds.
+        if self.compress_ratio and compressor_kv_cache_view is not None:
+            kv_compress_per_token = compressor_kv_cache_view[slot_per_token].to(
+                kv_per_token.dtype
+            )
+            kv_per_token = torch.cat([kv_per_token, kv_compress_per_token], dim=1)
         q_per_token = q.transpose(0, 1).contiguous()  # [T, 1, H, D]
         topk_per_token = topk_idxs.transpose(0, 1).contiguous()  # [T, 1, K]
 
