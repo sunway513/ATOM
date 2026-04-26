@@ -11,6 +11,11 @@
 
 **Tech Stack:** FlyDSL (Python DSL → MLIR → ROCm), aiter (Python wrapper + JIT cache), ATOM (engine), MI355X (gfx950 / FP8 e4m3fn).
 
+**Upstream pins (verified before plan execution — see Task 0):**
+- FlyDSL `ROCm/FlyDSL` commit `8bee73f` (verified to contain `kernels/moe_blockscale_2stage.py`, ~136KB, latest as of 2026-04-26).
+- AITER `sunway513/aiter` `_MIN_FLYDSL_VERSION = Version("0.1.3")` (`aiter/ops/flydsl/__init__.py`); container has `flydsl 0.1.4.2` installed which satisfies the pin. If reviewing against a different aiter checkout that pins `0.1.2`, bump the pin first.
+- License: FlyDSL upstream is **Apache-2.0** with `Copyright (c) 2025 FlyDSL Project Contributors`. AITER and ATOM are MIT. **All ported source MUST preserve the Apache-2.0 SPDX header + Apache copyright notice. The new aiter file is a derivative work licensed Apache-2.0, NOT MIT** (mixing licenses in one file requires explicit dual-license header — we don't do that).
+
 ---
 
 ## Context (must-read background)
@@ -50,7 +55,7 @@ DSV4's `config.json` declares `weight_block_size: [128, 128]` → `QuantType.per
 **Modified files:**
 - `aiter/ops/flydsl/__init__.py` — export `flydsl_moe_blockscale_stage1/2`.
 - `aiter/ops/flydsl/moe_kernels.py` — add `get_flydsl_blockscale_stage1/2_kernels` registries (kernel names: `flydsl_moe1_afp8_wfp8_bf16_blockscale_t{M}x{N}x{K}[_{mode}]`).
-- `aiter/fused_moe.py` — extend `is_flydsl1`/`is_flydsl2` dispatcher: when `kernelName1.startswith("flydsl_moe1_blockscale_")` route to a new `_flydsl_blockscale_stage1_wrapper`.
+- `aiter/fused_moe.py` — extend `is_flydsl1`/`is_flydsl2` dispatcher: when **`"_blockscale_" in kernelName1`** (substring match, NOT prefix — kernel names are `flydsl_moe1_afp8_wfp8_bf16_blockscale_t...`) route to a new `_flydsl_blockscale_stage1_wrapper`. Same for stage2.
 - `aiter/jit/optCompilerConfig.json` — register the new module if compilation needs codegen flags.
 
 ### FlyDSL upstream (`ROCm/FlyDSL`)
@@ -70,6 +75,70 @@ DSV4's `config.json` declares `weight_block_size: [128, 128]` → `QuantType.per
 
 ## Bite-Sized Tasks
 
+### Task 0: Preflight — pin & verify FlyDSL upstream + version compatibility
+
+**Files:** read-only inspection, no commits in this task.
+
+- [ ] **Step 0.1: Verify FlyDSL upstream commit + file presence**
+
+```bash
+git -C /home/pensun/FlyDSL log --oneline -1
+ls -la /home/pensun/FlyDSL/kernels/moe_blockscale_2stage.py
+ls -la /home/pensun/FlyDSL/kernels/mfma_preshuffle_pipeline.py
+ls -la /home/pensun/FlyDSL/kernels/mfma_epilogues.py
+git -C /home/pensun/FlyDSL log --oneline -- kernels/moe_blockscale_2stage.py | head -3
+```
+
+Expected: HEAD `8bee73f` (or newer). All three files present. If `moe_blockscale_2stage.py` is missing, **STOP** — pull upstream first (`cd /home/pensun/FlyDSL && git fetch origin && git checkout origin/main`).
+
+- [ ] **Step 0.2: Verify installed `flydsl` Python package satisfies aiter's `_MIN_FLYDSL_VERSION`**
+
+```bash
+docker exec atom_dsv4_feat /opt/venv/bin/python -c "
+import flydsl
+print(f'installed: {flydsl.__version__}')
+from aiter.ops.flydsl.utils import is_flydsl_available
+print(f'aiter_satisfied: {is_flydsl_available()}')
+"
+```
+
+Expected: installed >= `0.1.3` AND `aiter_satisfied=True`. If the local aiter checkout pins `0.1.2` or older, bump the pin in `aiter/ops/flydsl/__init__.py` first as a separate PR.
+
+- [ ] **Step 0.3: Verify FlyDSL APIs used by `moe_blockscale_2stage.py` are present in installed `flydsl`**
+
+```bash
+docker exec atom_dsv4_feat /opt/venv/bin/python -c "
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import gpu, buffer_ops, vector, rocdl, range_constexpr
+from flydsl.runtime.device import get_rocm_arch
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm, scf, memref
+from flydsl._mlir.dialects import math as math_dialect
+from flydsl.expr.typing import T
+from flydsl.expr.arith import ArithValue
+print('all FlyDSL imports used by moe_blockscale_2stage.py: OK')
+"
+```
+
+Expected: `OK`, no `ImportError`. If any import fails, escalate (FlyDSL upstream + version drift; bump or backport).
+
+- [ ] **Step 0.4: Diff aiter's `mfma_preshuffle_pipeline.py` against FlyDSL upstream**
+
+```bash
+diff -u /home/pensun/FlyDSL/kernels/mfma_preshuffle_pipeline.py \
+        /home/pensun/aiter-lingpeng/aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py | head -80
+diff -u /home/pensun/FlyDSL/kernels/mfma_epilogues.py \
+        /home/pensun/aiter-lingpeng/aiter/ops/flydsl/kernels/mfma_epilogues.py | head -80
+```
+
+Decide: if diffs are nontrivial AND `moe_blockscale_2stage.py` uses APIs only in upstream version → port the upstream version into aiter as part of Task 2 (extends scope but keeps the kernel set consistent). If diffs are noise (whitespace / docstrings), proceed unmodified.
+
+- [ ] **Step 0.5: Document the verified upstream pin** in a comment at the top of the plan + add to commit messages of subsequent tasks. No PR yet.
+
+---
+
 ### Task 1: Port `moe_blockscale_2stage.py` skeleton into aiter
 
 **Files:**
@@ -79,9 +148,16 @@ DSV4's `config.json` declares `weight_block_size: [128, 128]` → `QuantType.per
 
 - [ ] **Step 1.1: Create `moe_blockscale_kernels.py` with the same module shape as `moe_kernels.py`**
 
+**License preservation (P1)**: this file is a derivative of `ROCm/FlyDSL/kernels/moe_blockscale_2stage.py` (Apache-2.0). The new file MUST carry an Apache-2.0 SPDX header and preserve the upstream copyright. Do NOT use AITER's default MIT header — mixing licenses in one file requires an explicit dual-license declaration that we are not doing.
+
 ```python
 # aiter/ops/flydsl/moe_blockscale_kernels.py
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# Derived from ROCm/FlyDSL kernels/moe_blockscale_2stage.py (Apache-2.0).
+# Upstream ref: ROCm/FlyDSL commit 8bee73f (or newer) — see Task 0.1.
 """FlyDSL Blockscale MOE kernel management (per_1x128 FP8/FP8, g1u1).
 
 Mirrors aiter/ops/flydsl/moe_kernels.py for the BLOCKSCALE variant.
@@ -157,7 +233,7 @@ git commit -m "feat(flydsl): scaffold blockscale MoE kernel registry (#37 W4.5 a
 - Modify: `aiter/ops/flydsl/moe_blockscale_kernels.py`
 - Reference: `/home/pensun/FlyDSL/kernels/moe_blockscale_2stage.py:73-1500` (gemm1) and `:1500-2700` (gemm2/gemm2_ex)
 
-- [ ] **Step 2.1: Copy `compile_moe_blockscale_gemm1` body verbatim into `moe_blockscale_kernels.py`. Adjust imports** (`from kernels.mfma_preshuffle_pipeline import ...` → `from aiter.ops.flydsl.kernels.mfma_preshuffle_pipeline import ...`; same for `mfma_epilogues`).
+- [ ] **Step 2.1: Copy `compile_moe_blockscale_gemm1` body verbatim into `moe_blockscale_kernels.py`. Adjust imports** (`from kernels.mfma_preshuffle_pipeline import ...` → `from aiter.ops.flydsl.kernels.mfma_preshuffle_pipeline import ...`; same for `mfma_epilogues`). **Per Task 0.4 finding**: if upstream `mfma_preshuffle_pipeline.py` differs from aiter's, port the upstream version too in this commit. Keep the Apache-2.0 SPDX block from Step 1.1 at the top.
 
 - [ ] **Step 2.2: Copy `compile_moe_blockscale_gemm2` and `compile_moe_blockscale_gemm2_ex`. Same import adjustments.**
 
@@ -224,11 +300,11 @@ Expected: `True / True`.
 **Files:**
 - Modify: `aiter/fused_moe.py:972-1022` (`is_flydsl1` block)
 
-- [ ] **Step 4.1: Add `is_blockscale1 = bool(kernelName1) and "_blockscale_" in kernelName1` (and `2`).** Inside the existing `if (is_flydsl1 or is_flydsl2) and is_flydsl_available():` block, add a sub-branch:
+- [ ] **Step 4.1: Add substring-match predicate (NOT prefix) to keep names stable.** Kernel names are `flydsl_moe1_afp8_wfp8_bf16_blockscale_t...` — they start with the same `flydsl_moe1_` prefix as the FP4 path; the distinguishing token is the literal substring `_blockscale_`. Use `"_blockscale_" in kernelName1` to pick the blockscale wrapper. Inside the existing `if (is_flydsl1 or is_flydsl2) and is_flydsl_available():` block, add a sub-branch:
 
 ```python
 if is_flydsl1:
-    if "_blockscale_" in kernelName1:
+    if "_blockscale_" in kernelName1:   # P1 fix: substring, NOT startswith("flydsl_moe1_blockscale_")
         stage1_func = functools.partial(
             _flydsl_blockscale_stage1_wrapper,
             kernelName=kernelName1,
@@ -240,7 +316,18 @@ if is_flydsl1:
             kernelName=kernelName1,
             activation=activation,
         )
-# same for stage2
+
+if is_flydsl2:
+    if "_blockscale_" in kernelName2:   # same substring rule for stage2
+        stage2_func = functools.partial(
+            _flydsl_blockscale_stage2_wrapper,
+            kernelName=kernelName2,
+        )
+    else:
+        stage2_func = functools.partial(
+            _flydsl_stage2_wrapper,
+            kernelName=kernelName2,
+        )
 ```
 
 - [ ] **Step 4.2: Add `_flydsl_blockscale_stage1_wrapper` and `_stage2_wrapper`** beside the existing FP4 wrappers (line ~654, ~688). Use `aiter.ops.flydsl.flydsl_moe_blockscale_stage1` instead of FP4 entry point.
@@ -322,6 +409,59 @@ print(f'rows={len(df)} kernels={df[\"kernelName1\"].unique()[:3]}')
 ```
 
 - [ ] **Step 6.3: Commit.**
+
+---
+
+### Task 6.5: Full-CSV coverage test — every kernelName1/kernelName2 in the DSV4 config must compute correctly (P1 fix)
+
+**Why this exists**: Task 5's numerical test only proved one shape (12 tokens). Task 6 installs CSV rows that span 6+ token counts and 2+ stage2 variants (`_atomic`, plus possibly `_persist`/`_reduce`). A 12-token-only test will silently miss: (a) an unregistered kernel name in another row, (b) a stage2 mode that's wrong for decode/prefill shapes, (c) a tile-specific bug in a single combo. We have to prove **every kernel name actually used by the CSV** computes correctly before silicon.
+
+**Files:**
+- Modify/extend: `op_tests/test_flydsl_moe_blockscale.py`
+
+- [ ] **Step 6.5.1: Iterate the CSV and run aiter's lookup for each row** to confirm every `kernelName1`/`kernelName2` value resolves through `_flydsl_blockscale_stage1_wrapper` / `_stage2_wrapper` (NOT falling back to the FP4 wrapper or to CK).
+
+```python
+def test_dsv4_csv_kernel_names_resolve():
+    import pandas as pd
+    df = pd.read_csv("aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv")
+    from aiter.ops.flydsl.moe_blockscale_kernels import get_flydsl_blockscale_kernel_params
+    for _, row in df.iterrows():
+        for col in ("kernelName1", "kernelName2"):
+            name = str(row[col])
+            assert "_blockscale_" in name, f"row {row['token']}: {col}={name} missing _blockscale_"
+            params = get_flydsl_blockscale_kernel_params(name)
+            assert params is not None, f"unregistered kernel: {name}"
+```
+
+- [ ] **Step 6.5.2: Numerically validate each distinct (kernelName1, kernelName2) pair against torch reference** for representative DSV4-shape inputs. Cover at least the unique kernels the CSV uses (typically 3-5 stage1 + 3-5 stage2 distinct entries):
+
+```python
+@pytest.mark.parametrize("token_count", [1, 12, 128, 512, 1024])
+def test_dsv4_csv_pair_correctness(token_count):
+    import pandas as pd
+    df = pd.read_csv("aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv")
+    row = df[df["token"] == token_count].iloc[0]
+    kn1, kn2 = str(row["kernelName1"]), str(row["kernelName2"])
+    # Build DSV4-shape inputs (token_count, 7168, 3072, 384, topk=6)
+    # Run flydsl_moe_blockscale_stage1 with kn1's tile params
+    # Run flydsl_moe_blockscale_stage2 with kn2's tile params
+    # Compare with torch_stage1_blockscale_ref / torch_stage2_blockscale_ref
+    # Assert allclose (atol=1e-2 rtol=1e-2 — FP8 tolerance)
+```
+
+- [ ] **Step 6.5.3: Run all CSV-coverage tests on silicon**
+
+```bash
+docker exec atom_dsv4_feat /opt/venv/bin/python -m pytest \
+    op_tests/test_flydsl_moe_blockscale.py::test_dsv4_csv_kernel_names_resolve \
+    op_tests/test_flydsl_moe_blockscale.py::test_dsv4_csv_pair_correctness \
+    -v 2>&1 | tail -30
+```
+
+Expected: **every parametrized case PASSED** (no skipped, no fall-back, no allclose mismatch). Any failure here MUST be fixed before Task 7 silicon validation — fix the CSV row's tile choice OR the upstream kernel.
+
+- [ ] **Step 6.5.4: Commit + ensure this test is in the AITER PR (not skipped in CI).**
 
 ---
 
@@ -448,4 +588,19 @@ After review:
 [ ] Reject — re-plan
 ```
 
-When approved, invoke `superpowers:subagent-driven-development` to execute Tasks 1-10 with two-stage review per task.
+When approved, invoke `superpowers:subagent-driven-development` to execute Tasks 0-10 with two-stage review per task.
+
+---
+
+## Revision log
+
+### v2 — 2026-04-26 (review feedback addressed)
+
+- **P1 fix (license)**: Plan now mandates Apache-2.0 SPDX header + upstream copyright preservation in `aiter/ops/flydsl/moe_blockscale_kernels.py`. The new file is a derivative work licensed Apache-2.0, NOT MIT (mixing requires explicit dual-license declaration we do not do). Updated File Structure section + Step 1.1 scaffold + Step 2.1 reminder.
+- **P1 fix (dispatcher prefix)**: Predicate corrected from `kernelName1.startswith("flydsl_moe1_blockscale_")` (which would never match) to **`"_blockscale_" in kernelName1`** (substring match). Kernel names are `flydsl_moe1_afp8_wfp8_bf16_blockscale_t...` so substring is the correct distinguishing rule. Fixed both the File Structure summary AND Task 4's code block. Same rule for stage2.
+- **P1 fix (CSV-coverage test)**: Added Task 6.5 — iterates every CSV row, asserts each `kernelName1/2` resolves through the blockscale wrapper (not falling through to FP4 wrapper or CK), and runs numerical correctness vs torch reference for each distinct (kn1, kn2) pair across token counts 1/12/128/512/1024. Closes the gap where Task 5's 12-token-only test would silently miss decode-shape failures.
+- **P2 fix (FlyDSL pin)**: Added Task 0 (preflight) — explicitly verifies (a) FlyDSL upstream commit `8bee73f` (or newer) and the presence of `kernels/moe_blockscale_2stage.py`; (b) installed `flydsl` Python package satisfies aiter's `_MIN_FLYDSL_VERSION = 0.1.3` (current sunway513/aiter pin); (c) every FlyDSL API used by `moe_blockscale_2stage.py` imports successfully; (d) diff aiter's `mfma_preshuffle_pipeline.py` against upstream and decide port-or-keep. Reviewer noted some checkouts pin `0.1.2` — that requires a separate pin-bump PR before this plan starts.
+
+### v1 — 2026-04-26 (initial plan)
+
+10 tasks, no preflight, MIT SPDX in scaffold, prefix-match predicate, single-shape numerical test, no FlyDSL version verification.
