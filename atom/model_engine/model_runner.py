@@ -1748,6 +1748,164 @@ class ModelRunner:
         num_input_tokens = int(torch.max(num_tokens_across_dp).item())
         return num_input_tokens, num_tokens_across_dp, reqs_across_dp
 
+    # ------------------------------------------------------------------
+    # DSV4 W4 path helpers (issue sunway513/atom#37 P2.2 — W4.3-redo Task 9)
+    # ------------------------------------------------------------------
+
+    def _is_dsv4_model(self) -> bool:
+        """Detect DSV4 architectures from ``hf_config.architectures``.
+
+        Centralized so callers don't sprinkle string comparisons across
+        the codebase. Mirrors the multi-request guard used in
+        ``atom.utils.dsv4_guard``.
+        """
+        archs = getattr(self.config.hf_config, "architectures", None) or []
+        from atom.utils.dsv4_guard import is_dsv4_arch
+
+        return is_dsv4_arch(archs)
+
+    def _maybe_setup_dsv4_forward_batch(self, batch, attn_metadata, positions):
+        """W4.3-redo (issue #37): lazy-init pool, admit slots, build DSV4ForwardBatch.
+
+        Critical contract: ``is_dummy_run`` short-circuit at the VERY
+        entry. Warmup runs ``MAX_BATCHED_TOKENS``-sized synthetic tensors
+        that crash the W4 path with HSA exception 0x1016 (#37 Evidence
+        I / I' / I''). Only safe behavior is to fall through to the
+        legacy single-request path by returning ``(None, None)``.
+
+        Also short-circuits if ``ATOM_DSV4_USE_W4_PATH`` is unset — pool
+        allocation is harmless but admitting seqs without the flag would
+        leak slots and reorder kernels under the wrong feature gate.
+
+        Returns
+        -------
+        ``(pool, forward_batch)`` — both ``None`` if W4 path is not
+        active for this step, so callers can pass straight to
+        ``set_forward_context`` without further branching.
+        """
+        if not self._is_dsv4_model():
+            return None, None
+
+        # CRITICAL: must be first check after arch detection. This is the
+        # canonical fix for issue #42 — warmup synthetic tensors must NOT
+        # enter the W4 path.
+        if batch is not None and getattr(batch, "is_dummy_run", False):
+            return None, None
+
+        from atom.utils import envs
+
+        if not envs.ATOM_DSV4_USE_W4_PATH:
+            return None, None
+
+        if getattr(self, "_dsv4_pool", None) is None:
+            self._dsv4_pool = self._build_dsv4_pool()
+
+        # Admit any seqs in this batch the pool hasn't seen yet. Idempotent
+        # under re-admit (DSV4KVPool.admit_request returns the same slot).
+        seq_ids: list[int] = []
+        if batch is not None:
+            seq_ids = list(batch.req_ids)
+            for sid in seq_ids:
+                self._dsv4_pool.admit_request(sid)
+
+        forward_batch = None
+        if attn_metadata is not None and positions is not None:
+            try:
+                from atom.utils.dsv4_forward_batch import DSV4ForwardBatch
+
+                forward_batch = DSV4ForwardBatch.from_attn_metadata(
+                    attn_metadata,
+                    positions,
+                    seq_ids=seq_ids if seq_ids else None,
+                    pool=self._dsv4_pool,
+                )
+            except Exception as e:
+                logger.warning(
+                    "DSV4: failed to build ForwardBatch (%s); "
+                    "falling back to legacy path",
+                    e,
+                )
+                forward_batch = None
+
+        return self._dsv4_pool, forward_batch
+
+    def _build_dsv4_pool(self):
+        """Allocate a DSV4KVPool sized from the loaded model.
+
+        Reads layer count, head dim, window size, compress ratios, etc.
+        from the model's ``DeepseekV4Args`` dataclass. One pool per
+        ModelRunner = one per TP rank. If the runner has access to a
+        scheduler instance (``self.scheduler``), subscribes
+        ``pool.finish_request`` to the scheduler's finish-listener
+        registry — this is the P2.2 ownership boundary: the scheduler
+        stays pool-agnostic and the pool stays unaware of seq lifecycle
+        events except through the registered listener.
+        """
+        from atom.engine.kv_pool.dsv4_pool import DSV4KVPool, DSV4KVPoolConfig
+
+        args = self.model.args  # DeepseekV4Args
+
+        # Per-layer compress ratios. Prefer the canonical ``compress_ratios``
+        # tuple on DeepseekV4Args; fall back to an alternating 4/128 default
+        # for synthetic test models that don't populate it.
+        n_layers = args.n_layers
+        compress_ratios = getattr(args, "compress_ratios", ()) or ()
+        compress_ratio_per_layer: list[int] = []
+        for layer_idx in range(n_layers):
+            if layer_idx < len(compress_ratios):
+                r = int(compress_ratios[layer_idx])
+            else:
+                r = 128 if layer_idx % 2 == 0 else 4
+            compress_ratio_per_layer.append(r)
+        n_c4 = sum(1 for r in compress_ratio_per_layer if r == 4)
+        n_c128 = sum(1 for r in compress_ratio_per_layer if r == 128)
+
+        # Ring sizes mirror SGLang's get_compress_state_ring_size (4→8, 128→128).
+        ring_size_compressor = 2 * 4
+        ring_size_indexer = 2 * 64
+        ring_size_main = max(getattr(args, "window_size", 128), 64)
+
+        cfg = DSV4KVPoolConfig(
+            max_active_seqs=self.config.max_num_seqs,
+            num_layers=n_layers,
+            num_c4_layers=n_c4,
+            num_c128_layers=n_c128,
+            head_dim=args.head_dim,
+            rope_head_dim=getattr(args, "rope_head_dim", args.head_dim // 2),
+            window_size=getattr(args, "window_size", 128),
+            max_seq_len=getattr(args, "max_seq_len", 4096),
+            ring_size_main=ring_size_main,
+            ring_size_compressor=ring_size_compressor,
+            ring_size_indexer=ring_size_indexer,
+            compress_ratio_per_layer=compress_ratio_per_layer,
+            dtype=self.config.torch_dtype,
+            device=self.device,
+        )
+        pool = DSV4KVPool(cfg)
+
+        # P2.2 ownership boundary: subscribe pool's finish_request to the
+        # scheduler's finish events when one is reachable from the runner.
+        # In ATOM today the scheduler lives in EngineCore (parent process)
+        # while ModelRunner runs in a child process, so this branch is a
+        # no-op in production; it exists for in-process integration tests
+        # that hand a scheduler reference to the runner. The wiring shape
+        # is the canonical one — Scheduler stays pool-agnostic.
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is not None and hasattr(scheduler, "register_finish_listener"):
+            scheduler.register_finish_listener(pool.finish_request)
+
+        logger.info(
+            "DSV4 KV pool: n_layers=%d c4=%d c128=%d max_active_seqs=%d "
+            "window=%d device=%s",
+            n_layers,
+            n_c4,
+            n_c128,
+            cfg.max_active_seqs,
+            cfg.window_size,
+            cfg.device,
+        )
+        return pool
+
     def prepare_inputs(self, batch: ScheduledBatch, input_ids: torch.Tensor = None):
         is_prefill = batch.total_tokens_num_prefill > 0
         bs = batch.total_seqs_num
@@ -1812,6 +1970,14 @@ class ModelRunner:
             reqs_across_dp,
         )
 
+        # W4.3-redo (issue #37 P2.2): set up DSV4 W4-path pool + ForwardBatch
+        # if and only if (a) model is DSV4, (b) batch is not a dummy warmup,
+        # and (c) ATOM_DSV4_USE_W4_PATH is enabled. Returns (None, None)
+        # otherwise so the legacy single-request fallback path runs.
+        dsv4_pool, dsv4_forward_batch = self._maybe_setup_dsv4_forward_batch(
+            batch, attn_metadata, positions
+        )
+
         set_forward_context(
             attn_metadata=attn_metadata,
             atom_config=self.config,
@@ -1820,6 +1986,8 @@ class ModelRunner:
             num_tokens_across_dp=num_tokens_across_dp,
             spec_decode_metadata=spec_decode_metadata,
             ubatch_slices=ubatch_slices,
+            dsv4_pool=dsv4_pool,
+            dsv4_forward_batch=dsv4_forward_batch,
         )
         return graph_bs
 
