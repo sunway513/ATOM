@@ -18,6 +18,7 @@ from atom.quant_spec import (
 )
 from atom.utils import envs, get_open_port
 from atom.utils.distributed.utils import stateless_init_torch_distributed_process_group
+from atom.utils.dsv4_guard import validate_dsv4_multireq as _validate_dsv4_multireq
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import AutoConfig, GenerationConfig, PretrainedConfig
 
@@ -795,14 +796,6 @@ class SpeculativeConfig:
         method = self.method
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {num_spec_tokens=})"
-
-
-# DSV4 multi-request guard (issue #37) — guard helpers live in
-# atom.utils.dsv4_guard so unit tests can import them without the
-# conftest stub of atom.config short-circuiting the import chain.
-from atom.utils.dsv4_guard import (
-    validate_dsv4_multireq as _validate_dsv4_multireq,
-)  # noqa: E402
 
 
 @dataclass
