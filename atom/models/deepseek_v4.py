@@ -1584,6 +1584,21 @@ class DeepseekV4Attention(nn.Module):
 
         if forward_batch is None or not envs.ATOM_DSV4_USE_W4_PATH:
             return self._forward_legacy(x, start_pos)
+
+        # Single-seq fast-path (#37 W4.5 sprint-3 stop-gap): when the packed
+        # batch carries exactly one sequence, use the bit-correct
+        # ``_forward_legacy`` path with the seq's first absolute position
+        # as ``start_pos``. This sidesteps the W4-path Compressor prefill
+        # bug (intermediate compress-block boundaries skipped) which
+        # produces degenerate output even at conc=1. Multi-seq batches
+        # still use ``_forward_w4`` while sprint-4 lands the proper fix.
+        if forward_batch.cu_seqlens_q.numel() == 2:
+            sp = (
+                int(forward_batch.positions[0].item())
+                if forward_batch.positions.numel() > 0
+                else 0
+            )
+            return self._forward_legacy(x, sp)
         return self._forward_w4(x, forward_batch)
 
     def _forward_legacy(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
