@@ -373,7 +373,8 @@ class DSV4KVPool:
         if (
             self._compressor_state_c4 is not None
             and self._compressor_state_c128 is not None
-            and self._compressor_state_c4.shape[2:] == self._compressor_state_c128.shape[2:]
+            and self._compressor_state_c4.shape[2:]
+            == self._compressor_state_c128.shape[2:]
         ):
             self._compressor_state = torch.cat(
                 [self._compressor_state_c4, self._compressor_state_c128], dim=0
@@ -381,10 +382,16 @@ class DSV4KVPool:
             self._compressor_score = torch.cat(
                 [self._compressor_score_c4, self._compressor_score_c128], dim=0
             )
-        elif self._compressor_state_c4 is not None and self._compressor_state_c128 is None:
+        elif (
+            self._compressor_state_c4 is not None
+            and self._compressor_state_c128 is None
+        ):
             self._compressor_state = self._compressor_state_c4
             self._compressor_score = self._compressor_score_c4
-        elif self._compressor_state_c128 is not None and self._compressor_state_c4 is None:
+        elif (
+            self._compressor_state_c128 is not None
+            and self._compressor_state_c4 is None
+        ):
             self._compressor_state = self._compressor_state_c128
             self._compressor_score = self._compressor_score_c128
         else:
