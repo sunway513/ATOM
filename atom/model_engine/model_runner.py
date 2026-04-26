@@ -1860,9 +1860,23 @@ class ModelRunner:
         n_c4 = sum(1 for r in compress_ratio_per_layer if r == 4)
         n_c128 = sum(1 for r in compress_ratio_per_layer if r == 128)
 
-        # Ring sizes mirror SGLang's get_compress_state_ring_size (4→8, 128→128).
-        ring_size_compressor = 2 * 4
+        # Ring sizes for compressor / indexer state slabs.
+        # SGLang uses get_compress_state_ring_size(ratio): 4→8, 128→128 — i.e.
+        # PER-RATIO. Sprint 2 (Evidence K Bug #1+#2 fix) splits ATOM's pool
+        # into per-ratio slabs so each Compressor type gets its own ring +
+        # inner_dim. Compressor row math (deepseek_v4 _forward_w4):
+        # overlap=True (c4) → ring=2*ratio=8; overlap=False (c128) → ring=ratio=128.
+        ring_size_compressor_c4 = 2 * 4  # = 8
+        ring_size_compressor_c128 = 128
         ring_size_indexer = 2 * 64
+
+        # Compressor state inner_dim is also per-ratio (Evidence K Bug #2):
+        # c4 layer is the Indexer's inner Compressor with head_dim=index_head_dim
+        # and coff=2 (overlap=True); c128 layer is the standalone main
+        # Compressor with head_dim=main attention head_dim and coff=1.
+        index_head_dim = getattr(args, "index_head_dim", 128)
+        state_inner_dim_c4 = 2 * index_head_dim
+        state_inner_dim_c128 = args.head_dim
         ring_size_main = max(getattr(args, "window_size", 128), 64)
 
         cfg = DSV4KVPoolConfig(
@@ -1875,8 +1889,12 @@ class ModelRunner:
             window_size=getattr(args, "window_size", 128),
             max_seq_len=getattr(args, "max_seq_len", 4096),
             ring_size_main=ring_size_main,
-            ring_size_compressor=ring_size_compressor,
+            ring_size_compressor_c4=ring_size_compressor_c4,
+            ring_size_compressor_c128=ring_size_compressor_c128,
             ring_size_indexer=ring_size_indexer,
+            state_inner_dim_c4=state_inner_dim_c4,
+            state_inner_dim_c128=state_inner_dim_c128,
+            index_head_dim=index_head_dim,
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
             device=self.device,
