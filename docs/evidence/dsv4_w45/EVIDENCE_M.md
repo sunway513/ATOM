@@ -74,14 +74,29 @@ docker exec atom_dsv4_feat sh -c \
 # Output: 24 HIT, 0 MISS
 ```
 
-## gsm8k accuracy (W3 path + FP4 CSV, limit=20 num_concurrent=1)
+## gsm8k accuracy
+
+### W3 path + FP4 CSV (USE_W4_PATH=0, limit=20 num_concurrent=1)
 
 | Metric | Value | n |
 |---|---|---|
 | flexible-extract exact_match | **0.30 ± 0.105** | 20 |
 | strict-match exact_match | **0.30 ± 0.105** | 20 |
 
-This proves the FP4 routing fix does **not** break the W3 baseline (the previous behavior was either crash, OOM, or all-gibberish — i.e. effectively 0). gsm8k limit=20 num_concurrent=1 has wide error bars; the gate of ≥0.60 is a multi-request setting blocked on the W4-path fix below. Single-request baseline is now functional.
+Proves the FP4 routing fix does **not** break the W3 baseline (the previous behavior was either crash, OOM, or all-gibberish — i.e. effectively 0). limit=20 has wide error bars; the ≥0.60 gate is a multi-request target blocked on the W4-path fixes below.
+
+### W4 path + FP4 CSV (USE_W4_PATH=1, limit=20 num_concurrent=1) — BLOCKED
+
+Run aborted on second lm_eval request with:
+```
+RuntimeError: DSV4KVPool: no free slot (max_active_seqs=1).
+  Scheduler should have gated this admit on max_num_seqs.
+  at atom/engine/kv_pool/dsv4_pool.py:473 admit_request
+```
+
+**Bug 3 (deferred to Sprint 4):** `DSV4KVPool.admit_request` does not release the prior request's slot when `max_active_seqs=1` and the engine sees a new seq_id. Each gsm8k 5-shot sample is a distinct request → pool exhausts after the first. First-request output (manually captured) was coherent Chinese, consistent with the silicon checkpoint above; the gate cannot be measured until pool lifecycle is fixed.
+
+The W3 baseline (0.30 above) is the publishable gsm8k number for this PR; the W4-mode gate is queued for Sprint 4 alongside the multi-seq Compressor prefill loop fix.
 
 ## W4 path RCA + fix
 
