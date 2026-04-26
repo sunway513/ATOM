@@ -211,3 +211,40 @@ Remaining gap candidates (still unresolved):
 - larger `max_gen_toks` (4096) — diminishing returns expected but worth confirming
 
 Evidence: `docs/evidence/dsv4_w45/artifacts/m_gsm8k_w4_v2_max_tokens_1024.log`
+
+## Sprint 4.5 — gsm8k v3/v4 (chat-completions + custom doc_to_text)
+
+Two further attempts to close the 56pp gap by changing the request-side framing (server unchanged):
+
+### v3 — `/v1/chat/completions` (tokenizer chat_template path)
+Switched lm_eval to `local-chat-completions` to match SGLang's typical eval pattern. **Result: HTTP 400 — request rejected.** Root cause: DSV4-Pro tokenizer ships with **no `chat_template`** in `tokenizer_config.json` (verified by inspecting tokenizer keys). Upstream chat-template path is closed for this checkpoint until a template is added or the eval harness is taught a DSV4-specific one.
+
+### v4 — custom `gsm8k_dsv4` task with `#### [number]` instruction
+Built a standalone task yaml at `/tmp/lm_eval_tasks_dsv4/gsm8k_dsv4.yaml` (validated via `lm_eval validate`) with InferenceX-style explicit format instruction:
+> `Question: {{question}}\nReason step by step. End your response with the answer on the last line, formatted as: #### [number]\nAnswer:`
+
+| Run | flexible-extract | strict-match | max_tokens | n | log |
+|---|---|---|---|---|---|
+| W4 v1 | 0.35 ± 0.109 | 0.35 ± 0.109 | 256 | 20 | `m_gsm8k_w4_fp4.log` |
+| W4 v2 | 0.40 ± 0.112 | 0.35 ± 0.109 | 1024 | 20 | `m_gsm8k_w4_v2_max_tokens_1024.log` |
+| W4 v3 | **HTTP 400** | — | — | — | (no chat_template) |
+| **W4 v4 (custom yaml)** | **0.45 ± 0.114** | **0.00 ± 0.000** | 1024 | 20 | `lm_eval_w4_v4.log` |
+| SGLang B300 (ref) | 0.96 ± 0.020 | 0.96 ± 0.020 | (larger) | 100 | external |
+
+**Conclusion**: prompt-side framing was **NOT** the dominant gap.
+- Flexible-extract: v2→v4 = +5pp (0.40→0.45), within 1 stderr (~0.114) — i.e. noise.
+- Strict-match: v2→v4 = **−35pp (0.35→0.00)**. The custom `#### [number]` instruction **steered the model away from spontaneously emitting `####`** (which it had picked up from the 5-shot examples), so the strict regex now misses everything. Net: format coaching backfired.
+
+**Real gap remains 51pp (0.45 vs 0.96).** This is too large to be prompt framing. Next escalation: **MXFP4 scale layout audit** vs SGLang `flashinfer_mxfp4` backend (sub-agent dispatched 2026-04-26 20:02 UTC).
+
+### Final gap-candidate ranking after Sprint 4.5
+
+| Hypothesis | Test | Result | Verdict |
+|---|---|---|---|
+| max_gen_toks truncation | v2 (1024 vs 256) | +5pp flex | partial, not dominant |
+| chat_template missing | v3 (chat completions) | HTTP 400 | path closed (no template) |
+| Output format coaching | v4 (custom doc_to_text) | +5pp flex / −35pp strict | **NEGATIVE** — coached model out of `####` |
+| **MXFP4 scale layout** | (in flight) | — | **suspected dominant** |
+| max_gen_toks=4096 | (untested) | — | diminishing returns expected |
+
+Evidence: `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v4.log`
