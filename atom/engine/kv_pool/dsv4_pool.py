@@ -110,6 +110,15 @@ class DSV4KVPoolConfig:
     # (typically 512). Sprint-1 sized the indexer slab with `head_dim`
     # which broke the Indexer's kv_cache write.
     index_head_dim: int = 0
+    # Per-ratio Compressor MAIN-attention kv_cache sizing (Sprint 3 — Bug #6).
+    # The OUTER ``DSV4Attention.compressor`` writes per-seq compressed-KV at
+    # boundary triggers; main attention concatenates that history to its
+    # window KV at sparse_attn time. Sprint-1/2 had no pool slab for this —
+    # only the inner Compressor's kv_state and the Indexer's kv_cache.
+    # Per-layer max compressed positions = ``max_seq_len // ratio`` (16 for
+    # c128, 512 for c4 at max_seq_len=2048).
+    max_compressed_c4: int = 0
+    max_compressed_c128: int = 0
     # Sprint-1 single-value fields — kept as backward-compat shortcut. If set
     # AND the per-ratio fields are not, fan out to both.
     ring_size_compressor: int = 0
@@ -144,6 +153,12 @@ class DSV4KVPoolConfig:
         # (model_runner.py) pass the model's actual ``args.index_head_dim``.
         if self.index_head_dim == 0:
             self.index_head_dim = self.head_dim
+        # Default max_compressed_* to max_seq_len // ratio. Sprint-1 UTs that
+        # didn't pass these fields will get sensible per-ratio sizing.
+        if self.max_compressed_c4 == 0:
+            self.max_compressed_c4 = max(1, self.max_seq_len // 4)
+        if self.max_compressed_c128 == 0:
+            self.max_compressed_c128 = max(1, self.max_seq_len // 128)
         # Mirror back to the legacy single-value field for any reader that
         # still consults it (none in production after Sprint 2; some Sprint-1
         # UTs assert on it).
@@ -249,6 +264,9 @@ class DSV4KVPool:
         self._compressor_score_c128: Optional[torch.Tensor]
         self._compressor_state: Optional[torch.Tensor]
         self._compressor_score: Optional[torch.Tensor]
+        # Sprint 3 (Bug #6): per-ratio main-attention compressed-KV slabs.
+        self._compressor_main_kv_c4: Optional[torch.Tensor]
+        self._compressor_main_kv_c128: Optional[torch.Tensor]
         self._indexer_kv: Optional[torch.Tensor]
 
         # Map global layer_id → per-pool layer index for compressor / indexer.
@@ -397,6 +415,29 @@ class DSV4KVPool:
         else:
             self._compressor_state = None
             self._compressor_score = None
+
+        # ---- Per-ratio Compressor MAIN-attention KV slabs (Sprint 3 — Bug #6) ----
+        # OUTER `DSV4Attention.compressor.kv_cache`: stores per-seq compressed-KV
+        # at boundary writes; main attention concatenates this history to its
+        # window KV at sparse_attn time. head_dim is the main attention head
+        # dim (NOT index_head_dim — that's the Indexer's separate scoring KV).
+        if cfg.num_c4_layers > 0:
+            self._compressor_main_kv_c4 = torch.zeros(
+                (cfg.num_c4_layers, N, cfg.max_compressed_c4, cfg.head_dim),
+                dtype=cfg.dtype,
+                device=cfg.device,
+            )
+        else:
+            self._compressor_main_kv_c4 = None
+
+        if cfg.num_c128_layers > 0:
+            self._compressor_main_kv_c128 = torch.zeros(
+                (cfg.num_c128_layers, N, cfg.max_compressed_c128, cfg.head_dim),
+                dtype=cfg.dtype,
+                device=cfg.device,
+            )
+        else:
+            self._compressor_main_kv_c128 = None
 
         # Indexer pool: one slab per c4 layer. Last dim is `index_head_dim`,
         # NOT main attention `head_dim` (Sprint 2 Bug #5 fix).
@@ -627,6 +668,7 @@ class DSV4KVPool:
         kv_state_view: Optional[torch.Tensor] = None
         score_state_view: Optional[torch.Tensor] = None
         indexer_view: Optional[torch.Tensor] = None
+        compressor_kv_cache_view: Optional[torch.Tensor] = None
 
         # Sprint 2: dispatch into the per-ratio slab (Evidence K Bug #1+#2 fix).
         if ratio == 4 and self._compressor_state_c4 is not None:
@@ -634,11 +676,17 @@ class DSV4KVPool:
             kv_state_view = self._compressor_state_c4[c4_idx]
             assert self._compressor_score_c4 is not None
             score_state_view = self._compressor_score_c4[c4_idx]
+            # Sprint 3: outer Compressor's main-attention KV cache slab.
+            if self._compressor_main_kv_c4 is not None:
+                compressor_kv_cache_view = self._compressor_main_kv_c4[c4_idx]
         elif ratio == 128 and self._compressor_state_c128 is not None:
             c128_idx = self._c128_layer_idx[layer_id]
             kv_state_view = self._compressor_state_c128[c128_idx]
             assert self._compressor_score_c128 is not None
             score_state_view = self._compressor_score_c128[c128_idx]
+            # Sprint 3: outer Compressor's main-attention KV cache slab.
+            if self._compressor_main_kv_c128 is not None:
+                compressor_kv_cache_view = self._compressor_main_kv_c128[c128_idx]
 
         if ratio == 4 and self._indexer_kv is not None:
             idx_idx = self._indexer_layer_idx[layer_id]
@@ -649,4 +697,7 @@ class DSV4KVPool:
             "kv_state": kv_state_view,
             "score_state": score_state_view,
             "indexer_kv": indexer_view,
+            # Sprint 3 (Bug #6): the outer Compressor's main-attention kv_cache
+            # slab — main attention concatenates this to its window KV.
+            "compressor_kv_cache": compressor_kv_cache_view,
         }
