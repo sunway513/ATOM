@@ -166,26 +166,29 @@ def _install_patches() -> None:
 
                 setattr(linear, name, _make_patch(orig, name))
 
-    # 4. tuned_gemm.tgemm
+    # 4. tuned_gemm.tgemm — call sites use tgemm.mm(x, weight, bias, ...).
+    # tgemm is a singleton instance (TunedGemm), shared between aiter.tuned_gemm
+    # and linear.py via `from ... import tgemm`. Patching the bound method on
+    # the instance flows through to both call sites.
     try:
-        from aiter import tuned_gemm
+        from aiter.tuned_gemm import tgemm as _tgemm_inst
 
-        _orig_tgemm = tuned_gemm.tgemm
+        _orig_tgemm_mm = _tgemm_inst.mm
 
-        def _patched_tgemm(*a, **kw):
+        def _patched_tgemm_mm(*a, **kw):
             shapes = []
             for arg in a[:3]:
                 if torch.is_tensor(arg):
                     shapes.append(f"{tuple(arg.shape)}")
-            t = _mark(f"tgemm args[0:3].shapes={shapes}")
+            t = _mark(f"tgemm.mm args[0:3].shapes={shapes}")
             try:
-                return _orig_tgemm(*a, **kw)
+                return _orig_tgemm_mm(*a, **kw)
             finally:
-                _unmark("tgemm", t)
+                _unmark("tgemm.mm", t)
 
-        tuned_gemm.tgemm = _patched_tgemm
+        _tgemm_inst.mm = _patched_tgemm_mm
     except Exception as e:
-        print(f"[bisect] could not patch tgemm: {e}", flush=True)
+        print(f"[bisect] could not patch tgemm.mm: {e}", flush=True)
 
     print("[bisect] kernel call-site patches installed", flush=True)
 
