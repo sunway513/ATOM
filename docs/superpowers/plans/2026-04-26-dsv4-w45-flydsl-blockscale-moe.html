@@ -1,0 +1,1231 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSV4 W4.5 Accuracy Fix — FlyDSL Blockscale MoE Enablement &mdash; ATOM 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #C00000" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            ATOM
+              <img src="../../_static/atom_logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#requirements">Requirements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#from-source">From Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#docker-installation">Docker Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#verification">Verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quickstart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#serving-a-model">Serving a Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#batch-inference">Batch Inference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#distributed-serving">Distributed Serving</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#api-server">API Server</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#performance-tips">Performance Tips</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_run_guide.html">Model Run Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#quick-start">Quick Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#supported-models">Supported Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_run_guide.html#vllm-plugin-backend">vLLM Plugin Backend</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#nightly-ci-benchmark-configurations">Nightly CI Benchmark Configurations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#live-dashboard">Live Dashboard</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">User Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../architecture_guide.html">ATOM Architecture Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#system-overview">1. System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#component-architecture">2. Component Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#request-lifecycle">3. Request Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#forward-context-pattern">4. Forward Context Pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#multi-process-architecture">5. Multi-Process Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#sequence-lifecycle">6. Sequence Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#speculative-decoding-mtp-eagle">7. Speculative Decoding (MTP / EAGLE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#supported-mtp-architectures">Supported MTP architectures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#weight-sharing">Weight sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#propose-loop-mha-vs-mla-branching">Propose loop: MHA vs MLA branching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#prepare-mtp-decode"><code class="docutils literal notranslate"><span class="pre">prepare_mtp_decode()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../configuration_guide.html">ATOM Configuration Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#master-configuration-config">1. Master Configuration (<code class="docutils literal notranslate"><span class="pre">Config</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#compilation-configuration-compilationconfig">2. Compilation Configuration (<code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilation-levels-compilationlevel">2.1 Compilation Levels (<code class="docutils literal notranslate"><span class="pre">CompilationLevel</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilationconfig-fields">2.2 <code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#cuda-graph-mode-cudagraphmode">2.3 CUDA Graph Mode (<code class="docutils literal notranslate"><span class="pre">CUDAGraphMode</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quantization-configuration-quantizationconfig-layerquantconfig">3. Quantization Configuration (<code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> &amp; <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layerquantconfig-fields">3.1 <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quantizationconfig-attributes">3.2 <code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quanttype-values-from-aiter">3.3 <code class="docutils literal notranslate"><span class="pre">QuantType</span></code> Values (from AITER)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#supported-quantization-dtypes">3.4 Supported Quantization Dtypes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#auto-detection-from-huggingface">3.5 Auto-Detection from HuggingFace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layer-level-quantization-dispatch">3.6 Layer-Level Quantization Dispatch</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#parallel-configuration-parallelconfig">4. Parallel Configuration (<code class="docutils literal notranslate"><span class="pre">ParallelConfig</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#speculative-decoding-configuration-speculativeconfig">5. Speculative Decoding Configuration (<code class="docutils literal notranslate"><span class="pre">SpeculativeConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#table-driven-mtp-config">5.1 Table-Driven MTP Config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#post-init-behaviour-hf-config-override">5.2 Post-init behaviour (<code class="docutils literal notranslate"><span class="pre">hf_config_override</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#sampling-parameters-samplingparams">6. Sampling Parameters (<code class="docutils literal notranslate"><span class="pre">SamplingParams</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#cli-arguments-engineargs">7. CLI Arguments (<code class="docutils literal notranslate"><span class="pre">EngineArgs</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#environment-variables">8. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#variables-registered-in-atom-utils-envs-py">8.1 Variables Registered in <code class="docutils literal notranslate"><span class="pre">atom/utils/envs.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#additional-environment-variables-used-outside-envs-py">8.2 Additional Environment Variables (Used Outside <code class="docutils literal notranslate"><span class="pre">envs.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#decision-tree-choosing-a-compilation-level">9. Decision Tree – Choosing a Compilation Level</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_support_guide.html">ATOM Model Support Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#supported-model-architectures">1. Supported Model Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-architecture-details">2. Model Architecture Details</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-qwen3forcausallm">Qwen3 (<code class="docutils literal notranslate"><span class="pre">Qwen3ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qwen3moeforcausallm">Qwen3-MoE (<code class="docutils literal notranslate"><span class="pre">Qwen3MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-llamaforcausallm">Llama (<code class="docutils literal notranslate"><span class="pre">LlamaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mixtral-mixtralforcausallm">Mixtral (<code class="docutils literal notranslate"><span class="pre">MixtralForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-deepseekv2forcausallm">DeepSeek V2/V3 (<code class="docutils literal notranslate"><span class="pre">DeepseekV2ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-mtp-deepseekmtp">DeepSeek MTP (<code class="docutils literal notranslate"><span class="pre">DeepSeekMTP</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#gpt-oss-gptossforcausallm">GPT-OSS (<code class="docutils literal notranslate"><span class="pre">GptOssForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm-5-glmmoedsa-glmmoedsaforcausallm">GLM-5 / GlmMoeDsa (<code class="docutils literal notranslate"><span class="pre">GlmMoeDsaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm4-moe-glm4moeforcausallm">GLM4-MoE (<code class="docutils literal notranslate"><span class="pre">Glm4MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-next-qwen3nextforcausallm">Qwen3-Next (<code class="docutils literal notranslate"><span class="pre">Qwen3NextForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-qwen3-5forconditionalgeneration-and-qwen3-5moeforconditionalgeneration">Qwen3.5 (<code class="docutils literal notranslate"><span class="pre">Qwen3_5ForConditionalGeneration</span></code> and <code class="docutils literal notranslate"><span class="pre">Qwen3_5MoeForConditionalGeneration</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-mtp-qwen3-5mtp">Qwen3.5 MTP (<code class="docutils literal notranslate"><span class="pre">Qwen3_5MTP</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#weight-loading">3. Weight Loading</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#function-signature">Function Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#loading-flow">Loading Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#layers-beyond-num-hidden-layers">Layers Beyond <code class="docutils literal notranslate"><span class="pre">num_hidden_layers</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#adding-a-new-model">4. Adding a New Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-1-create-the-model-file">Step 1: Create the Model File</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-2-implement-layer-classes">Step 2: Implement Layer Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-3-implement-the-model-and-causallm-classes">Step 3: Implement the Model and CausalLM Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-4-register-the-model">Step 4: Register the Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-5-handle-weight-loading">Step 5: Handle Weight Loading</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-specific-optimizations">5. Model-Specific Optimizations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-fused-rmsnorm-quant-and-silu-mul-quant">Llama: Fused RMSNorm+Quant and SiLU+Mul+Quant</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-mla-fused-input-norm-qk-norm-fusion">DeepSeek V2/V3: MLA + Fused Input Norm + QK Norm Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qk-norm-rope-cache-quant-fusion">Qwen3-MoE: QK Norm + RoPE + Cache + Quant Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mtp-multi-token-prediction-speculative-decoding">MTP: Multi-Token Prediction (Speculative Decoding)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_ops_guide.html">ATOM Model Operations Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#aiter-integration-overview">1. AITER Integration Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#aiter-kernel-mapping-table">AITER Kernel Mapping Table</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#linear-operations">2. Linear Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#class-hierarchy">2.1 Class Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-dispatch">2.2 Quantization Dispatch</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#tensor-parallel-sharding">2.3 Tensor Parallel Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#weight-processing">2.4 Weight Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#attention-operations">3. Attention Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#base-attention-base-attention-py">3.1 Base: <code class="docutils literal notranslate"><span class="pre">Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">base_attention.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-attention-attention-mha-py">3.2 Multi-Head Attention (<code class="docutils literal notranslate"><span class="pre">attention_mha.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-latent-attention-attention-mla-py">3.3 Multi-head Latent Attention (<code class="docutils literal notranslate"><span class="pre">attention_mla.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#backend-abstraction-attentions-backends-py">3.4 Backend Abstraction (<code class="docutils literal notranslate"><span class="pre">attentions/backends.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#kv-cache-operations">3.5 KV Cache Operations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#mixture-of-experts-moe">4. Mixture of Experts (MoE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoe-class-moe-py">4.1 <code class="docutils literal notranslate"><span class="pre">FusedMoE</span></code> Class (<code class="docutils literal notranslate"><span class="pre">moe.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-methods">4.2 Quantization Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#topk-routing-topk-py">4.3 TopK Routing (<code class="docutils literal notranslate"><span class="pre">topK.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoeparallelconfig">4.4 <code class="docutils literal notranslate"><span class="pre">FusedMoEParallelConfig</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#mori-integration-fused-moe-mori-prepare-finalize-py">4.5 MORI Integration (<code class="docutils literal notranslate"><span class="pre">fused_moe/mori_prepare_finalize.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#moe-quantization-config-fused-moe-config-py">4.6 MoE Quantization Config (<code class="docutils literal notranslate"><span class="pre">fused_moe/config.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#triton-moe-fallback-fused-moe-triton-py">4.7 Triton MoE Fallback (<code class="docutils literal notranslate"><span class="pre">fused_moe_triton.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#normalization">5. Normalization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rmsnorm-layernorm-py">5.1 <code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#layernorm-layernorm-py">5.2 <code class="docutils literal notranslate"><span class="pre">LayerNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#activation-functions">6. Activation Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#siluandmul-activation-py">6.1 <code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code> (<code class="docutils literal notranslate"><span class="pre">activation.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#embedding-output-head">7. Embedding &amp; Output Head</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#vocabparallelembedding-embed-head-py">7.1 <code class="docutils literal notranslate"><span class="pre">VocabParallelEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#parallellmhead-embed-head-py">7.2 <code class="docutils literal notranslate"><span class="pre">ParallelLMHead</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#rotary-position-embedding-rope">8. Rotary Position Embedding (RoPE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rotaryembedding-rotary-embedding-py">8.1 <code class="docutils literal notranslate"><span class="pre">RotaryEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">rotary_embedding.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#get-rope-factory">8.2 <code class="docutils literal notranslate"><span class="pre">get_rope()</span></code> Factory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#integration-in-attention">8.3 Integration in Attention</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#sampling">9. Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#sampler-sampler-py">9.1 <code class="docutils literal notranslate"><span class="pre">Sampler</span></code> (<code class="docutils literal notranslate"><span class="pre">sampler.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rejectionsampler-rejection-sampler-py">9.2 <code class="docutils literal notranslate"><span class="pre">RejectionSampler</span></code> (<code class="docutils literal notranslate"><span class="pre">rejection_sampler.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#fused-kernel-chains">10. Fused Kernel Chains</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#source-files">Source Files</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-attentions"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/attentions/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-fused-moe"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/fused_moe/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-utils"><code class="docutils literal notranslate"><span class="pre">atom/utils/</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../scheduling_kv_cache_guide.html">ATOM Scheduling &amp; KV Cache Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduling-algorithm">1. Scheduling Algorithm</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-initialization">1.1 Scheduler Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#schedule-flow">1.2 Schedule Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#delay-factor">1.3 Delay Factor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#preemption">1.4 Preemption</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatch-structure">2. ScheduledBatch Structure</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor-signature">2.1 Constructor Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#fields">2.2 Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatchoutput">2.3 ScheduledBatchOutput</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-manager">3. Block Manager</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-class">3.1 Block Class</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#blockmanager-initialization">3.2 BlockManager Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#allocation-allocate">3.3 Allocation (<code class="docutils literal notranslate"><span class="pre">allocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#deallocation-deallocate">3.4 Deallocation (<code class="docutils literal notranslate"><span class="pre">deallocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#can-allocate-and-can-append-checks">3.5 Can-Allocate and Can-Append Checks</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#may-append-decode-extension">3.6 May-Append (Decode Extension)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#prefix-caching">4. Prefix Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-function">4.1 Hash Function</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-chaining">4.2 Hash Chaining</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#cache-lookup-during-allocation">4.3 Cache Lookup During Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#reference-counting">4.4 Reference Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#enabling-prefix-caching">4.5 Enabling Prefix Caching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#postprocessing">5. Postprocessing</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#signature">5.1 Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#token-appending">5.2 Token Appending</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stop-condition-checking">5.3 Stop Condition Checking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stream-output">5.4 Stream Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-cleanup">5.5 Sequence Cleanup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#placeholder-insertion">5.6 Placeholder Insertion</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#speculative-decoding-integration">6. Speculative Decoding Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-tracking">6.1 Scheduler Tracking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-tokens-in-scheduling">6.2 Draft Tokens in Scheduling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#acceptance-statistics">6.3 Acceptance Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-token-storage-on-sequences">6.4 Draft Token Storage on Sequences</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-management">7. Sequence Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor">7.1 Constructor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#core-fields">7.2 Core Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#timing-fields">7.3 Timing Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#computed-properties">7.4 Computed Properties</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#num-tokens-setter">7.5 num_tokens Setter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#lifecycle">7.6 Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencestatus-enum">7.7 SequenceStatus Enum</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencetype-enum">7.8 SequenceType Enum</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../distributed_guide.html">ATOM Distributed Inference Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#tensor-parallelism-tp">1. Tensor Parallelism (TP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#weight-sharding">Weight Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#process-group-initialization">Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#allreduce">AllReduce</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#configuration">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#data-parallelism-dp">2. Data Parallelism (DP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-process-group-initialization">DP Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#synchronized-busy-loop">Synchronized Busy Loop</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dummy-batch-execution">Dummy Batch Execution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#device-assignment">Device Assignment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dpmetadata">DPMetadata</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#coremanager-dp-orchestration">CoreManager (DP Orchestration)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id1">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#expert-parallelism-ep">3. Expert Parallelism (EP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#fusedmoeparallelconfig">FusedMoEParallelConfig</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#expert-distribution">Expert Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#mori-communication">MORI Communication</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id2">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#environment-variables">4. Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#multi-gpu-deployment-examples">5. Multi-GPU Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#deepseek-r1-on-8-gpus-tp8">DeepSeek-R1 on 8 GPUs (TP8)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#qwen3-235b-a22b-on-8-gpus-tp8-ep">Qwen3-235B-A22B on 8 GPUs (TP8 + EP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#kimi-k2-thinking-on-4-gpus-tp4">Kimi-K2-Thinking on 4 GPUs (TP4)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#combined-parallelism-strategies">6. Combined Parallelism Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-only-dense-models">TP Only (Dense Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-ep-moe-models">TP + EP (MoE Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-dense-throughput">TP + DP (Dense Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-ep-moe-throughput">TP + DP + EP (MoE Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-attention-mode">DP Attention Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../compilation_cudagraph_guide.html">ATOM Compilation &amp; CUDA Graphs Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-levels">1. Compilation Levels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-0-no-compilation">Level 0 – NO_COMPILATION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-1-dynamo-as-is">Level 1 – DYNAMO_AS_IS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-2-dynamo-once">Level 2 – DYNAMO_ONCE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-3-piecewise-production-default">Level 3 – PIECEWISE (Production Default)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-modes">2. CUDA Graph Modes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#none-value-0">NONE (value: 0)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-value-1">PIECEWISE (value: 1)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-value-2">FULL (value: 2)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-decode-only-value-full-none">FULL_DECODE_ONLY (value: (FULL, NONE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-and-piecewise-value-full-piecewise">FULL_AND_PIECEWISE (value: (FULL, PIECEWISE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#helper-methods">Helper Methods</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-capture">3. CUDA Graph Capture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#capture-flow">Capture Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-keying">Graph Keying</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-pool-sharing">Graph Pool Sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#default-capture-sizes">Default Capture Sizes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-replay-in-run-model">Graph Replay in run_model()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-compilation">4. Piecewise Compilation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#splitting-operations">Splitting Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cache-management">Cache Management</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forward-context-stateless-dispatch">5. Forward Context &amp; Stateless Dispatch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forwardcontext-fields">ForwardContext Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#lifecycle">Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#context-dataclass">Context Dataclass</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#integration-with-cuda-graphs">Integration with CUDA Graphs</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compiler-backend">6. Compiler Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilermanager">CompilerManager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilerinterface">CompilerInterface</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductoradaptor">InductorAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductorstandaloneadaptor">InductorStandaloneAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#vllmbackend">VllmBackend</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#support-torch-compile-decorator">&#64;support_torch_compile Decorator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#custom-op-registration">Custom Op Registration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#configuration-options">7. Configuration Options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#decision-tree">8. Decision Tree</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#common-configurations">Common Configurations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../serving_benchmarking_guide.html">ATOM Serving &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#openai-compatible-server">1. OpenAI-Compatible Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#endpoints">1.1 Endpoints</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#request-models">1.2 Request Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#response-models">1.3 Response Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#server-startup">1.4 Server Startup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#example-curl">1.5 Example: curl</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-api-llmengine">2. Programmatic API (LLMEngine)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#initialization">2.1 Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#samplingparams">2.2 SamplingParams</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#core-methods">2.3 Core Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#synchronous-generation-example">2.4 Synchronous Generation Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#asynchronous-streaming-usage">2.5 Asynchronous / Streaming Usage</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#simple-inference">3. Simple Inference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#usage">3.1 Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#what-it-does">3.2 What It Does</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#benchmarking">4. Benchmarking</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#metrics">4.1 Metrics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#key-cli-arguments">4.2 Key CLI Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#backend-request-functions">4.3 Backend Request Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#full-benchmark-example">4.4 Full Benchmark Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling">5. Profiling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#configuration">5.1 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#online-profiling-http">5.2 Online Profiling (HTTP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-profiling">5.3 Programmatic Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#offline-profiling-script">5.4 Offline Profiling Script</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling-during-benchmarks">5.5 Profiling During Benchmarks</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#speculative-decoding-mtp">6. Speculative Decoding (MTP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#architecture">6.1 Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#id1">6.2 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#mtp-statistics">6.3 MTP Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#how-rejection-sampling-works">6.4 How Rejection Sampling Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#deployment-examples">7. Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#single-gpu">7.1 Single-GPU</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#multi-gpu-with-tensor-parallelism">7.2 Multi-GPU with Tensor Parallelism</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#docker-deployment">7.3 Docker Deployment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#engine-cli-arguments-engineargs">7.4 Engine CLI Arguments (EngineArgs)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#accuracy-validation">8. Accuracy Validation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#setup">8.1 Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#run-evaluation">8.2 Run Evaluation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Framework Integrations</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../vllm_plugin_backend_guide.html">ATOM vLLM Plugin Backend</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#architecture">1. Architecture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#design-overview">1.1 Design overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-it-works">1.2 How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#plugin-lifecycle">1.3 Plugin lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#key-modules">1.4 Key Modules</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#component-diagram">1.5 Component Diagram</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#configuration-translation">2. Configuration Translation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#pluginconfig-fields">2.1 <code class="docutils literal notranslate"><span class="pre">PluginConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#vllm-config-mapping">2.2 vLLM Config Mapping</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#attention-integration">3. Attention Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-the-backend-is-selected">3.1 How the Backend Is Selected</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#supported-models">4. Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#installation-and-quick-start">5. Installation and Quick Start</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#prerequisites">5.1 Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#set-up-the-environment">5.2 Set Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#launch-vllm-with-atom-plugin">5.3 Launch vLLM with ATOM Plugin</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#benchmark-serving">5.4 Benchmark Serving</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#enable-profiling">5.5 Enable Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#disable-atom-plugin">5.6 Disable ATOM Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/serving.html">Serving API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#llmengine-class">LLMEngine Class</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/serving.html#methods">Methods</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/serving.html#generate">generate()</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#samplingparams">SamplingParams</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#return-values">Return Values</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/models.html">Supported Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#llama-models">Llama Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#gpt-models">GPT Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#mixtral">Mixtral</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#other-architectures">Other Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#model-configuration">Model Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#performance-by-model-size">Performance by Model Size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#quantization">Quantization</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #C00000" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">ATOM</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">DSV4 W4.5 Accuracy Fix — FlyDSL Blockscale MoE Enablement</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/superpowers/plans/2026-04-26-dsv4-w45-flydsl-blockscale-moe.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="dsv4-w4-5-accuracy-fix-flydsl-blockscale-moe-enablement">
+<h1>DSV4 W4.5 Accuracy Fix — FlyDSL Blockscale MoE Enablement<a class="headerlink" href="#dsv4-w4-5-accuracy-fix-flydsl-blockscale-moe-enablement" title="Link to this heading"></a></h1>
+<blockquote>
+<div><p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: <code class="docutils literal notranslate"><span class="pre">superpowers:subagent-driven-development</span></code> or <code class="docutils literal notranslate"><span class="pre">superpowers:executing-plans</span></code> to implement task-by-task. Steps use checkbox (<code class="docutils literal notranslate"><span class="pre">-</span> <span class="pre">[</span> <span class="pre">]</span></code>) for tracking.</p>
+</div></blockquote>
+<p><strong>Goal:</strong> Restore W4.5 silicon output coherence (currently gibberish in both W4 and baseline <code class="docutils literal notranslate"><span class="pre">flag=0</span></code>) by routing DSV4’s MoE through the FlyDSL <strong>blockscale</strong> kernel (<code class="docutils literal notranslate"><span class="pre">per_1x128</span></code>, FP8/FP8) instead of the currently-misaligned CK MoE backend. Closes the accuracy half of issue sunway513/atom#37.</p>
+<p><strong>Architecture:</strong> Single workstream spanning three repos owned by the same team:</p>
+<ol class="arabic simple">
+<li><p><strong>FlyDSL upstream</strong> (<code class="docutils literal notranslate"><span class="pre">ROCm/FlyDSL</span></code>) — already has <code class="docutils literal notranslate"><span class="pre">kernels/moe_blockscale_2stage.py</span></code> (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128, FP8-only, g1u1) + tested via <code class="docutils literal notranslate"><span class="pre">tests/kernels/test_moe_blockscale.py</span></code>. Source of truth.</p></li>
+<li><p><strong>AITER</strong> (<code class="docutils literal notranslate"><span class="pre">sunway513/aiter</span></code>) — port the kernel, register kernel names, dispatcher, tune config. Where the integration lives.</p></li>
+<li><p><strong>ATOM</strong> (<code class="docutils literal notranslate"><span class="pre">sunway513/atom</span></code>) — re-run silicon W4 single+multi + accuracy gate. Validation.</p></li>
+</ol>
+<p><strong>Tech Stack:</strong> FlyDSL (Python DSL → MLIR → ROCm), aiter (Python wrapper + JIT cache), ATOM (engine), MI355X (gfx950 / FP8 e4m3fn).</p>
+<p><strong>Upstream pins (verified before plan execution — see Task 0):</strong></p>
+<ul class="simple">
+<li><p>FlyDSL <code class="docutils literal notranslate"><span class="pre">ROCm/FlyDSL</span></code> commit <code class="docutils literal notranslate"><span class="pre">8bee73f</span></code> (verified to contain <code class="docutils literal notranslate"><span class="pre">kernels/moe_blockscale_2stage.py</span></code>, ~136KB, latest as of 2026-04-26).</p></li>
+<li><p>AITER <code class="docutils literal notranslate"><span class="pre">sunway513/aiter</span></code> <code class="docutils literal notranslate"><span class="pre">_MIN_FLYDSL_VERSION</span> <span class="pre">=</span> <span class="pre">Version(&quot;0.1.3&quot;)</span></code> (<code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/__init__.py</span></code>); container has <code class="docutils literal notranslate"><span class="pre">flydsl</span> <span class="pre">0.1.4.2</span></code> installed which satisfies the pin. If reviewing against a different aiter checkout that pins <code class="docutils literal notranslate"><span class="pre">0.1.2</span></code>, bump the pin first.</p></li>
+<li><p>License: FlyDSL upstream is <strong>Apache-2.0</strong> with <code class="docutils literal notranslate"><span class="pre">Copyright</span> <span class="pre">(c)</span> <span class="pre">2025</span> <span class="pre">FlyDSL</span> <span class="pre">Project</span> <span class="pre">Contributors</span></code>. AITER and ATOM are MIT. <strong>All ported source MUST preserve the Apache-2.0 SPDX header + Apache copyright notice. The new aiter file is a derivative work licensed Apache-2.0, NOT MIT</strong> (mixing licenses in one file requires explicit dual-license header — we don’t do that).</p></li>
+</ul>
+<hr class="docutils" />
+<section id="context-must-read-background">
+<h2>Context (must-read background)<a class="headerlink" href="#context-must-read-background" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/CONTEXT_HANDOFF_W45.md</span></code> — full session context</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/EVIDENCE_L.md</span></code> — Sprint 3 silicon-green report + accuracy CK MoE diagnosis addendum</p></li>
+<li><p>User memory <code class="docutils literal notranslate"><span class="pre">project_aiterforge_fp8.md</span></code> — validated tile configs (tile_m=64, tile_n=128, tile_k=256 for &gt;128 tokens; tile_m=16 has NaN bug, use tile_m=32 for ≤128 tokens)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">feedback_aiter_atom_one_team.md</span></code> — ATOM/AITER/FlyDSL is one workstream</p></li>
+</ul>
+</section>
+<section id="why-the-bug-exists-one-paragraph-recap">
+<h2>Why the bug exists (one-paragraph recap)<a class="headerlink" href="#why-the-bug-exists-one-paragraph-recap" title="Link to this heading"></a></h2>
+<p>DSV4’s <code class="docutils literal notranslate"><span class="pre">config.json</span></code> declares <code class="docutils literal notranslate"><span class="pre">weight_block_size:</span> <span class="pre">[128,</span> <span class="pre">128]</span></code> → <code class="docutils literal notranslate"><span class="pre">QuantType.per_1x128</span></code>. ATOM passes this to <code class="docutils literal notranslate"><span class="pre">aiter.fused_moe</span></code>. aiter’s tuned-config lookup misses (no DSV4 row exists). The fallback path picks CK MoE (<code class="docutils literal notranslate"><span class="pre">ck_moe_stage1/2</span></code>) which was compiled assuming a different scale-stride layout. Numerical garbage → gibberish output. FlyDSL’s upstream <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> is built <strong>explicitly</strong> for ScaleBlockN/K=128 FP8/FP8 — exactly the right kernel for DSV4. We just haven’t ported it.</p>
+</section>
+<section id="what-s-already-there-so-we-don-t-double-build">
+<h2>What’s already there (so we don’t double-build)<a class="headerlink" href="#what-s-already-there-so-we-don-t-double-build" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Artifact</p></th>
+<th class="head"><p>Location</p></th>
+<th class="head"><p>Status</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm1</span></code> (kernel impl)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">FlyDSL/kernels/moe_blockscale_2stage.py:73</span></code></p></td>
+<td><p>✅ exists, tested</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm2</span></code> / <code class="docutils literal notranslate"><span class="pre">_ex</span></code> (kernel impl)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">FlyDSL/kernels/moe_blockscale_2stage.py</span></code></p></td>
+<td><p>✅ exists, tested</p></td>
+</tr>
+<tr class="row-even"><td><p>Numerical reference test</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">FlyDSL/tests/kernels/test_moe_blockscale.py</span></code></p></td>
+<td><p>✅ exists, runs against aiter fused blockscale ref</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_preshuffle_pipeline.py</span></code> (shared)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py</span></code></p></td>
+<td><p>✅ already in aiter</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_epilogues.py</span></code> (shared)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/kernels/mfma_epilogues.py</span></code></p></td>
+<td><p>✅ already in aiter</p></td>
+</tr>
+<tr class="row-odd"><td><p>FlyDSL FP4 MoE <code class="docutils literal notranslate"><span class="pre">flydsl_moe_stage1/2</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py:547,825</span></code></p></td>
+<td><p>✅ used as the <strong>template</strong> for our port</p></td>
+</tr>
+<tr class="row-even"><td><p>AITER FlyDSL dispatcher</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">aiter/fused_moe.py:972-1022</span></code></p></td>
+<td><p>✅ existing routing logic; we extend it</p></td>
+</tr>
+<tr class="row-odd"><td><p>AITER tuned config CSV</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">aiter/configs/tuned_fmoe.csv</span></code> + <code class="docutils literal notranslate"><span class="pre">model_configs/*.csv</span></code></p></td>
+<td><p>✅ existing format; we add DSV4 rows</p></td>
+</tr>
+<tr class="row-even"><td><p>FlyDSL FP8/FP8/bf16 kernel registry</p></td>
+<td><p>112 stage1 + 48 stage2 already registered (per_1x32)</p></td>
+<td><p>⚠️ exists for FP8/FP8 dtypes but NOT for blockscale variant</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="file-structure">
+<h2>File Structure<a class="headerlink" href="#file-structure" title="Link to this heading"></a></h2>
+<section id="aiter-repo-sunway513-aiter">
+<h3>AITER repo (<code class="docutils literal notranslate"><span class="pre">sunway513/aiter</span></code>)<a class="headerlink" href="#aiter-repo-sunway513-aiter" title="Link to this heading"></a></h3>
+<p><strong>New files:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_blockscale_kernels.py</span></code> — Python wrapper around FlyDSL’s <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm1/2</span></code>, mirroring <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py</span></code>’s API surface.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv</span></code> — DSV4-specific tuned MoE config rows pointing to <code class="docutils literal notranslate"><span class="pre">flydsl_moe1/2_blockscale_*</span></code> kernel names.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">op_tests/test_flydsl_moe_blockscale.py</span></code> — port of <code class="docutils literal notranslate"><span class="pre">FlyDSL/tests/kernels/test_moe_blockscale.py</span></code>, asserts numerical correctness vs torch reference.</p></li>
+</ul>
+<p><strong>Modified files:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/__init__.py</span></code> — export <code class="docutils literal notranslate"><span class="pre">flydsl_moe_blockscale_stage1/2</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py</span></code> — add <code class="docutils literal notranslate"><span class="pre">get_flydsl_blockscale_stage1/2_kernels</span></code> registries (kernel names: <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp8_wfp8_bf16_blockscale_t{M}x{N}x{K}[_{mode}]</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/fused_moe.py</span></code> — extend <code class="docutils literal notranslate"><span class="pre">is_flydsl1</span></code>/<code class="docutils literal notranslate"><span class="pre">is_flydsl2</span></code> dispatcher: when <strong><code class="docutils literal notranslate"><span class="pre">&quot;_blockscale_&quot;</span> <span class="pre">in</span> <span class="pre">kernelName1</span></code></strong> (substring match, NOT prefix — kernel names are <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp8_wfp8_bf16_blockscale_t...</span></code>) route to a new <code class="docutils literal notranslate"><span class="pre">_flydsl_blockscale_stage1_wrapper</span></code>. Same for stage2.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">aiter/jit/optCompilerConfig.json</span></code> — register the new module if compilation needs codegen flags.</p></li>
+</ul>
+</section>
+<section id="flydsl-upstream-rocm-flydsl">
+<h3>FlyDSL upstream (<code class="docutils literal notranslate"><span class="pre">ROCm/FlyDSL</span></code>)<a class="headerlink" href="#flydsl-upstream-rocm-flydsl" title="Link to this heading"></a></h3>
+<p><strong>No code changes</strong> — we consume <code class="docutils literal notranslate"><span class="pre">kernels/moe_blockscale_2stage.py</span></code> as-is. If during port we hit a bug or missing tile combo, fix upstream and bump our pin (treated as one workstream, but keep the patch surfaces minimal).</p>
+</section>
+<section id="atom-repo-sunway513-atom">
+<h3>ATOM repo (<code class="docutils literal notranslate"><span class="pre">sunway513/atom</span></code>)<a class="headerlink" href="#atom-repo-sunway513-atom" title="Link to this heading"></a></h3>
+<p><strong>No code changes</strong> — once aiter’s <code class="docutils literal notranslate"><span class="pre">fused_moe</span></code> routes DSV4 to FlyDSL blockscale, ATOM picks it up automatically through the existing <code class="docutils literal notranslate"><span class="pre">aiter.fused_moe.fused_moe</span></code> import in <code class="docutils literal notranslate"><span class="pre">atom/model_ops/fused_moe/modular_kernel.py:347</span></code>.</p>
+<p><strong>Validation only:</strong></p>
+<ul class="simple">
+<li><p>Re-run <code class="docutils literal notranslate"><span class="pre">tests/silicon/silicon_w43_smoke.py</span> <span class="pre">--mode</span> <span class="pre">single</span></code> (flag=0 baseline + flag=1 W4) → expect coherent Chinese</p></li>
+<li><p>Re-run <code class="docutils literal notranslate"><span class="pre">--mode</span> <span class="pre">multi</span></code> → 4-conc with coherent outputs</p></li>
+<li><p>gsm8k limit=20 conc=4 ≥ 60% W4.5 owner gate</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="bite-sized-tasks">
+<h2>Bite-Sized Tasks<a class="headerlink" href="#bite-sized-tasks" title="Link to this heading"></a></h2>
+<section id="task-0-preflight-pin-verify-flydsl-upstream-version-compatibility">
+<h3>Task 0: Preflight — pin &amp; verify FlyDSL upstream + version compatibility<a class="headerlink" href="#task-0-preflight-pin-verify-flydsl-upstream-version-compatibility" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong> read-only inspection, no commits in this task.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 0.1: Verify FlyDSL upstream commit + file presence</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>-C<span class="w"> </span>/home/pensun/FlyDSL<span class="w"> </span>log<span class="w"> </span>--oneline<span class="w"> </span>-1
+ls<span class="w"> </span>-la<span class="w"> </span>/home/pensun/FlyDSL/kernels/moe_blockscale_2stage.py
+ls<span class="w"> </span>-la<span class="w"> </span>/home/pensun/FlyDSL/kernels/mfma_preshuffle_pipeline.py
+ls<span class="w"> </span>-la<span class="w"> </span>/home/pensun/FlyDSL/kernels/mfma_epilogues.py
+git<span class="w"> </span>-C<span class="w"> </span>/home/pensun/FlyDSL<span class="w"> </span>log<span class="w"> </span>--oneline<span class="w"> </span>--<span class="w"> </span>kernels/moe_blockscale_2stage.py<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-3
+</pre></div>
+</div>
+<p>Expected: HEAD <code class="docutils literal notranslate"><span class="pre">8bee73f</span></code> (or newer). All three files present. If <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> is missing, <strong>STOP</strong> — pull upstream first (<code class="docutils literal notranslate"><span class="pre">cd</span> <span class="pre">/home/pensun/FlyDSL</span> <span class="pre">&amp;&amp;</span> <span class="pre">git</span> <span class="pre">fetch</span> <span class="pre">origin</span> <span class="pre">&amp;&amp;</span> <span class="pre">git</span> <span class="pre">checkout</span> <span class="pre">origin/main</span></code>).</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 0.2: Verify installed <code class="docutils literal notranslate"><span class="pre">flydsl</span></code> Python package satisfies aiter’s <code class="docutils literal notranslate"><span class="pre">_MIN_FLYDSL_VERSION</span></code></strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">import flydsl</span>
+<span class="s2">print(f&#39;installed: {flydsl.__version__}&#39;)</span>
+<span class="s2">from aiter.ops.flydsl.utils import is_flydsl_available</span>
+<span class="s2">print(f&#39;aiter_satisfied: {is_flydsl_available()}&#39;)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<p>Expected: installed &gt;= <code class="docutils literal notranslate"><span class="pre">0.1.3</span></code> AND <code class="docutils literal notranslate"><span class="pre">aiter_satisfied=True</span></code>. If the local aiter checkout pins <code class="docutils literal notranslate"><span class="pre">0.1.2</span></code> or older, bump the pin in <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/__init__.py</span></code> first as a separate PR.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 0.3: Verify FlyDSL APIs used by <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> are present in installed <code class="docutils literal notranslate"><span class="pre">flydsl</span></code></strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">import flydsl.compiler as flyc</span>
+<span class="s2">import flydsl.expr as fx</span>
+<span class="s2">from flydsl.expr import gpu, buffer_ops, vector, rocdl, range_constexpr</span>
+<span class="s2">from flydsl.runtime.device import get_rocm_arch</span>
+<span class="s2">from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr</span>
+<span class="s2">from flydsl._mlir import ir</span>
+<span class="s2">from flydsl._mlir.dialects import llvm, scf, memref</span>
+<span class="s2">from flydsl._mlir.dialects import math as math_dialect</span>
+<span class="s2">from flydsl.expr.typing import T</span>
+<span class="s2">from flydsl.expr.arith import ArithValue</span>
+<span class="s2">print(&#39;all FlyDSL imports used by moe_blockscale_2stage.py: OK&#39;)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<p>Expected: <code class="docutils literal notranslate"><span class="pre">OK</span></code>, no <code class="docutils literal notranslate"><span class="pre">ImportError</span></code>. If any import fails, escalate (FlyDSL upstream + version drift; bump or backport).</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 0.4: Diff aiter’s <code class="docutils literal notranslate"><span class="pre">mfma_preshuffle_pipeline.py</span></code> against FlyDSL upstream</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>diff<span class="w"> </span>-u<span class="w"> </span>/home/pensun/FlyDSL/kernels/mfma_preshuffle_pipeline.py<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>/home/pensun/aiter-lingpeng/aiter/ops/flydsl/kernels/mfma_preshuffle_pipeline.py<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-80
+diff<span class="w"> </span>-u<span class="w"> </span>/home/pensun/FlyDSL/kernels/mfma_epilogues.py<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>/home/pensun/aiter-lingpeng/aiter/ops/flydsl/kernels/mfma_epilogues.py<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-80
+</pre></div>
+</div>
+<p>Decide: if diffs are nontrivial AND <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> uses APIs only in upstream version → port the upstream version into aiter as part of Task 2 (extends scope but keeps the kernel set consistent). If diffs are noise (whitespace / docstrings), proceed unmodified.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 0.5: Document the verified upstream pin</strong> in a comment at the top of the plan + add to commit messages of subsequent tasks. No PR yet.</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-1-port-moe-blockscale-2stage-py-skeleton-into-aiter">
+<h3>Task 1: Port <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> skeleton into aiter<a class="headerlink" href="#task-1-port-moe-blockscale-2stage-py-skeleton-into-aiter" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Create: <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_blockscale_kernels.py</span></code></p></li>
+<li><p>Reference: <code class="docutils literal notranslate"><span class="pre">/home/pensun/FlyDSL/kernels/moe_blockscale_2stage.py:1-2828</span></code></p></li>
+<li><p>Reference: <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py</span></code> (existing FP4 port — same structure to mirror)</p></li>
+<li><p>[ ] <strong>Step 1.1: Create <code class="docutils literal notranslate"><span class="pre">moe_blockscale_kernels.py</span></code> with the same module shape as <code class="docutils literal notranslate"><span class="pre">moe_kernels.py</span></code></strong></p></li>
+</ul>
+<p><strong>License preservation (P1)</strong>: this file is a derivative of <code class="docutils literal notranslate"><span class="pre">ROCm/FlyDSL/kernels/moe_blockscale_2stage.py</span></code> (Apache-2.0). The new file MUST carry an Apache-2.0 SPDX header and preserve the upstream copyright. Do NOT use AITER’s default MIT header — mixing licenses in one file requires an explicit dual-license declaration that we are not doing.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># aiter/ops/flydsl/moe_blockscale_kernels.py</span>
+<span class="c1"># SPDX-License-Identifier: Apache-2.0</span>
+<span class="c1"># Copyright (c) 2025 FlyDSL Project Contributors</span>
+<span class="c1"># Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.</span>
+<span class="c1">#</span>
+<span class="c1"># Derived from ROCm/FlyDSL kernels/moe_blockscale_2stage.py (Apache-2.0).</span>
+<span class="c1"># Upstream ref: ROCm/FlyDSL commit 8bee73f (or newer) — see Task 0.1.</span>
+<span class="sd">&quot;&quot;&quot;FlyDSL Blockscale MOE kernel management (per_1x128 FP8/FP8, g1u1).</span>
+
+<span class="sd">Mirrors aiter/ops/flydsl/moe_kernels.py for the BLOCKSCALE variant.</span>
+<span class="sd">Kernel name pattern: ``flydsl_moe{stage}_afp8_wfp8_{out}_blockscale_t{M}x{N}x{K}[_{mode}]``.</span>
+
+<span class="sd">Source of truth: ROCm/FlyDSL `kernels/moe_blockscale_2stage.py`.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">functools</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">Optional</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="n">_KERNEL_PARAMS</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="n">_SUFFIX_RE</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;(?:_w(?P&lt;wpe&gt;\d+))?(?:_bnt(?P&lt;bnt&gt;\d+))?(?:_xcd(?P&lt;xcd&gt;\d+))?$&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">flydsl_blockscale_kernel_name</span><span class="p">(</span><span class="n">stage</span><span class="p">,</span> <span class="n">tile_m</span><span class="p">,</span> <span class="n">tile_n</span><span class="p">,</span> <span class="n">tile_k</span><span class="p">,</span>
+                                   <span class="n">waves_per_eu</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">b_nt</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">xcd</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;flydsl_moe</span><span class="si">{</span><span class="n">stage</span><span class="si">}</span><span class="s2">_afp8_wfp8_bf16_blockscale_t</span><span class="si">{</span><span class="n">tile_m</span><span class="si">}</span><span class="s2">x</span><span class="si">{</span><span class="n">tile_n</span><span class="si">}</span><span class="s2">x</span><span class="si">{</span><span class="n">tile_k</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">if</span> <span class="n">waves_per_eu</span> <span class="ow">and</span> <span class="n">waves_per_eu</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">name</span> <span class="o">+=</span> <span class="sa">f</span><span class="s2">&quot;_w</span><span class="si">{</span><span class="n">waves_per_eu</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">if</span> <span class="n">b_nt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">b_nt</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">name</span> <span class="o">+=</span> <span class="sa">f</span><span class="s2">&quot;_bnt</span><span class="si">{</span><span class="n">b_nt</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">if</span> <span class="n">xcd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">xcd</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">name</span> <span class="o">+=</span> <span class="sa">f</span><span class="s2">&quot;_xcd</span><span class="si">{</span><span class="n">xcd</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="k">return</span> <span class="n">name</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_flydsl_blockscale_stage1_kernels</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Dict</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate FlyDSL blockscale stage1 kernel registry.&quot;&quot;&quot;</span>
+    <span class="n">kernels</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">tm</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">32</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">128</span><span class="p">]:</span>
+        <span class="k">for</span> <span class="n">tn</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">128</span><span class="p">,</span> <span class="mi">256</span><span class="p">]:</span>
+            <span class="k">for</span> <span class="n">tk</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">128</span><span class="p">,</span> <span class="mi">256</span><span class="p">]:</span>  <span class="c1"># blockscale uses ScaleBlockK=128, kernel tile_k can be 128 or 256</span>
+                <span class="k">for</span> <span class="n">wpe</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">]:</span>
+                    <span class="k">for</span> <span class="n">bnt</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">]:</span>
+                        <span class="n">name</span> <span class="o">=</span> <span class="n">flydsl_blockscale_kernel_name</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">tm</span><span class="p">,</span> <span class="n">tn</span><span class="p">,</span> <span class="n">tk</span><span class="p">,</span> <span class="n">wpe</span><span class="p">,</span> <span class="n">bnt</span><span class="p">)</span>
+                        <span class="n">kernels</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+                            <span class="s2">&quot;stage&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;tile_m&quot;</span><span class="p">:</span> <span class="n">tm</span><span class="p">,</span> <span class="s2">&quot;tile_n&quot;</span><span class="p">:</span> <span class="n">tn</span><span class="p">,</span> <span class="s2">&quot;tile_k&quot;</span><span class="p">:</span> <span class="n">tk</span><span class="p">,</span>
+                            <span class="s2">&quot;waves_per_eu&quot;</span><span class="p">:</span> <span class="n">wpe</span><span class="p">,</span> <span class="s2">&quot;b_nt&quot;</span><span class="p">:</span> <span class="n">bnt</span><span class="p">,</span> <span class="s2">&quot;scale_block_k&quot;</span><span class="p">:</span> <span class="mi">128</span><span class="p">,</span>
+                            <span class="s2">&quot;a_dtype&quot;</span><span class="p">:</span> <span class="s2">&quot;fp8&quot;</span><span class="p">,</span> <span class="s2">&quot;b_dtype&quot;</span><span class="p">:</span> <span class="s2">&quot;fp8&quot;</span><span class="p">,</span> <span class="s2">&quot;out_dtype&quot;</span><span class="p">:</span> <span class="s2">&quot;bf16&quot;</span><span class="p">,</span>
+                        <span class="p">}</span>
+    <span class="n">_KERNEL_PARAMS</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">kernels</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">kernels</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_flydsl_blockscale_stage2_kernels</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Dict</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Same pattern for stage2.&quot;&quot;&quot;</span>
+    <span class="n">kernels</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="c1"># ... mirror stage1 with stage=2, optionally include `_atomic`/`_persist` modes</span>
+    <span class="k">return</span> <span class="n">kernels</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_flydsl_blockscale_kernel_params</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Lookup with suffix parsing.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">_KERNEL_PARAMS</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 1.2: Run <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-c</span> <span class="pre">&quot;from</span> <span class="pre">aiter.ops.flydsl.moe_blockscale_kernels</span> <span class="pre">import</span> <span class="pre">get_flydsl_blockscale_stage1_kernels;</span> <span class="pre">print(len(get_flydsl_blockscale_stage1_kernels()))&quot;</span></code>. Expect non-zero count.</strong></p></li>
+<li><p>[ ] <strong>Step 1.3: Commit</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>add<span class="w"> </span>aiter/ops/flydsl/moe_blockscale_kernels.py
+git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;feat(flydsl): scaffold blockscale MoE kernel registry (#37 W4.5 accuracy)&quot;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="task-2-port-compile-moe-blockscale-gemm1-and-compile-moe-blockscale-gemm2">
+<h3>Task 2: Port <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm1</span></code> and <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm2</span></code><a class="headerlink" href="#task-2-port-compile-moe-blockscale-gemm1-and-compile-moe-blockscale-gemm2" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Modify: <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_blockscale_kernels.py</span></code></p></li>
+<li><p>Reference: <code class="docutils literal notranslate"><span class="pre">/home/pensun/FlyDSL/kernels/moe_blockscale_2stage.py:73-1500</span></code> (gemm1) and <code class="docutils literal notranslate"><span class="pre">:1500-2700</span></code> (gemm2/gemm2_ex)</p></li>
+<li><p>[ ] <strong>Step 2.1: Copy <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm1</span></code> body verbatim into <code class="docutils literal notranslate"><span class="pre">moe_blockscale_kernels.py</span></code>. Adjust imports</strong> (<code class="docutils literal notranslate"><span class="pre">from</span> <span class="pre">kernels.mfma_preshuffle_pipeline</span> <span class="pre">import</span> <span class="pre">...</span></code> → <code class="docutils literal notranslate"><span class="pre">from</span> <span class="pre">aiter.ops.flydsl.kernels.mfma_preshuffle_pipeline</span> <span class="pre">import</span> <span class="pre">...</span></code>; same for <code class="docutils literal notranslate"><span class="pre">mfma_epilogues</span></code>). <strong>Per Task 0.4 finding</strong>: if upstream <code class="docutils literal notranslate"><span class="pre">mfma_preshuffle_pipeline.py</span></code> differs from aiter’s, port the upstream version too in this commit. Keep the Apache-2.0 SPDX block from Step 1.1 at the top.</p></li>
+<li><p>[ ] <strong>Step 2.2: Copy <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm2</span></code> and <code class="docutils literal notranslate"><span class="pre">compile_moe_blockscale_gemm2_ex</span></code>. Same import adjustments.</strong></p></li>
+<li><p>[ ] <strong>Step 2.3: Add Python-level wrappers <code class="docutils literal notranslate"><span class="pre">flydsl_moe_blockscale_stage1</span></code> and <code class="docutils literal notranslate"><span class="pre">_stage2</span></code></strong> mirroring the API of <code class="docutils literal notranslate"><span class="pre">flydsl_moe_stage1/2</span></code> in <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py:547</span></code>. Wrappers handle: scale flatten, output buffer allocation, <code class="docutils literal notranslate"><span class="pre">compile_*</span></code> invocation, <code class="docutils literal notranslate"><span class="pre">_run_compiled</span></code> dispatch.</p></li>
+<li><p>[ ] <strong>Step 2.4: Smoke test the import chain</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">from aiter.ops.flydsl.moe_blockscale_kernels import (</span>
+<span class="s2">    flydsl_moe_blockscale_stage1, flydsl_moe_blockscale_stage2,</span>
+<span class="s2">    compile_moe_blockscale_gemm1, compile_moe_blockscale_gemm2)</span>
+<span class="s2">print(&#39;imports OK&#39;)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<p>Expected: <code class="docutils literal notranslate"><span class="pre">imports</span> <span class="pre">OK</span></code> with no exceptions.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 2.5: Commit</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span><span class="s2">&quot;feat(flydsl): port compile_moe_blockscale_gemm1/2 from FlyDSL upstream (#37 W4.5)&quot;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="task-3-wire-aiter-flydsl-init-py-exports">
+<h3>Task 3: Wire AITER FlyDSL <code class="docutils literal notranslate"><span class="pre">__init__.py</span></code> exports<a class="headerlink" href="#task-3-wire-aiter-flydsl-init-py-exports" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Modify: <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/__init__.py</span></code></p></li>
+<li><p>[ ] <strong>Step 3.1: Add the new wrappers to imports + <code class="docutils literal notranslate"><span class="pre">__all__</span></code></strong></p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># in the `if is_flydsl_available():` block, after existing imports:</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.moe_blockscale_kernels</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">flydsl_moe_blockscale_stage1</span><span class="p">,</span>
+    <span class="n">flydsl_moe_blockscale_stage2</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">__all__</span> <span class="o">+=</span> <span class="p">[</span>
+    <span class="s2">&quot;flydsl_moe_blockscale_stage1&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;flydsl_moe_blockscale_stage2&quot;</span><span class="p">,</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 3.2: Verify</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">import aiter.ops.flydsl as f</span>
+<span class="s2">print(&#39;flydsl_moe_blockscale_stage1&#39; in f.__all__)</span>
+<span class="s2">print(&#39;flydsl_moe_blockscale_stage2&#39; in f.__all__)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<p>Expected: <code class="docutils literal notranslate"><span class="pre">True</span> <span class="pre">/</span> <span class="pre">True</span></code>.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 3.3: Commit.</strong></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-4-extend-aiter-fused-moe-py-dispatcher-to-route-blockscale-kernels">
+<h3>Task 4: Extend <code class="docutils literal notranslate"><span class="pre">aiter/fused_moe.py</span></code> dispatcher to route blockscale kernels<a class="headerlink" href="#task-4-extend-aiter-fused-moe-py-dispatcher-to-route-blockscale-kernels" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Modify: <code class="docutils literal notranslate"><span class="pre">aiter/fused_moe.py:972-1022</span></code> (<code class="docutils literal notranslate"><span class="pre">is_flydsl1</span></code> block)</p></li>
+<li><p>[ ] <strong>Step 4.1: Add substring-match predicate (NOT prefix) to keep names stable.</strong> Kernel names are <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp8_wfp8_bf16_blockscale_t...</span></code> — they start with the same <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_</span></code> prefix as the FP4 path; the distinguishing token is the literal substring <code class="docutils literal notranslate"><span class="pre">_blockscale_</span></code>. Use <code class="docutils literal notranslate"><span class="pre">&quot;_blockscale_&quot;</span> <span class="pre">in</span> <span class="pre">kernelName1</span></code> to pick the blockscale wrapper. Inside the existing <code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">(is_flydsl1</span> <span class="pre">or</span> <span class="pre">is_flydsl2)</span> <span class="pre">and</span> <span class="pre">is_flydsl_available():</span></code> block, add a sub-branch:</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">if</span> <span class="n">is_flydsl1</span><span class="p">:</span>
+    <span class="k">if</span> <span class="s2">&quot;_blockscale_&quot;</span> <span class="ow">in</span> <span class="n">kernelName1</span><span class="p">:</span>   <span class="c1"># P1 fix: substring, NOT startswith(&quot;flydsl_moe1_blockscale_&quot;)</span>
+        <span class="n">stage1_func</span> <span class="o">=</span> <span class="n">functools</span><span class="o">.</span><span class="n">partial</span><span class="p">(</span>
+            <span class="n">_flydsl_blockscale_stage1_wrapper</span><span class="p">,</span>
+            <span class="n">kernelName</span><span class="o">=</span><span class="n">kernelName1</span><span class="p">,</span>
+            <span class="n">activation</span><span class="o">=</span><span class="n">activation</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">stage1_func</span> <span class="o">=</span> <span class="n">functools</span><span class="o">.</span><span class="n">partial</span><span class="p">(</span>
+            <span class="n">_flydsl_stage1_wrapper</span><span class="p">,</span>
+            <span class="n">kernelName</span><span class="o">=</span><span class="n">kernelName1</span><span class="p">,</span>
+            <span class="n">activation</span><span class="o">=</span><span class="n">activation</span><span class="p">,</span>
+        <span class="p">)</span>
+
+<span class="k">if</span> <span class="n">is_flydsl2</span><span class="p">:</span>
+    <span class="k">if</span> <span class="s2">&quot;_blockscale_&quot;</span> <span class="ow">in</span> <span class="n">kernelName2</span><span class="p">:</span>   <span class="c1"># same substring rule for stage2</span>
+        <span class="n">stage2_func</span> <span class="o">=</span> <span class="n">functools</span><span class="o">.</span><span class="n">partial</span><span class="p">(</span>
+            <span class="n">_flydsl_blockscale_stage2_wrapper</span><span class="p">,</span>
+            <span class="n">kernelName</span><span class="o">=</span><span class="n">kernelName2</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">stage2_func</span> <span class="o">=</span> <span class="n">functools</span><span class="o">.</span><span class="n">partial</span><span class="p">(</span>
+            <span class="n">_flydsl_stage2_wrapper</span><span class="p">,</span>
+            <span class="n">kernelName</span><span class="o">=</span><span class="n">kernelName2</span><span class="p">,</span>
+        <span class="p">)</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 4.2: Add <code class="docutils literal notranslate"><span class="pre">_flydsl_blockscale_stage1_wrapper</span></code> and <code class="docutils literal notranslate"><span class="pre">_stage2_wrapper</span></code></strong> beside the existing FP4 wrappers (line ~654, ~688). Use <code class="docutils literal notranslate"><span class="pre">aiter.ops.flydsl.flydsl_moe_blockscale_stage1</span></code> instead of FP4 entry point.</p></li>
+<li><p>[ ] <strong>Step 4.3: Verify dispatcher coverage</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">from aiter.fused_moe import _flydsl_blockscale_stage1_wrapper, _flydsl_blockscale_stage2_wrapper</span>
+<span class="s2">print(&#39;dispatchers OK&#39;)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 4.4: Commit.</strong></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-5-numerical-correctness-test-port-flydsl-s-blockscale-test">
+<h3>Task 5: Numerical correctness test (port FlyDSL’s blockscale test)<a class="headerlink" href="#task-5-numerical-correctness-test-port-flydsl-s-blockscale-test" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Create: <code class="docutils literal notranslate"><span class="pre">op_tests/test_flydsl_moe_blockscale.py</span></code></p></li>
+<li><p>Reference: <code class="docutils literal notranslate"><span class="pre">/home/pensun/FlyDSL/tests/kernels/test_moe_blockscale.py</span></code></p></li>
+<li><p>[ ] <strong>Step 5.1: Port the test, adjust imports</strong> to use <code class="docutils literal notranslate"><span class="pre">aiter.ops.flydsl.moe_blockscale_kernels.flydsl_moe_blockscale_stage1/2</span></code>. Keep the torch reference (<code class="docutils literal notranslate"><span class="pre">torch_stage1_blockscale_ref</span></code>) unchanged.</p></li>
+<li><p>[ ] <strong>Step 5.2: Add a DSV4-shape test case</strong> alongside the existing parameter sweep:</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">parametrize</span><span class="p">(</span>
+    <span class="s2">&quot;B,model_dim,inter_dim,E,topk&quot;</span><span class="p">,</span>
+    <span class="p">[(</span><span class="mi">12</span><span class="p">,</span> <span class="mi">7168</span><span class="p">,</span> <span class="mi">3072</span><span class="p">,</span> <span class="mi">384</span><span class="p">,</span> <span class="mi">6</span><span class="p">)],</span>  <span class="c1"># DSV4 prefill 12-token, single seq</span>
+<span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_moe_blockscale_dsv4_shape</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">model_dim</span><span class="p">,</span> <span class="n">inter_dim</span><span class="p">,</span> <span class="n">E</span><span class="p">,</span> <span class="n">topk</span><span class="p">):</span>
+    <span class="c1"># ... build inputs, run flydsl_moe_blockscale_stage1, compare against torch ref</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 5.3: Run on silicon</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>op_tests/test_flydsl_moe_blockscale.py<span class="w"> </span>-v<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-20
+</pre></div>
+</div>
+<p>Expected: <code class="docutils literal notranslate"><span class="pre">PASSED</span></code> for at least the DSV4-shape case (allclose against torch reference, atol=1e-2 rtol=1e-2 typical for FP8 tolerance).</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 5.4: Commit.</strong></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-6-add-dsv4-tuned-config-rows">
+<h3>Task 6: Add DSV4 tuned config rows<a class="headerlink" href="#task-6-add-dsv4-tuned-config-rows" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Create: <code class="docutils literal notranslate"><span class="pre">aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv</span></code></p></li>
+<li><p>Reference column order: <code class="docutils literal notranslate"><span class="pre">aiter/configs/tuned_fmoe.csv:1</span></code></p></li>
+<li><p>[ ] <strong>Step 6.1: Build the CSV with header + DSV4 rows for token counts {1, 2, 4, 8, 12, 16, 32, 64, 128, 256, 512, 1024}.</strong> Each row uses the same key format aiter expects:</p></li>
+</ul>
+<div class="highlight-csv notranslate"><div class="highlight"><pre><span></span>cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,block_m,ksplit,us1,kernelName1,err1,us2,kernelName2,err2,us,run_1stage,tflops,bw,_tag
+256,1,7168,3072,384,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,32,0,0.0,flydsl_moe1_afp8_wfp8_bf16_blockscale_t32x128x128_w2,0.0%,0.0,flydsl_moe2_afp8_wfp8_bf16_blockscale_t32x128x128_atomic,0.0%,0.0,0,0.0,0.0,
+256,12,7168,3072,384,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,32,0,0.0,flydsl_moe1_afp8_wfp8_bf16_blockscale_t32x128x128_w2,0.0%,0.0,flydsl_moe2_afp8_wfp8_bf16_blockscale_t32x128x128_atomic,0.0%,0.0,0,0.0,0.0,
+256,128,7168,3072,384,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,32,0,0.0,flydsl_moe1_afp8_wfp8_bf16_blockscale_t32x128x256,0.0%,0.0,flydsl_moe2_afp8_wfp8_bf16_blockscale_t32x256x256_atomic,0.0%,0.0,0,0.0,0.0,
+256,512,7168,3072,384,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,64,0,0.0,flydsl_moe1_afp8_wfp8_bf16_blockscale_t64x128x256,0.0%,0.0,flydsl_moe2_afp8_wfp8_bf16_blockscale_t64x256x256_atomic,0.0%,0.0,0,0.0,0.0,
+256,1024,7168,3072,384,6,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0,64,0,0.0,flydsl_moe1_afp8_wfp8_bf16_blockscale_t64x128x256,0.0%,0.0,flydsl_moe2_afp8_wfp8_bf16_blockscale_t64x256x256_atomic,0.0%,0.0,0,0.0,0.0,
+</pre></div>
+</div>
+<p>(Tile choices follow user memory <code class="docutils literal notranslate"><span class="pre">project_aiterforge_fp8.md</span></code>: <code class="docutils literal notranslate"><span class="pre">tile_m=32</span></code> for ≤128 tokens, <code class="docutils literal notranslate"><span class="pre">tile_m=64</span></code> for &gt;128. Avoiding <code class="docutils literal notranslate"><span class="pre">tile_m=16</span></code> per its NaN bug. Times left as 0 — they’re ignored at lookup time, only kernel name matters.)</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 6.2: Verify aiter loads the new config</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>env<span class="w"> </span><span class="nv">AITER_CONFIG_FMOE</span><span class="o">=</span>/workspace/aiter-lingpeng/aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>/opt/venv/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">import aiter.fused_moe</span>
+<span class="s2"># trigger config load by doing a no-op moe call OR direct load</span>
+<span class="s2">import pandas as pd</span>
+<span class="s2">df = pd.read_csv(&#39;/workspace/aiter-lingpeng/aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv&#39;)</span>
+<span class="s2">print(f&#39;rows={len(df)} kernels={df[\&quot;kernelName1\&quot;].unique()[:3]}&#39;)</span>
+<span class="s2">&quot;</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 6.3: Commit.</strong></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-6-5-full-csv-coverage-test-every-kernelname1-kernelname2-in-the-dsv4-config-must-compute-correctly-p1-fix">
+<h3>Task 6.5: Full-CSV coverage test — every kernelName1/kernelName2 in the DSV4 config must compute correctly (P1 fix)<a class="headerlink" href="#task-6-5-full-csv-coverage-test-every-kernelname1-kernelname2-in-the-dsv4-config-must-compute-correctly-p1-fix" title="Link to this heading"></a></h3>
+<p><strong>Why this exists</strong>: Task 5’s numerical test only proved one shape (12 tokens). Task 6 installs CSV rows that span 6+ token counts and 2+ stage2 variants (<code class="docutils literal notranslate"><span class="pre">_atomic</span></code>, plus possibly <code class="docutils literal notranslate"><span class="pre">_persist</span></code>/<code class="docutils literal notranslate"><span class="pre">_reduce</span></code>). A 12-token-only test will silently miss: (a) an unregistered kernel name in another row, (b) a stage2 mode that’s wrong for decode/prefill shapes, (c) a tile-specific bug in a single combo. We have to prove <strong>every kernel name actually used by the CSV</strong> computes correctly before silicon.</p>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Modify/extend: <code class="docutils literal notranslate"><span class="pre">op_tests/test_flydsl_moe_blockscale.py</span></code></p></li>
+<li><p>[ ] <strong>Step 6.5.1: Iterate the CSV and run aiter’s lookup for each row</strong> to confirm every <code class="docutils literal notranslate"><span class="pre">kernelName1</span></code>/<code class="docutils literal notranslate"><span class="pre">kernelName2</span></code> value resolves through <code class="docutils literal notranslate"><span class="pre">_flydsl_blockscale_stage1_wrapper</span></code> / <code class="docutils literal notranslate"><span class="pre">_stage2_wrapper</span></code> (NOT falling back to the FP4 wrapper or to CK).</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">test_dsv4_csv_kernel_names_resolve</span><span class="p">():</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv&quot;</span><span class="p">)</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">aiter.ops.flydsl.moe_blockscale_kernels</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_flydsl_blockscale_kernel_params</span>
+    <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">iterrows</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">col</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;kernelName1&quot;</span><span class="p">,</span> <span class="s2">&quot;kernelName2&quot;</span><span class="p">):</span>
+            <span class="n">name</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">col</span><span class="p">])</span>
+            <span class="k">assert</span> <span class="s2">&quot;_blockscale_&quot;</span> <span class="ow">in</span> <span class="n">name</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;row </span><span class="si">{</span><span class="n">row</span><span class="p">[</span><span class="s1">&#39;token&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">col</span><span class="si">}</span><span class="s2">=</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> missing _blockscale_&quot;</span>
+            <span class="n">params</span> <span class="o">=</span> <span class="n">get_flydsl_blockscale_kernel_params</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="n">params</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;unregistered kernel: </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 6.5.2: Numerically validate each distinct (kernelName1, kernelName2) pair against torch reference</strong> for representative DSV4-shape inputs. Cover at least the unique kernels the CSV uses (typically 3-5 stage1 + 3-5 stage2 distinct entries):</p></li>
+</ul>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@pytest</span><span class="o">.</span><span class="n">mark</span><span class="o">.</span><span class="n">parametrize</span><span class="p">(</span><span class="s2">&quot;token_count&quot;</span><span class="p">,</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">12</span><span class="p">,</span> <span class="mi">128</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="mi">1024</span><span class="p">])</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_dsv4_csv_pair_correctness</span><span class="p">(</span><span class="n">token_count</span><span class="p">):</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+    <span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv&quot;</span><span class="p">)</span>
+    <span class="n">row</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;token&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="n">token_count</span><span class="p">]</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">kn1</span><span class="p">,</span> <span class="n">kn2</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s2">&quot;kernelName1&quot;</span><span class="p">]),</span> <span class="nb">str</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="s2">&quot;kernelName2&quot;</span><span class="p">])</span>
+    <span class="c1"># Build DSV4-shape inputs (token_count, 7168, 3072, 384, topk=6)</span>
+    <span class="c1"># Run flydsl_moe_blockscale_stage1 with kn1&#39;s tile params</span>
+    <span class="c1"># Run flydsl_moe_blockscale_stage2 with kn2&#39;s tile params</span>
+    <span class="c1"># Compare with torch_stage1_blockscale_ref / torch_stage2_blockscale_ref</span>
+    <span class="c1"># Assert allclose (atol=1e-2 rtol=1e-2 — FP8 tolerance)</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 6.5.3: Run all CSV-coverage tests on silicon</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/opt/venv/bin/python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>op_tests/test_flydsl_moe_blockscale.py::test_dsv4_csv_kernel_names_resolve<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>op_tests/test_flydsl_moe_blockscale.py::test_dsv4_csv_pair_correctness<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-v<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-30
+</pre></div>
+</div>
+<p>Expected: <strong>every parametrized case PASSED</strong> (no skipped, no fall-back, no allclose mismatch). Any failure here MUST be fixed before Task 7 silicon validation — fix the CSV row’s tile choice OR the upstream kernel.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 6.5.4: Commit + ensure this test is in the AITER PR (not skipped in CI).</strong></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-7-atom-side-silicon-validation-single-mode">
+<h3>Task 7: ATOM-side silicon validation — single mode<a class="headerlink" href="#task-7-atom-side-silicon-validation-single-mode" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong> No ATOM code changes. Use existing <code class="docutils literal notranslate"><span class="pre">tests/silicon/silicon_w43_smoke.py</span></code>.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 7.1: Pre-flight</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>rocm-smi<span class="w"> </span>--showpids<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>-E<span class="w"> </span><span class="s2">&quot;KFD|No KFD&quot;</span>
+<span class="c1"># kill orphans if any (per feedback_gpu_preflight.md)</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 7.2: Run baseline (flag=0) with FlyDSL config</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-d<span class="w"> </span>atom_dsv4_feat<span class="w"> </span>bash<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">cd /workspace/ATOM-lingpeng &amp;&amp;</span>
+<span class="s1">HIP_LAUNCH_BLOCKING=1 \</span>
+<span class="s1">ATOM_DSV4_USE_W4_PATH=0 \</span>
+<span class="s1">AITER_CONFIG_FMOE=/workspace/aiter-lingpeng/aiter/configs/model_configs/dsv4_fp8_blockscale_tuned_fmoe.csv \</span>
+<span class="s1">AITER_LOG_LEVEL=WARNING \</span>
+<span class="s1">/opt/venv/bin/python -m tests.silicon.silicon_w43_smoke \</span>
+<span class="s1">    --mode single \</span>
+<span class="s1">    --model /data/hf_models/deepseek-ai/DeepSeek-V4-Pro \</span>
+<span class="s1">    --kv_cache_dtype fp8 -tp 8 \</span>
+<span class="s1">    --max-model-len 2048 --enforce-eager \</span>
+<span class="s1">    --gpu-memory-utilization 0.85 \</span>
+<span class="s1">    --max-tokens 32 \</span>
+<span class="s1">    --out /workspace/ATOM-lingpeng/logs/silicon_baseline_flydsl.json \</span>
+<span class="s1">    &gt; /workspace/ATOM-lingpeng/logs/silicon_baseline_flydsl.log 2&gt;&amp;1</span>
+<span class="s1">&#39;</span>
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>[ ] <strong>Step 7.3: Verify the output is coherent Chinese (matches Evidence J era expected output)</strong></p></li>
+</ul>
+<p>Expected: completion starts with <code class="docutils literal notranslate"><span class="pre">好的，这是一个非常具体...</span></code> (or similar coherent Chinese), NOT gibberish.</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 7.4: Run W4 mode (flag=1) with FlyDSL config</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># same command, change ATOM_DSV4_USE_W4_PATH=1 ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1 ATOM_AITER_VALIDATE=1</span>
+</pre></div>
+</div>
+<p>Expected: same coherent output, no HSA crashes (Sprint 1+2+3 architecture intact).</p>
+</section>
+<hr class="docutils" />
+<section id="task-8-atom-side-silicon-validation-multi-mode-4-conc">
+<h3>Task 8: ATOM-side silicon validation — multi mode (4 conc)<a class="headerlink" href="#task-8-atom-side-silicon-validation-multi-mode-4-conc" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>[ ] <strong>Step 8.1: Run silicon_w43_smoke <code class="docutils literal notranslate"><span class="pre">--mode</span> <span class="pre">multi</span></code> with FlyDSL config + flag=1</strong></p></li>
+</ul>
+<p>Expected: 4 distinct coherent completions (each matches what their respective prompts should produce).</p>
+</section>
+<hr class="docutils" />
+<section id="task-9-gsm8k-w4-5-owner-accuracy-gate">
+<h3>Task 9: gsm8k W4.5 owner accuracy gate<a class="headerlink" href="#task-9-gsm8k-w4-5-owner-accuracy-gate" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>[ ] <strong>Step 9.1: Run gsm8k limit=20 conc=4 with W4 path enabled + FlyDSL MoE config</strong></p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Use existing benchmark harness (per CLAUDE.md /benchmark-guide)</span>
+</pre></div>
+</div>
+<p>Expected: ≥ 60% accuracy (W4.5 owner threshold).</p>
+<ul class="simple">
+<li><p>[ ] <strong>Step 9.2: Capture results into Evidence M</strong> (new file).</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="task-10-documentation-closeout">
+<h3>Task 10: Documentation closeout<a class="headerlink" href="#task-10-documentation-closeout" title="Link to this heading"></a></h3>
+<p><strong>Files:</strong></p>
+<ul class="simple">
+<li><p>Create: <code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/EVIDENCE_M.md</span></code> — Sprint 4 accuracy fix report</p></li>
+<li><p>Modify: existing <code class="docutils literal notranslate"><span class="pre">EVIDENCE_L.md</span></code> — add a closing pointer to M</p></li>
+<li><p>[ ] <strong>Step 10.1: Write Evidence M</strong> with:</p>
+<ul>
+<li><p>Full silicon iteration table (baseline + W4 single + W4 multi all coherent)</p></li>
+<li><p>gsm8k score</p></li>
+<li><p>Kernel routing trace showing FlyDSL blockscale calls (no more <code class="docutils literal notranslate"><span class="pre">ck_moe_stage1/2</span></code> calls)</p></li>
+<li><p>Final architecture summary diagram</p></li>
+</ul>
+</li>
+<li><p>[ ] <strong>Step 10.2: Open ATOM PR + AITER PR + (if needed) FlyDSL PR.</strong> All three repos same commit chain.</p></li>
+<li><p>[ ] <strong>Step 10.3: Issue #37 closeout comment</strong> referencing all 4 Evidence docs (J → M).</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="risks-mitigations">
+<h2>Risks &amp; Mitigations<a class="headerlink" href="#risks-mitigations" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Risk</p></th>
+<th class="head"><p>Likelihood</p></th>
+<th class="head"><p>Mitigation</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>FlyDSL blockscale kernel has FP8 e4m3fn vs e4m3fnuz dtype mismatch on MI355</p></td>
+<td><p>Medium</p></td>
+<td><p>gfx950 uses <code class="docutils literal notranslate"><span class="pre">torch.float8_e4m3fn</span></code> per the FlyDSL test (line 50). Confirm in Step 5 numerical test.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Tile params from user memory (m=64, n=128, k=256) need re-tuning for blockscale variant</p></td>
+<td><p>Medium</p></td>
+<td><p>Step 5 numerical test passes regardless of tile (correctness ≠ perf). If perf matters for gsm8k timing, sweep tiles in a follow-up</p></td>
+</tr>
+<tr class="row-even"><td><p>Some FlyDSL kernel imports break because the upstream version on aiter container is older</p></td>
+<td><p>Low-medium</p></td>
+<td><p>aiter pins <code class="docutils literal notranslate"><span class="pre">_MIN_FLYDSL_VERSION</span> <span class="pre">=</span> <span class="pre">0.1.3</span></code>. Verify locally in Step 2.4. If mismatch, bump aiter pin or pull FlyDSL upstream.</p></td>
+</tr>
+<tr class="row-odd"><td><p>stage2 has multiple variants (<code class="docutils literal notranslate"><span class="pre">_atomic</span></code>, <code class="docutils literal notranslate"><span class="pre">_persist</span></code>, <code class="docutils literal notranslate"><span class="pre">_reduce</span></code>); picking the wrong one for DSV4 dims</p></td>
+<td><p>Medium</p></td>
+<td><p>Numerical test in Step 5 covers all variants; pick the passing one for the CSV.</p></td>
+</tr>
+<tr class="row-even"><td><p>The mfma_preshuffle_pipeline.py in aiter is OLDER than what moe_blockscale_2stage.py expects</p></td>
+<td><p>Medium</p></td>
+<td><p>Diff aiter’s vs FlyDSL upstream’s. If aiter’s is older, port the upstream version (small file, 562 lines).</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="review-checklist-for-the-human-reviewer">
+<h2>Review Checklist (for the human reviewer)<a class="headerlink" href="#review-checklist-for-the-human-reviewer" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>[ ] Plan correctly identifies the bug location (aiter MoE backend, NOT ATOM)</p></li>
+<li><p>[ ] Cross-repo split is sane: kernel impl in FlyDSL, integration in aiter, validation in ATOM</p></li>
+<li><p>[ ] Tile choices match user memory’s validated values</p></li>
+<li><p>[ ] Numerical test covers DSV4-shape (model_dim=7168, inter_dim=3072, E=384, topk=6)</p></li>
+<li><p>[ ] No new shape-handling code in ATOM — purely consumed via aiter</p></li>
+<li><p>[ ] All risks have mitigations OR explicit “verify in Step X” anchors</p></li>
+<li><p>[ ] Estimated effort feels right (~1-2 days for one engineer; mostly Tasks 2 + 5)</p></li>
+<li><p>[ ] Sprint 1+2+3 W4.5 architecture is preserved (we’re only fixing the MoE backend wiring)</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="approval-gate">
+<h2>Approval gate<a class="headerlink" href="#approval-gate" title="Link to this heading"></a></h2>
+<p>After review:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>[ ] Approved as-is — proceed with subagent-driven-development
+[ ] Approved with revisions:
+    -
+    -
+[ ] Reject — re-plan
+</pre></div>
+</div>
+<p>When approved, invoke <code class="docutils literal notranslate"><span class="pre">superpowers:subagent-driven-development</span></code> to execute Tasks 0-10 with two-stage review per task.</p>
+</section>
+<hr class="docutils" />
+<section id="revision-log">
+<h2>Revision log<a class="headerlink" href="#revision-log" title="Link to this heading"></a></h2>
+<section id="v2-2026-04-26-review-feedback-addressed">
+<h3>v2 — 2026-04-26 (review feedback addressed)<a class="headerlink" href="#v2-2026-04-26-review-feedback-addressed" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>P1 fix (license)</strong>: Plan now mandates Apache-2.0 SPDX header + upstream copyright preservation in <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_blockscale_kernels.py</span></code>. The new file is a derivative work licensed Apache-2.0, NOT MIT (mixing requires explicit dual-license declaration we do not do). Updated File Structure section + Step 1.1 scaffold + Step 2.1 reminder.</p></li>
+<li><p><strong>P1 fix (dispatcher prefix)</strong>: Predicate corrected from <code class="docutils literal notranslate"><span class="pre">kernelName1.startswith(&quot;flydsl_moe1_blockscale_&quot;)</span></code> (which would never match) to <strong><code class="docutils literal notranslate"><span class="pre">&quot;_blockscale_&quot;</span> <span class="pre">in</span> <span class="pre">kernelName1</span></code></strong> (substring match). Kernel names are <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp8_wfp8_bf16_blockscale_t...</span></code> so substring is the correct distinguishing rule. Fixed both the File Structure summary AND Task 4’s code block. Same rule for stage2.</p></li>
+<li><p><strong>P1 fix (CSV-coverage test)</strong>: Added Task 6.5 — iterates every CSV row, asserts each <code class="docutils literal notranslate"><span class="pre">kernelName1/2</span></code> resolves through the blockscale wrapper (not falling through to FP4 wrapper or CK), and runs numerical correctness vs torch reference for each distinct (kn1, kn2) pair across token counts 1/12/128/512/1024. Closes the gap where Task 5’s 12-token-only test would silently miss decode-shape failures.</p></li>
+<li><p><strong>P2 fix (FlyDSL pin)</strong>: Added Task 0 (preflight) — explicitly verifies (a) FlyDSL upstream commit <code class="docutils literal notranslate"><span class="pre">8bee73f</span></code> (or newer) and the presence of <code class="docutils literal notranslate"><span class="pre">kernels/moe_blockscale_2stage.py</span></code>; (b) installed <code class="docutils literal notranslate"><span class="pre">flydsl</span></code> Python package satisfies aiter’s <code class="docutils literal notranslate"><span class="pre">_MIN_FLYDSL_VERSION</span> <span class="pre">=</span> <span class="pre">0.1.3</span></code> (current sunway513/aiter pin); (c) every FlyDSL API used by <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage.py</span></code> imports successfully; (d) diff aiter’s <code class="docutils literal notranslate"><span class="pre">mfma_preshuffle_pipeline.py</span></code> against upstream and decide port-or-keep. Reviewer noted some checkouts pin <code class="docutils literal notranslate"><span class="pre">0.1.2</span></code> — that requires a separate pin-bump PR before this plan starts.</p></li>
+</ul>
+</section>
+<section id="v1-2026-04-26-initial-plan">
+<h3>v1 — 2026-04-26 (initial plan)<a class="headerlink" href="#v1-2026-04-26-initial-plan" title="Link to this heading"></a></h3>
+<p>10 tasks, no preflight, MIT SPDX in scaffold, prefix-match predicate, single-shape numerical test, no FlyDSL version verification.</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, AMD.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
