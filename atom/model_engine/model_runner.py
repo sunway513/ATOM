@@ -1860,8 +1860,17 @@ class ModelRunner:
         n_c4 = sum(1 for r in compress_ratio_per_layer if r == 4)
         n_c128 = sum(1 for r in compress_ratio_per_layer if r == 128)
 
-        # Ring sizes mirror SGLang's get_compress_state_ring_size (4→8, 128→128).
-        ring_size_compressor = 2 * 4
+        # Ring sizes for compressor / indexer state slabs.
+        # SGLang uses get_compress_state_ring_size(ratio): 4→8, 128→128 — i.e.
+        # PER-LAYER. Our pool keeps one shared slab across all c4+c128 layers,
+        # so the slab must fit the WORST case. Compressor row math (deepseek_v4
+        # _forward_w4): overlap=True → ring=2*ratio; overlap=False → ring=ratio.
+        # Worst case: c128 with overlap=False → ring=128. Using `2 * 4 = 8` here
+        # caused a silicon HSA 0x1016 (PyTorch index_put ASSERT_TRAP) on the
+        # very first prefill of a c128 layer. Caught by W4.5 triage (Evidence K).
+        # Wastes memory on c4 layers (8→128, 16x) but correct; per-slab split
+        # is the proper follow-up fix.
+        ring_size_compressor = max(2 * 4, 128)  # = 128
         ring_size_indexer = 2 * 64
         ring_size_main = max(getattr(args, "window_size", 128), 64)
 

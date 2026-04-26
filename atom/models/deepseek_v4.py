@@ -939,6 +939,22 @@ class Compressor(nn.Module):
         # Per-token scatter via 2D advanced indexing into kv_state /
         # score_state. (slot_per_token, row_in_state) is a paired index;
         # PyTorch broadcasts these into a single advanced-index gather/put.
+        # W4.5 diagnostic: surface OOB at Python boundary to avoid GPU trap.
+        if slot_per_token.numel() > 0:
+            _ks_shape = tuple(self.kv_state.shape)
+            _spt_max = int(slot_per_token.max().item())
+            _ris_max = int(row_in_state.max().item())
+            _ris_min = int(row_in_state.min().item())
+            if _spt_max >= _ks_shape[0] or _ris_max >= _ks_shape[1] or _ris_min < 0:
+                raise ValueError(
+                    "W4 Compressor kv_state scatter OOB: "
+                    f"slot_per_token.max={_spt_max} (cap={_ks_shape[0]}), "
+                    f"row_in_state range=[{_ris_min}, {_ris_max}] (cap={_ks_shape[1]}), "
+                    f"kv_state.shape={_ks_shape}, ratio={ratio}, overlap={overlap}, "
+                    f"positions.range=[{int(positions.min().item())}, {int(positions.max().item())}], "
+                    f"slot_indices={slot_indices.tolist()}, "
+                    f"cu_seqlens_q={cu.tolist()}"
+                )
         self.kv_state[slot_per_token, row_in_state] = kv.to(self.kv_state.dtype)
         self.score_state[slot_per_token, row_in_state] = score_with_ape.to(
             self.score_state.dtype
@@ -1799,6 +1815,23 @@ class DeepseekV4Attention(nn.Module):
         # Flatten the [N, ring_main, D] pool view to [N*ring_main, D] for
         # scatter. Zero-copy reshape — pool storage is contiguous.
         kv_flat = kv_cache_view.view(n_slots * ring_main, head_dim)
+        # Diagnostic guard (W4.5): silicon HSA 0x1016 was traced to a GPU-side
+        # ASSERT_TRAP in this `index_put` (PyTorch's bounds-check). Surface
+        # the OOB at the Python boundary with a useful error instead.
+        if out_cache_loc.numel() > 0:
+            _max_loc = int(out_cache_loc.max().item())
+            _min_loc = int(out_cache_loc.min().item())
+            _cap = kv_flat.size(0)
+            if _max_loc >= _cap or _min_loc < 0:
+                raise ValueError(
+                    "W4 main KV scatter OOB: "
+                    f"out_cache_loc range=[{_min_loc}, {_max_loc}], "
+                    f"kv_flat.size(0)={_cap} (n_slots={n_slots}, ring_main={ring_main}), "
+                    f"layer_id={getattr(self, 'layer_id', '?')}, "
+                    f"num_tokens={out_cache_loc.numel()}, "
+                    f"positions.range=[{int(positions.min().item())}, {int(positions.max().item())}], "
+                    f"cu_seqlens_q={forward_batch.cu_seqlens_q.tolist()}"
+                )
         # Cast scatter source to pool dtype to avoid silent zero-out from
         # an implicit dtype-mismatch copy_.
         kv_flat[out_cache_loc] = kv_tok.to(kv_flat.dtype)
@@ -1862,6 +1895,12 @@ class DeepseekV4Attention(nn.Module):
             try:
                 from aiter.dsv4_validate import dsv4_validate_sparse_attn_metadata
 
+                # `out_cache_loc` ranges in [0, n_slots * ring_main); pass
+                # the flat-pool capacity, not n_slots. Original Sprint 1 wired
+                # n_slots which is a per-seq capacity — would silently miss any
+                # `out_cache_loc.max() >= n_slots` violation that's still in
+                # bounds for the actual scatter target. Caught during W4.5
+                # silicon triage (Evidence K).
                 dsv4_validate_sparse_attn_metadata(
                     q=q_per_token,
                     kv=kv_per_token,
@@ -1869,7 +1908,7 @@ class DeepseekV4Attention(nn.Module):
                     slot_mapping=out_cache_loc,
                     positions=positions,
                     cu_seqlens_q=forward_batch.cu_seqlens_q,
-                    pool_capacity=n_slots,
+                    pool_capacity=n_slots * ring_main,
                 )
             except ImportError:
                 # Validator not available in this aiter build — proceed
