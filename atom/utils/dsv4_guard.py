@@ -35,12 +35,16 @@ def validate_dsv4_multireq(architectures: list[str], max_num_seqs: int) -> None:
     engine-owned KV pools, branch `feat/dsv4-forward-batch-paged-kv`).
 
     Until W4 lands, refuse multi-request configs to prevent silently-
-    broken output. The `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1` env override
-    exists for kernel-level perf experiments where output correctness
-    is not being measured.
+    broken output. Bypass requires **double opt-in** (W4.3 amendment,
+    PR #46 P1.1 review fix): BOTH `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`
+    AND `ATOM_DSV4_USE_W4_PATH=1` must be set together. Either alone
+    rejects, because `UNSAFE_MULTIREQ_DEV=1` without the W4 path opt-in
+    would route through the legacy (broken) multi-request path that
+    crashed PR #42 with HSA exception 0x1016.
 
     Raises:
-        ValueError: when DSV4 + max_num_seqs > 1 + override unset.
+        ValueError: when DSV4 + max_num_seqs > 1 + double opt-in
+            unsatisfied (either flag missing).
     """
     if not is_dsv4_arch(architectures):
         return
@@ -48,15 +52,24 @@ def validate_dsv4_multireq(architectures: list[str], max_num_seqs: int) -> None:
         return
     from atom.utils import envs
 
-    if envs.ATOM_DSV4_UNSAFE_MULTIREQ_DEV:
-        return
-    raise ValueError(
-        "DSV4 architectures currently support only "
-        f"max_num_seqs=1 (got max_num_seqs={max_num_seqs}). "
-        "Multi-request support is in development on the W4 branch "
-        "(feat/dsv4-forward-batch-paged-kv); see "
-        "https://github.com/sunway513/ATOM/issues/37 for context. "
-        "To bypass this guard for kernel-level perf experiments "
-        "where output correctness is NOT being measured, set "
-        "ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1."
-    )
+    unsafe = envs.ATOM_DSV4_UNSAFE_MULTIREQ_DEV
+    use_w4 = envs.ATOM_DSV4_USE_W4_PATH
+
+    if not unsafe:
+        raise ValueError(
+            "DSV4 architectures currently support only "
+            f"max_num_seqs=1 (got max_num_seqs={max_num_seqs}). "
+            "Multi-request support is in development on the W4 branch; "
+            "see https://github.com/sunway513/ATOM/issues/37. To bypass "
+            "this guard for kernel-level perf experiments where output "
+            "correctness is NOT being measured, set BOTH "
+            "ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1 AND ATOM_DSV4_USE_W4_PATH=1."
+        )
+    if not use_w4:
+        raise ValueError(
+            "DSV4 multi-request requires ATOM_DSV4_USE_W4_PATH=1 to opt "
+            "into the W4 path. ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1 alone "
+            "would route through the legacy (broken) multi-request "
+            "path. See issue #37."
+        )
+    # Both flags set → allow

@@ -105,6 +105,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": lambda: (
         os.getenv("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", "0") == "1"
     ),
+    # --- DSV4 W4.3-redo flags (issue #37) ---
+    # Enable the W4 multi-request path. When 0 (default), DSV4 single-request
+    # legacy path runs unchanged. Task 7 amends the Path 2 guard to require
+    # this flag together with ATOM_DSV4_UNSAFE_MULTIREQ_DEV before allowing
+    # max_num_seqs > 1.
+    "ATOM_DSV4_USE_W4_PATH": lambda: (os.getenv("ATOM_DSV4_USE_W4_PATH", "0") == "1"),
+    # Enable host-side AITER ABI validator before each sparse_attn call.
+    # Zero prod overhead when off.
+    "ATOM_AITER_VALIDATE": lambda: (os.getenv("ATOM_AITER_VALIDATE", "0") == "1"),
 }
 
 
