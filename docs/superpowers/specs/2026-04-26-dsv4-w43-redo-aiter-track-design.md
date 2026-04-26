@@ -51,7 +51,14 @@ Owner direction (this sprint): **ATOM owns scheduling + pool metadata; AITER own
 | `ATOM_DSV4_USE_W4_PATH` | `0` | Enable W4.3-redo multi-request path. When `0`, main behaves exactly as the post-#44-revert single-request path (validated by silicon). |
 | `ATOM_AITER_VALIDATE` | `0` | Debug-only host-side ABI validator before each `sparse_attn` call. Zero overhead in prod when off. |
 
-**Path 2 hard-assert guard stays strict**. To run multi-request, the user must opt in twice: `ATOM_DSV4_USE_W4_PATH=1` AND `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`. This double-factor protection means a typo in a config does not silently expose users to the broken path.
+**Path 2 guard is amended to enforce the double opt-in mechanically**. The current `validate_dsv4_multireq` allows `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1` alone to bypass — that lets users hit the broken legacy multi-request path without going through W4. S1 changes the guard so multi-request requires **BOTH** flags simultaneously:
+
+- `max_num_seqs > 1` AND `UNSAFE_MULTIREQ_DEV=0`        → hard ValueError (current behavior preserved)
+- `max_num_seqs > 1` AND `UNSAFE_MULTIREQ_DEV=1` AND `USE_W4_PATH=0` → **also hard ValueError** (new check; refuses the broken legacy multi-request)
+- `max_num_seqs > 1` AND `UNSAFE_MULTIREQ_DEV=1` AND `USE_W4_PATH=1` → allowed
+- `max_num_seqs == 1` → always allowed regardless of flags
+
+This makes the double-opt-in enforced by the engine, not by spec convention. A typo or partial flag set raises a readable error.
 
 ---
 
@@ -59,19 +66,43 @@ Owner direction (this sprint): **ATOM owns scheduling + pool metadata; AITER own
 
 | Component | File | Change |
 |---|---|---|
-| **AITER validator** | `aiter/dsv4_validate.py` (new in AITER repo) | `dsv4_validate_sparse_attn_metadata(q, kv, topk, slot_mapping, positions, cu_seqlens_q, pool_capacity)` — host-side checks; raise `ValueError` with a crisp message naming the constraint that failed. |
-| **AITER UT** | `aiter/tests/test_dsv4_validate.py` (new) | Truth-table coverage: in-bounds / OOB topk / OOB slot / cu_seqlens_q-token mismatch / empty batch. CPU-only. |
-| **ATOM W4.3-redo** | `atom/models/deepseek_v4.py` | `DeepseekV4Attention.forward(x, forward_batch)` path, gated on `ATOM_DSV4_USE_W4_PATH`. **Default falls through to single-request legacy path** (preserved bit-for-bit from post-#44-revert state). When flag=1: per-token RoPE, per-seq slot KV scatter via `DSV4KVPool`, validator call before `sparse_attn`. |
-| **ATOM ModelRunner** | `atom/model_engine/model_runner.py` | `_maybe_setup_dsv4_forward_batch` rewritten with **`is_dummy_run` short-circuit at the very entry** (the gap that hotfix #43 missed). Real requests build `DSV4ForwardBatch` + admit slot. |
-| **ATOM Scheduler hooks** | `atom/model_engine/scheduler.py` | Finish / preempt path notifies `pool.finish_request`. Idempotent. |
-| **silicon smoke harness** | `tests/silicon/silicon_w43_smoke.py` (new) | 4-prompt conc=4 + gsm8k limit=20 conc=4. Required to be invoked with both flags on; PR description must paste rc=0 + output evidence. |
+| **AITER validator** | `aiter/dsv4_validate.py` (new in `aiter-lingpeng`) | `dsv4_validate_sparse_attn_metadata(q, kv, topk, slot_mapping, positions, cu_seqlens_q, pool_capacity)` — full host-side ABI checker; raise `ValueError` with the failed constraint. See §5 for the full check list. |
+| **AITER UT** | `aiter/tests/test_dsv4_validate.py` (new) | Truth-table for every check in §5. CPU-only. |
+| **ATOM Path 2 guard amendment** | `atom/utils/dsv4_guard.py` | Modify `validate_dsv4_multireq` so it requires `ATOM_DSV4_USE_W4_PATH=1` AND `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1` together to allow `max_num_seqs > 1`. Either flag alone still rejects. |
+| **ATOM W4.3-redo (main attention)** | `atom/models/deepseek_v4.py` `DeepseekV4Attention` | `forward(x, forward_batch)` path gated on `ATOM_DSV4_USE_W4_PATH`. **Default falls through to single-request legacy path** (preserved bit-for-bit from post-#44-revert state). When flag=1: per-token RoPE, per-seq slot KV scatter into `DSV4KVPool` main ring, validator call before `sparse_attn`. |
+| **ATOM W4.4-redo (Compressor/Indexer state)** | same file, `Compressor` + `Indexer` | Same flag (`ATOM_DSV4_USE_W4_PATH`). When flag=1: lift `kv_state` / `score_state` / `Indexer.kv_cache` out of `register_buffer`; per-token writes via `compute_out_cache_loc(..., ring="compressor"/"indexer")`; per-seq compress-boundary detection via `cu_seqlens_q[1:]-1` modular ring math (mirror SGLang `compressor.py:236`). When flag=0: legacy `register_buffer` path unchanged. **This is critical for correctness** — without it the C4/C128 compressed-state collisions that contributed to the W3.2 v3→v6.1 chain are still present, and the validator alone would not catch them. |
+| **ATOM ModelRunner** | `atom/model_engine/model_runner.py` | `_maybe_setup_dsv4_forward_batch` rewritten with **`is_dummy_run` short-circuit at the very entry** (the canonical fix for the #42 root cause). Real requests build `DSV4ForwardBatch` + invoke the pool admit hook. **ModelRunner is the sole owner of pool lifetime per TP rank** (see ownership boundary below). |
+| **ATOM Scheduler events** | `atom/model_engine/scheduler.py` | Emits seq lifecycle events (`on_admit(req_id)`, `on_finish(req_id)`, `on_preempt(req_id)`) via a callback registry. Does **not** call into `DSV4KVPool` directly — it only exposes the events. ModelRunner registers the pool's admit/finish methods as listeners. |
+| **silicon smoke harness** | `tests/silicon/silicon_w43_smoke.py` (new) | Single-prompt smoke + 4-prompt conc=4 + gsm8k limit=20 conc=4. Both flags + validator on. PR description must paste rc=0 + output evidence. |
+
+**Ownership boundary (P2.2 fix)**:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ Layer        │ Owns                          │ Talks to        │
+├──────────────┼───────────────────────────────┼─────────────────┤
+│ Scheduler    │ seq lifecycle events only     │ ModelRunner     │
+│              │ (add_request, finish, preempt)│ (via callbacks) │
+│ ModelRunner  │ DSV4KVPool instance per       │ Scheduler (recv │
+│              │ TP rank (lazy-init);          │ events), Pool   │
+│              │ ForwardBatch construction;    │ (lifecycle ops) │
+│              │ feature flag dispatch         │                 │
+│ DSV4KVPool   │ slot allocation, cache        │ ModelRunner     │
+│              │ tensors, ring math            │ only            │
+│ Model layers │ stateless compute, consume    │ ForwardBatch +  │
+│              │ ForwardBatch                  │ pool views      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+Scheduler does not know `DSV4KVPool` exists. ModelRunner is the only layer that has both pool and scheduler references. This eliminates the leaked-slot / partial-lifecycle ambiguity that comes from each layer holding its own pool reference.
 
 **Design principles**:
 
 - **Backwards compatibility is not optional.** When `ATOM_DSV4_USE_W4_PATH=0` the legacy path runs unchanged. The post-revert main is the bit-for-bit baseline that any wiring change must respect.
 - **Validator and `sparse_attn` share the call site.** Validator runs in the same function, one line before the kernel call. No metadata can drift between validator and kernel.
-- **No state machine in the model layer.** Compressor / Indexer state lives in `DSV4KVPool` (W4.2 deliverable). The model layer fetches views and writes per-token; no cached state.
+- **State out of `register_buffer` for both main attention AND compressor/indexer.** S1 covers all three; deferring compressor/indexer to S2 would mean the `flag=1` path is still partly broken and S1 cannot honestly claim "multi-request working".
 - **`is_dummy_run` short-circuit at entry.** This is the canonical fix for the warmup-vs-real-request divergence that broke #42.
+- **One-owner ownership.** Pool lifetime: ModelRunner. Slot lifecycle events: Scheduler. No layer owns more than one of these.
 
 ---
 
@@ -120,40 +151,114 @@ Owner direction (this sprint): **ATOM owns scheduling + pool metadata; AITER own
 def dsv4_validate_sparse_attn_metadata(
     q: Tensor,            # [B, M, H, D]
     kv: Tensor,           # [B, N, D]
-    topk_idxs: Tensor,    # [B, M, K] int32, -1 = skip sentinel
-    slot_mapping: Tensor, # [num_tokens] long
-    positions: Tensor,    # [num_tokens] long
-    cu_seqlens_q: Tensor, # [num_seqs+1] int32
+    topk_idxs: Tensor,    # [B, M, K] int32, -1 = skip sentinel (the only
+                          #                                   allowed negative)
+    slot_mapping: Tensor, # [num_tokens] long, must be >= 0
+    positions: Tensor,    # [num_tokens] long, must be >= 0
+    cu_seqlens_q: Tensor, # [num_seqs+1] int32, monotonic, [0]==0
     pool_capacity: int,
 ) -> None:
     """Host-side ABI checker for DSV4 sparse_attn call site.
 
-    Raises ValueError with crisp message on first violation.
-    Set ATOM_AITER_VALIDATE=1 to enable; default off in prod.
+    Raises ValueError with the first failed constraint. Set
+    ATOM_AITER_VALIDATE=1 to enable; default off in prod.
+
+    Full ABI contract (any failure → readable host-side error, never
+    HSA exception). The kernel side may assume all of these are true
+    once the validator returns successfully.
     """
-    # 1. Shape consistency (broadest catch-all)
+    # ---- 1. Tensor shape & dtype contract ---------------------------------
+    if q.dim() != 4:
+        raise ValueError(f"q must be 4-D [B,M,H,D], got {tuple(q.shape)}")
+    if kv.dim() != 3:
+        raise ValueError(f"kv must be 3-D [B,N,D], got {tuple(kv.shape)}")
     if q.shape[0] != kv.shape[0]:
         raise ValueError(f"q.B={q.shape[0]} != kv.B={kv.shape[0]}")
+    if q.shape[-1] != kv.shape[-1]:
+        raise ValueError(
+            f"q.head_dim={q.shape[-1]} != kv.head_dim={kv.shape[-1]}"
+        )
+    if topk_idxs.dim() != 3:
+        raise ValueError(
+            f"topk_idxs must be 3-D [B,M,K], got {tuple(topk_idxs.shape)}"
+        )
+    if topk_idxs.shape[0] != q.shape[0] or topk_idxs.shape[1] != q.shape[1]:
+        raise ValueError(
+            f"topk_idxs.shape[:2]={tuple(topk_idxs.shape[:2])} != "
+            f"q.shape[:2]={tuple(q.shape[:2])}"
+        )
 
-    # 2. Topk bounds — most likely #42 culprit
-    valid_topk = topk_idxs[topk_idxs >= 0]  # exclude -1 sentinel
-    if valid_topk.numel() > 0:
-        max_idx = valid_topk.max().item()
-        if max_idx >= kv.shape[1]:
+    # ---- 2. Dtype contract -------------------------------------------------
+    if topk_idxs.dtype != torch.int32:
+        raise ValueError(f"topk_idxs.dtype must be int32, got {topk_idxs.dtype}")
+    if slot_mapping.dtype not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"slot_mapping.dtype must be int32/int64, got {slot_mapping.dtype}"
+        )
+    if positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"positions.dtype must be int32/int64, got {positions.dtype}"
+        )
+    if cu_seqlens_q.dtype not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"cu_seqlens_q.dtype must be int32/int64, got {cu_seqlens_q.dtype}"
+        )
+
+    # ---- 3. Device & contiguity --------------------------------------------
+    dev = q.device
+    for name, t in (
+        ("kv", kv), ("topk_idxs", topk_idxs), ("slot_mapping", slot_mapping),
+        ("positions", positions), ("cu_seqlens_q", cu_seqlens_q),
+    ):
+        if t.device != dev:
+            raise ValueError(f"{name}.device={t.device} != q.device={dev}")
+        if not t.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+
+    # ---- 4. Topk index domain (most likely #42 culprit) -------------------
+    if topk_idxs.numel() > 0:
+        # 4a. Only -1 is the allowed negative sentinel
+        below_sentinel = (topk_idxs < -1).any().item()
+        if below_sentinel:
             raise ValueError(
-                f"topk_idxs max={max_idx} >= kv.size(N)={kv.shape[1]} "
-                f"-- would cause GPU OOB in sparse_attn"
+                "topk_idxs contains values < -1 (only -1 is the skip sentinel)"
             )
+        # 4b. Upper bound: any non-sentinel index must be in [0, kv.N)
+        valid_topk = topk_idxs[topk_idxs >= 0]
+        if valid_topk.numel() > 0:
+            max_idx = valid_topk.max().item()
+            if max_idx >= kv.shape[1]:
+                raise ValueError(
+                    f"topk_idxs max={max_idx} >= kv.size(N)={kv.shape[1]} "
+                    f"-- would cause GPU OOB in sparse_attn"
+                )
 
-    # 3. Slot mapping bounds
+    # ---- 5. Slot mapping domain --------------------------------------------
     if slot_mapping.numel() > 0:
+        if (slot_mapping < 0).any().item():
+            raise ValueError("slot_mapping contains negative ids")
         max_slot = slot_mapping.max().item()
         if max_slot >= pool_capacity:
             raise ValueError(
                 f"slot_mapping max={max_slot} >= pool_capacity={pool_capacity}"
             )
 
-    # 4. cu_seqlens_q ↔ positions consistency
+    # ---- 6. Positions domain ----------------------------------------------
+    if positions.numel() > 0:
+        if (positions < 0).any().item():
+            raise ValueError("positions contains negative values")
+
+    # ---- 7. cu_seqlens_q monotonicity & token ownership -------------------
+    if cu_seqlens_q.numel() < 1:
+        raise ValueError("cu_seqlens_q must have at least 1 element ([0])")
+    if cu_seqlens_q[0].item() != 0:
+        raise ValueError(
+            f"cu_seqlens_q[0] must be 0, got {cu_seqlens_q[0].item()}"
+        )
+    if cu_seqlens_q.numel() >= 2:
+        diffs = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        if (diffs < 0).any().item():
+            raise ValueError("cu_seqlens_q must be non-decreasing (monotonic)")
     if cu_seqlens_q[-1].item() != positions.numel():
         raise ValueError(
             f"cu_seqlens_q[-1]={cu_seqlens_q[-1].item()} != "
@@ -165,6 +270,18 @@ def dsv4_validate_sparse_attn_metadata(
             f"slot_mapping.numel()={slot_mapping.numel()}"
         )
 ```
+
+**The validator is a contract, not just a fence.** Once it returns successfully, the AITER kernel may assume:
+
+1. `q` is a 4-D contiguous tensor on the same device as all metadata
+2. `kv` is a 3-D contiguous tensor with matching `B` and `head_dim`
+3. `topk_idxs` is `[B, M, K]` int32, contiguous, contains only `-1` sentinels or valid in-range indices into `kv.size(N)`
+4. `slot_mapping` is non-negative, contiguous, and within `[0, pool_capacity)`
+5. `positions` is non-negative, contiguous
+6. `cu_seqlens_q` starts at 0, is monotonically non-decreasing, and its last element equals `positions.numel()`
+7. `slot_mapping.numel() == positions.numel()`
+
+Any AITER kernel deviating from these assumptions is a kernel bug and must be fixed there, not papered over in the validator.
 
 **Design rationale**:
 
@@ -179,13 +296,17 @@ def dsv4_validate_sparse_attn_metadata(
 
 | Layer | Content | Trigger |
 |---|---|---|
-| **AITER UT** | `aiter/tests/test_dsv4_validate.py` — truth table for the validator (in-bounds / OOB topk / OOB slot / cu mismatch / empty batch / first-failure ordering). CPU-only. | CI on AITER PR |
-| **ATOM UT** | `tests/test_deepseek_v4_w43_redo.py` (new) — register_buffer absent on the W4 path; per-token RoPE math on positions=[12,13,15,12]; per-seq slot mapping correctness; validator-fail propagation. Mocks the pool. | CI on ATOM PR |
-| **silicon smoke (mandatory PR gate)** | `tests/silicon/silicon_w43_smoke.py` — single-prompt smoke (`max_num_seqs=1` + `ATOM_DSV4_USE_W4_PATH=1` + `ATOM_AITER_VALIDATE=1`). PR description must paste rc=0 + output coherence + validator pass. | Any model_runner / model.forward change PR |
-| **silicon accuracy gate** | `tests/silicon/silicon_w45_acc.py` — gsm8k limit=20 conc=4 with all flags on. ≥60 % pass-rate (within ±10pt of conc=1 70 % Evidence F baseline). | W4.5 gate PR (separate, blocks DSV4 multi-request opt-in default) |
-| **silicon regression baseline** | `silicon_w43_smoke.py` with `ATOM_DSV4_USE_W4_PATH=0` (default). Confirms main behavior unchanged from post-#44-revert. | Any wiring PR |
+| **AITER UT** | `aiter/tests/test_dsv4_validate.py` — truth table for **every** check in the §5 contract: shape (1), dtype (2), device/contiguity (3), topk domain (4a-b), slot domain (5), positions (6), cu monotonicity & token-ownership (7). CPU-only. | CI on AITER PR |
+| **ATOM UT — main attention W4 path** | `tests/test_deepseek_v4_w43_redo.py` (new) — `register_buffer` absent for `kv_cache` on W4 path; per-token RoPE math on positions=[12,13,15,12]; per-seq slot mapping; validator-fail propagation. Mocks the pool. | CI on ATOM PR |
+| **ATOM UT — Compressor / Indexer W4 path (W4.4 slice)** | `tests/test_deepseek_v4_w44_state_redo.py` (new; revives 32-UT pattern from closed PR #45) — `register_buffer` absent for `kv_state`/`score_state`/`Indexer.kv_cache` on W4 path; per-seq compress-trigger via `cu_seqlens_q[1:]-1` (positions [12,13,15,12], ratio=4, only token at pos=15 fires); state scatter into pool's compressor + indexer rings. | CI on ATOM PR |
+| **ATOM UT — Path 2 guard amendment** | `tests/test_dsv4_multireq_guard.py` (extend) — new truth-table rows: `UNSAFE=1, USE_W4=0` rejects, `UNSAFE=1, USE_W4=1` allowed, `UNSAFE=0, USE_W4=1` rejects. Drift-catcher integration test still asserts the helper module is the source of truth. | CI on ATOM PR |
+| **ATOM UT — Scheduler events + ModelRunner ownership** | `tests/test_modelrunner_dsv4_pool_lifecycle.py` (new) — Scheduler emits events without `DSV4KVPool` import; ModelRunner subscribes pool's admit/finish; finish path is idempotent under preempt-then-finish race. Mocks. | CI on ATOM PR |
+| **silicon regression baseline (BLOCKING)** | `silicon_w43_smoke.py` with `ATOM_DSV4_USE_W4_PATH=0` (default). Confirms main behavior unchanged from post-#44-revert. **Must run before the new-path test in every wiring PR.** | Any wiring PR |
+| **silicon smoke (mandatory PR gate)** | `tests/silicon/silicon_w43_smoke.py` — single-prompt smoke (`max_num_seqs=1` + `ATOM_DSV4_USE_W4_PATH=1` + `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1` + `ATOM_AITER_VALIDATE=1`). PR description must paste rc=0 + output coherence + validator pass. | Any model_runner / model.forward / Compressor / Indexer change PR |
+| **silicon multi-request smoke** | same harness with `--max-num-seqs 4 --num-prompts 4`. Same flags. PR description must paste rc=0 + 4 idx outputs all on-topic. | S1.4 acceptance |
+| **silicon accuracy gate (W4.5 owner gate)** | `tests/silicon/silicon_w45_acc.py` — gsm8k limit=20 conc=4 with all flags on. ≥60 % pass-rate (within ±10pt of conc=1 70 % Evidence F baseline). | W4.5 gate PR (separate, blocks DSV4 multi-request opt-in default) |
 
-**Mandatory: the regression baseline must run before the new path on silicon, in every wiring PR.** This catches any accidental break of the legacy single-request path before flagging it as "the new path is broken".
+**The regression baseline (legacy path with flag=0) is the load-bearing test.** Without it we cannot tell whether a silicon failure is "new path broken" or "we broke the legacy path too" — exactly the ambiguity that made #42 / #43 / #44 expensive to diagnose.
 
 ---
 
@@ -193,15 +314,20 @@ def dsv4_validate_sparse_attn_metadata(
 
 | Sprint sub-step | Content | Estimate | Blocker |
 |---|---|---|---|
-| **S1.1** | AITER validator + UT | 2–3 days | — |
-| **S1.2** | ATOM W4.3-redo + 2 flags + ModelRunner `is_dummy_run` short-circuit | 3–4 days | S1.1 ABI definition |
-| **S1.3** | silicon smoke gate (post-S1.2 commit) | 1 day | S1.2 |
-| **S1.4** | conc=4 4-prompt + gsm8k limit=20 silicon validation | 1–2 days | S1.3 green |
-| **Total Sprint 1** | "good accuracy + multi-request working" first wave | **7–10 days** | — |
+| **S1.1** | AITER validator + full UT (every §5 check) | 3 days | — |
+| **S1.2** | ATOM Path 2 guard amendment + UT (drift-catcher refresh) | 0.5 day | — |
+| **S1.3** | ATOM W4.3-redo (main attention) + UT + ModelRunner `is_dummy_run` short-circuit + Scheduler event registry | 3 days | S1.1 ABI |
+| **S1.4** | ATOM W4.4-redo (Compressor/Indexer state migration) + UT — revives PR #45 design pattern | 2 days | S1.3 |
+| **S1.5** | silicon regression baseline + single-prompt smoke (`max_num_seqs=1` + flags) | 1 day | S1.3+S1.4 commits |
+| **S1.6** | silicon multi-request smoke (conc=4 4-prompt) — flags on | 1 day | S1.5 green |
+| **S1.7** | silicon accuracy gate (gsm8k limit=20 conc=4 ≥60%) — Evidence J | 1 day | S1.6 green |
+| **Total Sprint 1** | "good accuracy + multi-request working" first wave | **11–13 days** | — |
+
+(Time box widened from 7-10 to 11-13 days to absorb the W4.4 slice that P1.2 review surfaced. Honest accounting.)
 
 Subsequent sprints (decoupled from S1):
 
-- **S2** — DSV4 SWA sparse attention AITER kernel (replaces Python sparse_attn for the main ring)
+- **S2** — DSV4 SWA sparse attention AITER kernel (replaces Python `sparse_attn` for the main ring)
 - **S3** — DSV4 hybrid sparse attention (SWA + compressed in one kernel)
 - **S4** — Flash Compressor
 - **S5** — Lightning TopK / radix-select
