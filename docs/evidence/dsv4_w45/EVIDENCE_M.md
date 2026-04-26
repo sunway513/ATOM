@@ -109,20 +109,35 @@ Each token's window now covers the W absolute positions ending at `pos[t]`:
 
 Existing `tests/test_deepseek_v4_w43_redo.py::TestPerTokenTopkHelper` (3 tests) still pass.
 
-## W4 fix silicon verify (single-request, USE_W4_PATH=1, post-topk-helper-fix)
+## W4 path bisection — three fixes, three checkpoints
 
-| Run | Output (first 16 token ids) | Pattern |
+| Checkpoint | Output (first ~16 token ids) | Pattern |
 |---|---|---|
-| W4 single (pre-fix) | 8385,6328,289,7795×N | single-token collapse on 7795 |
-| W4 single (post-fix) | 16520,33,7242,7242,7242,1613,7242,1613,…,7242,1613 | two-token alternation 7242↔1613 |
+| W4 single (pre any fix) | 8385,6328,289,7795×N | single-token collapse on 7795 |
+| W4 single (post topk helper fix, commit `3468abd`) | 16520,33,7242,7242,7242,1613,7242,1613,… | two-token alternation 7242↔1613 |
+| **W4 single (post legacy fallback, commit `bbc6b0f`)** | **223,1673,3866,937,17735,12351,…** decodes to **"元龙高吾原来世上世上名叫Adam，乃其父之名为安知公..."** | **coherent Chinese text** ✅ |
 
-Decoded: 7242="并且", 1613="...". The model now reads a fuller window (the topk helper fix is verified to take effect — the single-token attractor is gone), but still locks into a degenerate two-token loop. **This proves the topk helper was a real bug and the fix is directionally correct, but the W4 path has at least one additional independent bug** below this layer. Candidates ranked by likelihood:
+### Bug 1 (fixed in `3468abd`): `_get_window_topk_idxs_pertoken` decoded only its own current KV row
 
-1. **Compressor / Indexer per-token state writes** under the W4 path (`Compressor._forward_w4`, `Indexer.forward` on the W4 branch). These were rewritten in W4.4 Sprint 2/3 to use the engine pool and may carry analogous index-skew bugs.
-2. **KV scatter target** under multi-step decode — `out_cache_loc = slot * ring_main + (positions % ring_main)` is correct for fresh prefill but the write/read symmetry assumes positions monotonically increase across forward calls. Worth verifying against actual `forward_batch.positions` per decode step.
-3. **Inverse RoPE on output** — `_apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)` uses `freqs_cis[positions]`; if `positions` for a decode step doesn't match the position at which the KV was originally scattered, the inverse RoPE removes the wrong rotation.
+The pertoken topk helper derived each token's window from the in-batch offset:
+```python
+base = pos - in_seq_offset + arange_w
+valid = (base >= 0) & (base <= pos)
+```
+For decode steps cu_seqlens_q=[0,1] so in_seq_offset=0, giving base[k]=pos+k, valid only at k=0. Each decode token attended to only its own current KV row → single-token attractor. Fix unifies prefill+decode by deriving the window directly from absolute position.
 
-These are W4-path issues and orthogonal to this PR's MoE scope. The topk-helper fix is committed in this PR (commit `3468abd`) because it is a small, contained bisection-driven fix with unit tests passing — incremental progress on #37 — but reaching the gsm8k W4 multi-request ≥60% gate is gated on the additional fix(es) above.
+### Bug 2 (worked around in `bbc6b0f`): `Compressor._forward_w4` skips intermediate compress-block boundaries during prefill
+
+The W4 path's compressor only fires the compress emission at the LAST token of each seq:
+```python
+last_positions = positions[cu[1:] - 1]
+compress_mask = (last_positions + 1) % ratio == 0
+```
+But legacy prefill emits one compressed entry per ratio-block. For a 12-token prefill on c4 layers (ratio=4), legacy writes 3 compressed entries; W4 path writes only 1 (the last). Decode then reads stale zero entries from `compressor_kv_cache_view[slot, 0..N-1]` → degenerate output (the 7242/1613 alternation seen at checkpoint 2 above).
+
+**Stop-gap (this PR):** when `cu_seqlens_q.numel()==2` (single seq), route to `_forward_legacy` with `positions[0]` as `start_pos`. Legacy's prefill block-loop emits all compressed entries correctly. Verified on silicon: coherent Chinese output (checkpoint 3 above).
+
+**Sprint 4 (next):** rewrite `Compressor._forward_w4`'s prefill loop to enumerate all `(positions+1) % ratio == 0` events in order, scatter+roll kv_state per emission, then write each per-block compressed entry to its `kv_cache[slot, position // ratio]` target. Multi-seq is currently still broken — the legacy fallback only handles the single-seq case.
 
 ## What this Evidence does NOT cover
 
