@@ -345,7 +345,16 @@ def _apply_rotary_emb(
     x = torch.view_as_complex(x.float().unflatten(-1, (-1, 2)))
     if inverse:
         freqs_cis = freqs_cis.conj()
-    if x.ndim == 3:
+    # Three call shapes:
+    #   2D ``[B, D]``  — compressor compress-boundary emit (kv_seq has no T dim)
+    #   3D ``[B, T, D]`` — KV after (B, T, head_dim) view
+    #   4D ``[B, T, H, D]`` — Q/K with explicit head dim
+    # Sprint 2 (W4.5 silicon Bug #4): the 2D case used to fall through to the
+    # 4D else-branch which inflates to ``[1, B, 1, D]`` and breaks. The
+    # compressor emit at line 1005 hit it the moment we got past Bug #1+#2.
+    if x.ndim == 2:
+        freqs_cis = freqs_cis.view(1, x.size(-1))
+    elif x.ndim == 3:
         freqs_cis = freqs_cis.view(1, x.size(1), x.size(-1))
     else:
         freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))

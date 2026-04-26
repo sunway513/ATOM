@@ -1862,16 +1862,21 @@ class ModelRunner:
 
         # Ring sizes for compressor / indexer state slabs.
         # SGLang uses get_compress_state_ring_size(ratio): 4→8, 128→128 — i.e.
-        # PER-LAYER. Our pool keeps one shared slab across all c4+c128 layers,
-        # so the slab must fit the WORST case. Compressor row math (deepseek_v4
-        # _forward_w4): overlap=True → ring=2*ratio; overlap=False → ring=ratio.
-        # Worst case: c128 with overlap=False → ring=128. Using `2 * 4 = 8` here
-        # caused a silicon HSA 0x1016 (PyTorch index_put ASSERT_TRAP) on the
-        # very first prefill of a c128 layer. Caught by W4.5 triage (Evidence K).
-        # Wastes memory on c4 layers (8→128, 16x) but correct; per-slab split
-        # is the proper follow-up fix.
-        ring_size_compressor = max(2 * 4, 128)  # = 128
+        # PER-RATIO. Sprint 2 (Evidence K Bug #1+#2 fix) splits ATOM's pool
+        # into per-ratio slabs so each Compressor type gets its own ring +
+        # inner_dim. Compressor row math (deepseek_v4 _forward_w4):
+        # overlap=True (c4) → ring=2*ratio=8; overlap=False (c128) → ring=ratio=128.
+        ring_size_compressor_c4 = 2 * 4  # = 8
+        ring_size_compressor_c128 = 128
         ring_size_indexer = 2 * 64
+
+        # Compressor state inner_dim is also per-ratio (Evidence K Bug #2):
+        # c4 layer is the Indexer's inner Compressor with head_dim=index_head_dim
+        # and coff=2 (overlap=True); c128 layer is the standalone main
+        # Compressor with head_dim=main attention head_dim and coff=1.
+        index_head_dim = getattr(args, "index_head_dim", 128)
+        state_inner_dim_c4 = 2 * index_head_dim
+        state_inner_dim_c128 = args.head_dim
         ring_size_main = max(getattr(args, "window_size", 128), 64)
 
         cfg = DSV4KVPoolConfig(
@@ -1884,8 +1889,12 @@ class ModelRunner:
             window_size=getattr(args, "window_size", 128),
             max_seq_len=getattr(args, "max_seq_len", 4096),
             ring_size_main=ring_size_main,
-            ring_size_compressor=ring_size_compressor,
+            ring_size_compressor_c4=ring_size_compressor_c4,
+            ring_size_compressor_c128=ring_size_compressor_c128,
             ring_size_indexer=ring_size_indexer,
+            state_inner_dim_c4=state_inner_dim_c4,
+            state_inner_dim_c128=state_inner_dim_c128,
+            index_head_dim=index_head_dim,
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
             device=self.device,
