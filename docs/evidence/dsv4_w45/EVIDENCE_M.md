@@ -322,3 +322,37 @@ These two kernels access the SAME `w2_weight` tensor — but each expects a DIFF
 - AITER `e8m0_shuffle` (CK): `aiter/utility/fp4_utils.py:72-92`
 - ATOM `shuffle_weights` (CK alias): `atom/model_ops/utils.py:124-160`
 - Silicon FMOE lookup keys: `docs/evidence/dsv4_w45/artifacts/m_lookup_keys_unique.log`
+
+## Sprint 5 — surgical fix attempt v5 → REGRESSION (reverted)
+
+Applied option 1 from Sprint 4.6 (extend Swiglu condition to `quant_type == per_1x32 AND gfx95`). Result: **complete regression to 0.00 / 0.00**.
+
+| Run | flexible-extract | strict-match | latency/req | n | log |
+|---|---|---|---|---|---|
+| W4 v4 | 0.45 ± 0.114 | 0.00 ± 0.000 | 28s | 20 | `lm_eval_w4_v4.log` |
+| **W4 v5 (a16w4 patch)** | **0.00** | **0.00** | **195s** | 20 | `lm_eval_w4_v5.log` |
+
+### Root cause of v5 regression: STACKED vs INTERLEAVED weight layout
+
+DSV4-Pro's on-disk format (verified by safetensors inspection):
+- `experts.{e}.w1.weight` shape `[3072, 3584]` int8 (gate, separate file entry)
+- `experts.{e}.w3.weight` shape `[3072, 3584]` int8 (up, separate file entry)
+
+Standard FusedMoE per-shard loader fills `w13_weight` as **STACKED**: first N rows are gate (w1), next N rows are up (w3). Verified at `atom/model_ops/moe.py:2225-2310` (`SHARD_ID_TO_SHARDED_DIM` and the per-shard copy logic).
+
+But the SwiGLU branch's pre-shuffle (line 858-870) does:
+```python
+.view(e, n // 2, 2, k)  # treats input as [E, N1=N/2, 2_pairs, K] — INTERLEAVED assumption
+.permute(0, 2, 1, 3)    # → [E, 2_pairs, N1, K]
+```
+This permute only makes sense for INTERLEAVED layout `[g0, u0, g1, u1, ...]`. Applied to STACKED input, it groups consecutive pairs `(g0, g1), (g2, g3), ...` and then "swaps" them — total scrambling. Then `shuffle_weight_a16w4` operates on scrambled data → every dequant is from a wrong expert column → **complete accuracy collapse**.
+
+**Secondary observation**: `[aiter WARNING] ck kernel not found: moe_ck2stages_gemm2_*_FP4X2_FP4X2_B16` flooded server log during v5. Patching to a16w4 layout caused the CK stage2 dispatcher to miss its tuned entry → fallback path → 7× slowdown (28s/req → 195s/req).
+
+### Lessons
+
+1. **The Sprint 4.6 RCA partially applied to other models (Swiglu+INTERLEAVED), not DSV4-Pro (Silu+STACKED)** — the layout mismatch is real, but the SwiGLU branch is NOT a drop-in fix.
+2. **Two valid layouts exist**: STACKED (DSV4) and INTERLEAVED (GLM-4.5/Qwen3-MOE). The Mxfp4MoEMethod has hardcoded the INTERLEAVED assumption only.
+3. **Option 1 from Sprint 4.6 is wrong**. The correct surgical fix would be: skip the `permute(0,2,1,3)` for STACKED layout, OR detect the layout at load time.
+
+Patch reverted at commit pending. Next: Sprint 5b — torch reference baseline (`ATOM_V4_TORCH_MOE=1`) to determine if the gap is in the FUSED kernel or in the model/quant config itself.
