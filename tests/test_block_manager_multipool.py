@@ -65,7 +65,8 @@ def _make_bm_multipool(specs, blocks_per_pool=8, block_size=4):
     from atom.model_engine.block_manager import BlockManager
 
     cfg = MockConfig(
-        num_kvcache_blocks=blocks_per_pool * len(set(physical_pool_key(s) for s in specs.values())),
+        num_kvcache_blocks=blocks_per_pool
+        * len(set(physical_pool_key(s) for s in specs.values())),
         kv_cache_block_size=block_size,
         enable_prefix_caching=False,
     )
@@ -119,10 +120,15 @@ class TestMultiPoolRegistration:
         # Same spec used twice (e.g. two attention layers using the same
         # MLAAttentionSpec) must coalesce into ONE physical pool.
         spec = _spec_mla_c4()
-        bm = _make_bm_multipool({"layer.0.attn.main_c4": spec, "layer.1.attn.main_c4": spec})
+        bm = _make_bm_multipool(
+            {"layer.0.attn.main_c4": spec, "layer.1.attn.main_c4": spec}
+        )
         assert len(bm.pools) == 1
         # Both logical names map to the same physical pool key.
-        assert bm.logical_to_pool["layer.0.attn.main_c4"] == bm.logical_to_pool["layer.1.attn.main_c4"]
+        assert (
+            bm.logical_to_pool["layer.0.attn.main_c4"]
+            == bm.logical_to_pool["layer.1.attn.main_c4"]
+        )
 
     def test_pool_keys_use_physical_pool_key_function(self):
         spec = _spec_mla_c4()
@@ -177,7 +183,11 @@ class TestAtomicAllocate:
 
     def test_allocate_writes_block_table_for_every_logical(self):
         bm = _make_bm_multipool(
-            {"main": _spec_full(), "compress": _spec_compressor_c4(), "indexer": _spec_mla_c4()}
+            {
+                "main": _spec_full(),
+                "compress": _spec_compressor_c4(),
+                "indexer": _spec_mla_c4(),
+            }
         )
         seq = _make_seq([1, 2, 3, 4])
         bm.allocate(seq)
@@ -194,10 +204,14 @@ class TestAtomicAllocate:
         bm.allocate(seq)
         # All pools have 1 block consumed.
         free_main_pre = len(bm.pools[bm.logical_to_pool["main"]].free_block_ids_set)
-        free_compress_pre = len(bm.pools[bm.logical_to_pool["compress"]].free_block_ids_set)
+        free_compress_pre = len(
+            bm.pools[bm.logical_to_pool["compress"]].free_block_ids_set
+        )
         bm.deallocate(seq)
         free_main_post = len(bm.pools[bm.logical_to_pool["main"]].free_block_ids_set)
-        free_compress_post = len(bm.pools[bm.logical_to_pool["compress"]].free_block_ids_set)
+        free_compress_post = len(
+            bm.pools[bm.logical_to_pool["compress"]].free_block_ids_set
+        )
         assert free_main_post > free_main_pre
         assert free_compress_post > free_compress_pre
         # And block_tables for the seq are now empty.
@@ -210,7 +224,9 @@ class TestAtomicAllocate:
 
 class TestPrefixCacheLogicalScope:
     def test_block_carries_logical_cache_name(self):
-        bm = _make_bm_multipool({"main": _spec_full(), "compress": _spec_compressor_c4()})
+        bm = _make_bm_multipool(
+            {"main": _spec_full(), "compress": _spec_compressor_c4()}
+        )
         seq = _make_seq([1, 2, 3, 4])
         bm.allocate(seq)
         main_key = bm.logical_to_pool["main"]
@@ -245,7 +261,9 @@ class TestCanAppendAggregatesPhysicalPoolDemand:
         # Sanity: both logicals map to ONE physical pool.
         assert len(bm.pools) == 1
         # Build a seq that already has 0 blocks; needs 3 new blocks per logical.
-        seq = _make_seq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])  # ~3 blocks at block_size=4
+        seq = _make_seq(
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        )  # ~3 blocks at block_size=4
         # If demand were checked per-logical: each says "need 3, have 4 → OK"
         # With aggregation: total need=6 > capacity=4 → must reject.
         result = bm.can_append(seq, num_new_tokens=1)
@@ -307,9 +325,9 @@ class TestAllocateRollbackInProgressLogical:
             bm.allocate(seq)
 
         # After rollback: every pool back to its starting free count.
-        assert len(pool_a.free_block_ids_set) == free_a_before, (
-            "Pool A leaked blocks from the completed-logical rollback path."
-        )
+        assert (
+            len(pool_a.free_block_ids_set) == free_a_before
+        ), "Pool A leaked blocks from the completed-logical rollback path."
         assert len(pool_b.free_block_ids_set) == free_b_before, (
             "Pool B leaked blocks from the in-progress-logical rollback "
             "path — Codex P1#2."
