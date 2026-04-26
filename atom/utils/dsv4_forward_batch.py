@@ -30,9 +30,14 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    # Avoid a hard import: keeps this module test-friendly and breaks no
+    # legacy callers that haven't yet pulled in the engine package.
+    from atom.engine.kv_pool import DSV4KVPool
 
 
 class DSV4ForwardMode(enum.Enum):
@@ -220,22 +225,35 @@ class DSV4ForwardBatch:
         cls,
         attn_metadata: Any,
         positions: torch.Tensor,
+        seq_ids: Optional[List[int]] = None,
+        pool: Optional["DSV4KVPool"] = None,
     ) -> "DSV4ForwardBatch":
         """Adapter: construct DSV4ForwardBatch from ATOM's
         `forward_context.attn_metadata` + positions tensor.
 
-        Used during W4.1-W4.3 transition where the runtime still produces
-        ATOM's standard AttentionMetaData but the DSV4 model is being
-        migrated to consume DSV4ForwardBatch. Once W4.2 wires the engine-
-        owned pool and out_cache_loc, this adapter is upgraded to
-        `from_engine_state()` (W4.4).
+        Used during the W4.1-W4.3 transition where the runtime still
+        produces ATOM's standard AttentionMetaData but the DSV4 model is
+        being migrated to consume DSV4ForwardBatch. Once W4.4 lands the
+        recommended path is `from_engine_state()`.
+
+        Two operating modes
+        -------------------
+        - **W4.1 placeholder path** (``pool is None`` *or* ``seq_ids is
+          None``): ``req_pool_indices`` is filled with
+          ``block_tables[:, 0]``, the documented W4.1 placeholder. Not
+          stable-unique under prefix caching; callers needing uniqueness
+          must invoke ``assert_pool_slot_unique()``.
+        - **W4.2 pool path** (``pool`` and ``seq_ids`` both provided):
+          ``req_pool_indices = pool.get_slots(seq_ids)`` (stable-unique
+          per active seq) and ``out_cache_loc`` is populated via
+          ``pool.compute_out_cache_loc(...)`` for the main attention ring.
 
         ATOM normally builds attn_metadata tensors on CUDA, but a few
         paths (warmup, CPU-fallback unit tests) construct them on CPU
-        while `positions` lands on the model's GPU device. Normalize
-        ALL fields to `positions.device` here so __post_init__'s
-        device-uniformity invariant holds regardless of where the
-        upstream tensors started.
+        while `positions` lands on the model's GPU device. Normalize ALL
+        fields to ``positions.device`` here so __post_init__'s device-
+        uniformity invariant holds regardless of where the upstream
+        tensors started.
         """
         device = positions.device
         cu = attn_metadata.cu_seqlens_q.to(torch.long).to(device)
@@ -251,18 +269,35 @@ class DSV4ForwardBatch:
         else:
             seq_lens = extend_seq_lens.clone()
 
-        # req_pool_indices: see field docstring — W4.1 placeholder fills
-        # with block_tables[:, 0]; NOT stable-unique under prefix caching.
-        # Call assert_pool_slot_unique() if uniqueness is required.
         block_tables = getattr(attn_metadata, "block_tables", None)
-        if (
-            block_tables is not None
-            and block_tables.dim() == 2
-            and block_tables.shape[0] == num_seqs
-        ):
-            req_pool_indices = block_tables[:, 0].to(torch.long).to(device)
+        positions_long = positions.to(torch.long)
+
+        # ---- W4.2: prefer the engine pool when caller supplies it ----
+        # Pool path overrides the W4.1 ``block_tables[:, 0]`` placeholder
+        # with stable-unique slots and populates ``out_cache_loc``.
+        if pool is not None and seq_ids is not None and len(seq_ids) == num_seqs:
+            req_pool_indices = pool.get_slots(seq_ids).to(
+                device=device, dtype=torch.long
+            )
+            out_cache_loc: Optional[torch.Tensor] = pool.compute_out_cache_loc(
+                positions=positions_long,
+                slot_indices=req_pool_indices,
+                cu_seqlens_q=cu,
+                ring="main",
+            )
         else:
-            req_pool_indices = torch.arange(num_seqs, dtype=torch.long, device=device)
+            # ---- W4.1 placeholder path (legacy callers without pool) ----
+            if (
+                block_tables is not None
+                and block_tables.dim() == 2
+                and block_tables.shape[0] == num_seqs
+            ):
+                req_pool_indices = block_tables[:, 0].to(torch.long).to(device)
+            else:
+                req_pool_indices = torch.arange(
+                    num_seqs, dtype=torch.long, device=device
+                )
+            out_cache_loc = None  # callers MUST call assert_pool_slot_unique()
 
         # forward_mode: if any seq has extend > 1, it's prefill (mixed batch
         # is also classified as PREFILL — the runtime will decide internal
@@ -280,10 +315,63 @@ class DSV4ForwardBatch:
         # __post_init__ asserts on are guaranteed to share device.
         return cls(
             forward_mode=mode,
-            positions=positions.to(torch.long),
+            positions=positions_long,
             seq_lens=seq_lens,
             extend_seq_lens=extend_seq_lens,
             cu_seqlens_q=cu,
             req_pool_indices=req_pool_indices,
+            out_cache_loc=out_cache_loc,
             block_tables=block_tables,
+            kv_pool=pool,
+        )
+
+    @classmethod
+    def from_engine_state(
+        cls,
+        forward_batch_state: Any,
+        pool: "DSV4KVPool",
+    ) -> "DSV4ForwardBatch":
+        """Construct a DSV4ForwardBatch directly from the engine's
+        ``forward_batch_state`` and the engine-owned pool.
+
+        Used after W4.4 lands, when the runtime stops producing
+        AttentionMetaData for DSV4. Until then, ``from_attn_metadata``
+        with the optional ``pool`` kwarg is the recommended path.
+
+        ``forward_batch_state`` contract (proposed; finalize in W4.3)
+        -------------------------------------------------------------
+        - ``.seq_ids``: ``list[int]`` (one per seq in the batch).
+        - ``.positions``: ``Tensor[num_tokens]``.
+        - ``.cu_seqlens_q``: ``Tensor[num_seqs+1]``.
+        - ``.extend_seq_lens``: ``Tensor[num_seqs]``.
+        - ``.seq_lens``: ``Tensor[num_seqs]``.
+        - ``.forward_mode``: ``DSV4ForwardMode``.
+        - ``.block_tables`` (optional): pass-through, may be ``None``.
+        """
+        positions = forward_batch_state.positions.to(torch.long)
+        device = positions.device
+        cu = forward_batch_state.cu_seqlens_q.to(torch.long).to(device)
+
+        slot_indices = pool.get_slots(forward_batch_state.seq_ids).to(
+            device=device, dtype=torch.long
+        )
+        out_cache_loc = pool.compute_out_cache_loc(
+            positions=positions,
+            slot_indices=slot_indices,
+            cu_seqlens_q=cu,
+            ring="main",
+        )
+
+        return cls(
+            forward_mode=forward_batch_state.forward_mode,
+            positions=positions,
+            seq_lens=forward_batch_state.seq_lens.to(torch.long).to(device),
+            extend_seq_lens=forward_batch_state.extend_seq_lens.to(torch.long).to(
+                device
+            ),
+            cu_seqlens_q=cu,
+            req_pool_indices=slot_indices,
+            out_cache_loc=out_cache_loc,
+            block_tables=getattr(forward_batch_state, "block_tables", None),
+            kv_pool=pool,
         )
