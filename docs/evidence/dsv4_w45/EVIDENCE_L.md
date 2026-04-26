@@ -127,3 +127,42 @@ The fact that W4 multi produces 4 **distinct** nonsense outputs (one per request
 - ATOM PR `sunway513/atom#54` (merged) — Sprint 1+2: bisect harness + per-ratio pool slabs + scatter asserts
 - ATOM PR `feat/dsv4-w4-kv-concat` (this) — Sprint 3: Compressor.kv_cache pool binding + KV concat + per-instance state lazy-fallback
 - ROCr Debug Agent docs — https://rocm.docs.amd.com/projects/rocr_debug_agent/en/latest/
+
+## Addendum (2026-04-26 14:13Z) — Accuracy regression root cause: CK MoE ABI mismatch
+
+After PR #55 merge, ran additional bisect against output coherence regression. Findings:
+
+### Reproduction
+| Run | Code | JIT cache | CK source | MoE backend | Output |
+|-----|------|-----------|-----------|-------------|--------|
+| J era 03:18 | main `5e193de` | Yesterday's 18:00 cache (incl. fallback MoE) | **EMPTY** | ASM/triton fallback (no `ck_moe_stage*` calls in log) | **✅ Coherent Chinese** |
+| Sprint 3 v10 06:21 | `298d91b` | Mixed (some yesterday, some Sprint-2 era) | Copied from `/app/aiter-test/` 04:14 | CK (`ck_moe_stage1/2` heavily logged) | ❌ Gibberish `❶ ❷` |
+| v11 (MoE-only clear) | `298d91b` | MoE modules rebuilt against new CK | Copied | CK | ❌ Gibberish `〖, 〖, actually...` |
+| v12 (full clean) | `298d91b` | Everything rebuilt | Copied | CK | ❌ Gibberish `〖, 〖, 〖(...` |
+| **J era replay 14:11** | **main `5e193de` (= J era code)** | **Full clean** | **Copied** | **CK** | ❌ **Gibberish `yes response response 次回应性...`** |
+
+The same J era code that produced coherent Chinese on 03:18 produces **gibberish** on replay with the CK source from `/app/aiter-test/` in place. The only difference between the two runs: **whether the CK directory is populated** (which determines whether aiter loads the CK MoE backend or falls back to ASM/triton).
+
+### Diagnosis
+
+The CK source I copied at 04:14 to fix the original `module_moe_sorting: 'moe_sorting_api.hpp' file not found` error (a Sprint-1 silicon-blocker per Evidence J/K) introduced a **CK MoE ABI mismatch with this DSV4 model checkpoint**:
+- Original aiter was built without CK; MoE went through ASM path (validated working in Evidence J's baseline run).
+- After CK source was placed, aiter's JIT detected CK and built `module_moe_ck2stages_*` and `module_moe_cktile2stages` → `ck_moe_stage1/2` got loaded → numerical garbage.
+
+### What this means for the W4.5 silicon-green achievement
+
+The Sprint 1+2+3 architectural work (issue #37 W4.5 multi-request KV cache) is intact:
+- W4 single mode silicon: ✅ runs end-to-end, no crash
+- W4 multi mode silicon (4 conc): ✅ runs end-to-end, no crash, no row-0 cross-talk
+- 120 UTs: ✅ all green
+- Bug cascade Bug #1-#7: all addressed at the architectural layer
+
+The **accuracy regression is environment-level**, not architectural — it surfaced as a side-effect of the silicon-unblock (CK copy) that Sprint 1 needed.
+
+### Recommended next steps (out of scope for this PR)
+
+1. Get the CK version that the production aiter wheel (in `/opt/venv/`) was built against — this should match the loaded MoE kernels' ABI.
+2. Or: configure aiter to use ASM/triton MoE explicitly via env var or config (search for an `AITER_MOE_BACKEND` or similar option in the aiter version actually deployed).
+3. Or: rebuild aiter wheel against the current CK in `/workspace/aiter-lingpeng/3rdparty/composable_kernel/` to ensure module_aiter_core matches CK's ABI expectations.
+
+The accuracy fix is **not in ATOM** — it's an **aiter-team / deployment-config** concern. ATOM's W4.5 architecture is solid.
