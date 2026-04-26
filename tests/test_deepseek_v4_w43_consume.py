@@ -93,7 +93,10 @@ def _register_buffer_targets(method: ast.FunctionDef) -> list[str]:
 
 
 class TestDeepseekV4AttentionDoesNotRegisterKVCacheBuffer:
-    """W4.3 contract: kv_cache is engine-owned, not a register_buffer."""
+    """W4.3 + W4.4 contract: per-request state is engine-pool-owned, not a
+    register_buffer. W4.4 extends W4.3 by also lifting Compressor's
+    ``kv_state`` / ``score_state`` and Indexer's ``kv_cache``.
+    """
 
     def test_init_does_not_register_kv_cache(self):
         tree = _parse_dsv4_source()
@@ -104,6 +107,37 @@ class TestDeepseekV4AttentionDoesNotRegisterKVCacheBuffer:
             "DeepseekV4Attention.__init__ must NOT register_buffer "
             "'kv_cache' — that storage is now owned by DSV4KVPool. "
             f"Found register_buffer targets: {targets}"
+        )
+
+    def test_compressor_init_does_not_register_state_buffers(self):
+        """W4.4 contract: Compressor.__init__ must NOT register_buffer
+        ``kv_state`` / ``score_state``. State is owned by DSV4KVPool."""
+        tree = _parse_dsv4_source()
+        cls = _find_class(tree, "Compressor")
+        init = _find_method(cls, "__init__")
+        targets = _register_buffer_targets(init)
+        assert "kv_state" not in targets, (
+            "Compressor.__init__ must NOT register_buffer 'kv_state' "
+            "(W4.4: state owned by DSV4KVPool's kv_state slab). "
+            f"Found targets: {targets}"
+        )
+        assert "score_state" not in targets, (
+            "Compressor.__init__ must NOT register_buffer 'score_state' "
+            "(W4.4: state owned by DSV4KVPool's score_state slab). "
+            f"Found targets: {targets}"
+        )
+
+    def test_indexer_init_does_not_register_kv_cache_buffer(self):
+        """W4.4 contract: Indexer.__init__ must NOT register_buffer
+        ``kv_cache``. Storage is the pool's per-layer indexer_kv view."""
+        tree = _parse_dsv4_source()
+        cls = _find_class(tree, "Indexer")
+        init = _find_method(cls, "__init__")
+        targets = _register_buffer_targets(init)
+        assert "kv_cache" not in targets, (
+            "Indexer.__init__ must NOT register_buffer 'kv_cache' "
+            "(W4.4: cache owned by DSV4KVPool's indexer_kv slab). "
+            f"Found targets: {targets}"
         )
 
     def test_init_still_registers_freqs_cis(self):
