@@ -69,13 +69,65 @@ class TestValidateDsv4Multireq:
         _validate_dsv4_multireq(architectures=["DeepseekV4ForCausalLM"], max_num_seqs=1)
 
     def test_dsv4_arch_with_override_accepts_max_num_seqs_4(self):
-        with patch.dict(os.environ, {"ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1"}):
+        # Post-W4.3 spec: BOTH flags required (double opt-in).
+        with patch.dict(
+            os.environ,
+            {
+                "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1",
+                "ATOM_DSV4_USE_W4_PATH": "1",
+            },
+        ):
             # Re-import envs so the lazy lambda re-reads os.environ.
             import importlib
 
             from atom.utils import envs as envs_mod
 
             importlib.reload(envs_mod)
+            _validate_dsv4_multireq(
+                architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+            )
+
+    def test_unsafe_alone_now_rejects(self):
+        """Post-W4.3 spec: UNSAFE=1 alone is no longer enough — also need USE_W4_PATH=1."""
+        with patch.dict(os.environ, {"ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1"}):
+            os.environ.pop("ATOM_DSV4_USE_W4_PATH", None)
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            with pytest.raises(ValueError, match="ATOM_DSV4_USE_W4_PATH"):
+                _validate_dsv4_multireq(
+                    architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+                )
+
+    def test_use_w4_alone_rejects(self):
+        with patch.dict(os.environ, {"ATOM_DSV4_USE_W4_PATH": "1"}):
+            os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            with pytest.raises(ValueError, match="ATOM_DSV4_UNSAFE_MULTIREQ_DEV"):
+                _validate_dsv4_multireq(
+                    architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
+                )
+
+    def test_both_flags_allow_multireq(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "1",
+                "ATOM_DSV4_USE_W4_PATH": "1",
+            },
+        ):
+            import importlib
+
+            from atom.utils import envs as envs_mod
+
+            importlib.reload(envs_mod)
+            # Should not raise
             _validate_dsv4_multireq(
                 architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
             )
@@ -107,14 +159,15 @@ class TestValidateDsv4Multireq:
     def test_error_message_points_users_to_remediation(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ATOM_DSV4_UNSAFE_MULTIREQ_DEV", None)
+            os.environ.pop("ATOM_DSV4_USE_W4_PATH", None)
             with pytest.raises(ValueError) as exc_info:
                 _validate_dsv4_multireq(
                     architectures=["DeepseekV4ForCausalLM"], max_num_seqs=4
                 )
             msg = str(exc_info.value)
             assert "issues/37" in msg
-            assert "ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1" in msg
-            assert "feat/dsv4-forward-batch-paged-kv" in msg
+            assert "ATOM_DSV4_UNSAFE_MULTIREQ_DEV" in msg
+            assert "ATOM_DSV4_USE_W4_PATH" in msg
 
 
 class TestConfigIntegration:
