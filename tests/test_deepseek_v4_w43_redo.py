@@ -728,7 +728,10 @@ class TestCompressorW4PrefillBlockEmit:
 
         # Both seqs at positions [0,1,2,3] each, mapped to distinct slots 1 and 2.
         positions = torch.cat(
-            [torch.arange(seqlen, dtype=torch.long), torch.arange(seqlen, dtype=torch.long)]
+            [
+                torch.arange(seqlen, dtype=torch.long),
+                torch.arange(seqlen, dtype=torch.long),
+            ]
         )
         cu = torch.tensor([0, seqlen, 2 * seqlen], dtype=torch.long)
         req_pool_indices = torch.tensor([1, 2], dtype=torch.long)
@@ -785,6 +788,7 @@ class TestCompressorW4PrefillBlockEmit:
             rtol=1e-5,
             msg="Slot 2 must match independent solo run for seq 1",
         )
+
     @_skip_if_no_compressor
     def test_w4_prefill_then_decode_matches_legacy(self):
         """Prefill 8 toks then decode 1 tok at pos=8: W4 path must match legacy single-seq forward."""
@@ -807,9 +811,16 @@ class TestCompressorW4PrefillBlockEmit:
         c_leg.score_state = torch.full((1, ring, inner), float("-inf"))
         c_leg.kv_cache = torch.zeros(1, 8, c_leg.head_dim, dtype=torch.float32)
         with torch.no_grad():
-            c_leg.forward(x_prefill.unsqueeze(0), start_pos=0, forward_batch=None, layer_id=None)
+            c_leg.forward(
+                x_prefill.unsqueeze(0), start_pos=0, forward_batch=None, layer_id=None
+            )
             # Decode at pos=8 (next ratio boundary): legacy expects shape [1,1,dim].
-            c_leg.forward(x_decode.unsqueeze(0), start_pos=prefill_len, forward_batch=None, layer_id=None)
+            c_leg.forward(
+                x_decode.unsqueeze(0),
+                start_pos=prefill_len,
+                forward_batch=None,
+                layer_id=None,
+            )
         leg_kv = c_leg.kv_cache[0, :3].detach().clone()  # blocks 0,1,2
 
         # W4: same prefill+decode via _forward_w4, with shared kv_state across the two calls.
@@ -839,4 +850,3 @@ class TestCompressorW4PrefillBlockEmit:
             rtol=1e-5,
             msg="W4 prefill+decode handoff must match legacy",
         )
-
