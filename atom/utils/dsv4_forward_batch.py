@@ -106,15 +106,15 @@ class DSV4ForwardBatch:
 
     def __post_init__(self) -> None:
         # ---- shape invariants ----
-        assert self.positions.dim() == 1, (
-            f"positions must be 1-D [num_tokens], got shape {tuple(self.positions.shape)}"
-        )
+        assert (
+            self.positions.dim() == 1
+        ), f"positions must be 1-D [num_tokens], got shape {tuple(self.positions.shape)}"
         assert self.seq_lens.dim() == 1, "seq_lens must be 1-D [num_seqs]"
         assert self.extend_seq_lens.dim() == 1, "extend_seq_lens must be 1-D [num_seqs]"
         assert self.cu_seqlens_q.dim() == 1, "cu_seqlens_q must be 1-D [num_seqs + 1]"
-        assert self.req_pool_indices.dim() == 1, (
-            "req_pool_indices must be 1-D [num_seqs]"
-        )
+        assert (
+            self.req_pool_indices.dim() == 1
+        ), "req_pool_indices must be 1-D [num_seqs]"
 
         num_seqs = self.seq_lens.numel()
         num_tokens = self.positions.numel()
@@ -133,14 +133,16 @@ class DSV4ForwardBatch:
         # cu_seqlens_q's last entry must equal total tokens
         if num_seqs > 0:
             tail = int(self.cu_seqlens_q[-1].item())
-            assert tail == num_tokens, (
-                f"cu_seqlens_q[-1]={tail} != num_tokens={num_tokens}"
-            )
+            assert (
+                tail == num_tokens
+            ), f"cu_seqlens_q[-1]={tail} != num_tokens={num_tokens}"
 
         # ---- dtype invariants ----
-        assert self.positions.dtype in (torch.long, torch.int32, torch.int64), (
-            f"positions must be int dtype, got {self.positions.dtype}"
-        )
+        assert self.positions.dtype in (
+            torch.long,
+            torch.int32,
+            torch.int64,
+        ), f"positions must be int dtype, got {self.positions.dtype}"
         assert self.seq_lens.dtype in (torch.long, torch.int32, torch.int64)
         assert self.extend_seq_lens.dtype in (torch.long, torch.int32, torch.int64)
         assert self.cu_seqlens_q.dtype in (torch.long, torch.int32, torch.int64)
@@ -148,19 +150,24 @@ class DSV4ForwardBatch:
 
         # ---- device invariants ----
         device = self.positions.device
-        for fname in ("seq_lens", "extend_seq_lens", "cu_seqlens_q", "req_pool_indices"):
+        for fname in (
+            "seq_lens",
+            "extend_seq_lens",
+            "cu_seqlens_q",
+            "req_pool_indices",
+        ):
             t = getattr(self, fname)
-            assert t.device == device, (
-                f"{fname}.device={t.device} != positions.device={device}"
-            )
+            assert (
+                t.device == device
+            ), f"{fname}.device={t.device} != positions.device={device}"
 
         # ---- forward_mode consistency ----
         if self.forward_mode == DSV4ForwardMode.DECODE and num_seqs > 0:
             # In decode mode, every seq emits exactly 1 new token.
             ext = self.extend_seq_lens
-            assert bool(torch.all(ext == 1).item()), (
-                f"DECODE mode requires extend_seq_lens == 1 for all seqs, got {ext.tolist()}"
-            )
+            assert bool(
+                torch.all(ext == 1).item()
+            ), f"DECODE mode requires extend_seq_lens == 1 for all seqs, got {ext.tolist()}"
         elif self.forward_mode == DSV4ForwardMode.PREFILL and num_seqs > 0:
             # In prefill mode, at least one seq has > 1 new token.
             ext = self.extend_seq_lens
@@ -255,9 +262,7 @@ class DSV4ForwardBatch:
         ):
             req_pool_indices = block_tables[:, 0].to(torch.long).to(device)
         else:
-            req_pool_indices = torch.arange(
-                num_seqs, dtype=torch.long, device=device
-            )
+            req_pool_indices = torch.arange(num_seqs, dtype=torch.long, device=device)
 
         # forward_mode: if any seq has extend > 1, it's prefill (mixed batch
         # is also classified as PREFILL — the runtime will decide internal

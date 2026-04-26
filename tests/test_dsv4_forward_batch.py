@@ -110,7 +110,9 @@ class TestInvariants:
                 forward_mode=DSV4ForwardMode.DECODE,
                 positions=torch.tensor([12, 13, 14], dtype=torch.long),
                 seq_lens=torch.tensor([13, 14], dtype=torch.long),
-                extend_seq_lens=torch.tensor([1, 2], dtype=torch.long),  # second seq has 2
+                extend_seq_lens=torch.tensor(
+                    [1, 2], dtype=torch.long
+                ),  # second seq has 2
                 cu_seqlens_q=torch.tensor([0, 1, 3], dtype=torch.long),
                 req_pool_indices=torch.tensor([0, 1], dtype=torch.long),
             )
@@ -196,7 +198,9 @@ class TestFromAttnMetadata:
 
     def test_int32_cu_normalized_to_long(self):
         cu = torch.tensor([0, 3], dtype=torch.int32)
-        attn_meta = SimpleNamespace(cu_seqlens_q=cu, block_tables=None, context_lens=None)
+        attn_meta = SimpleNamespace(
+            cu_seqlens_q=cu, block_tables=None, context_lens=None
+        )
         positions = torch.tensor([0, 1, 2], dtype=torch.int32)
         fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
         assert fb.positions.dtype == torch.long
@@ -211,7 +215,9 @@ class TestFromAttnMetadata:
         must move ALL metadata tensors to positions.device.
         """
         cu = torch.tensor([0, 12, 25], dtype=torch.long, device="cpu")
-        block_tables = torch.tensor([[10, 11], [20, 21]], dtype=torch.long, device="cpu")
+        block_tables = torch.tensor(
+            [[10, 11], [20, 21]], dtype=torch.long, device="cpu"
+        )
         context_lens = torch.zeros(2, dtype=torch.long, device="cpu")
         attn_meta = SimpleNamespace(
             cu_seqlens_q=cu, block_tables=block_tables, context_lens=context_lens
@@ -238,15 +244,18 @@ class TestFromAttnMetadata:
         attn_meta = SimpleNamespace(
             cu_seqlens_q=cu, block_tables=block_tables, context_lens=None
         )
-        positions = torch.tensor(
-            list(range(12)) + list(range(13)), dtype=torch.long
-        )
+        positions = torch.tensor(list(range(12)) + list(range(13)), dtype=torch.long)
         fb = DSV4ForwardBatch.from_attn_metadata(attn_meta, positions)
         ref_dev = positions.device
-        for fname in ("cu_seqlens_q", "extend_seq_lens", "seq_lens", "req_pool_indices"):
-            assert getattr(fb, fname).device == ref_dev, (
-                f"{fname} on {getattr(fb, fname).device}, expected {ref_dev}"
-            )
+        for fname in (
+            "cu_seqlens_q",
+            "extend_seq_lens",
+            "seq_lens",
+            "req_pool_indices",
+        ):
+            assert (
+                getattr(fb, fname).device == ref_dev
+            ), f"{fname} on {getattr(fb, fname).device}, expected {ref_dev}"
 
 
 class TestPoolSlotUniqueness:
