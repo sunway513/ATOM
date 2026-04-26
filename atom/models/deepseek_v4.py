@@ -399,6 +399,84 @@ def _get_window_topk_idxs(
     return matrix.unsqueeze(0).expand(bsz, -1, -1)
 
 
+def _get_window_topk_idxs_pertoken(
+    window_size: int,
+    positions: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Per-token sliding-window topk indices for multi-seq packed batches.
+
+    W4.3-redo (issue sunway513/atom#37): the cached
+    ``_get_window_topk_idxs`` helper above assumes a single ``start_pos``
+    scalar per call — fine for the legacy B=1-implicit single-sequence
+    path, but fundamentally wrong when N different sequences have N
+    different per-seq positions in the same packed batch. This per-token
+    variant builds one row per token using the token's actual absolute
+    ``positions[t]`` value, eliminating the cross-talk that the W3.2
+    v3..v6.1 archive chain repeatedly tried to patch around.
+
+    Args
+    ----
+    window_size: ring size of the sliding-window KV cache.
+    positions: ``[num_tokens]`` long, absolute token positions
+        (``DSV4ForwardBatch.positions``).
+    cu_seqlens_q: ``[num_seqs+1]`` long, cumulative-tokens-per-seq
+        prefix sum. Used to derive each token's in-seq offset so prefill
+        rows still span only the seq's own keys.
+    device: target device for the returned tensor.
+
+    Returns
+    -------
+    ``[num_tokens, window_size]`` int64 tensor where ``-1`` marks a
+    masked (causal-future) slot. Caller is expected to ``unsqueeze(0)``
+    for the legacy 3D ``[1, T, K]`` shape.
+
+    Semantics
+    ---------
+    - Decode token (one new token per seq, position p):
+      ``out[t] = [(p+1) % W, (p+2) % W, ..., (p+W) % W]``  modulo window
+      — the row matches what the legacy helper produced for that single
+      seq.
+    - Prefill token within a seq (positions 0..S-1): mirrors the legacy
+      helper's ``else`` branch (causal mask) — each query at offset i
+      sees only positions ``[max(0, i-W+1) .. i]``.
+
+    Both branches are unified by computing each row from its absolute
+    ``positions[t]`` and the per-seq starting position, regardless of
+    whether the seq is in prefill or decode.
+    """
+    if device is None:
+        device = positions.device
+    T = positions.numel()
+    W = window_size
+    if T == 0:
+        return torch.zeros(0, W, dtype=torch.long, device=device)
+
+    cu_long = cu_seqlens_q.to(device=device, dtype=torch.long)
+    # token_idx → seq_idx via right-bucketize on cu[1:].
+    token_idx = torch.arange(T, dtype=torch.long, device=device)
+    seg_id = torch.bucketize(token_idx, cu_long[1:], right=True)
+    seq_starts = cu_long[seg_id]  # first token-idx of this token's seq
+    in_seq_offset = token_idx - seq_starts  # 0-based within the seq
+
+    pos = positions.to(device=device, dtype=torch.long)
+    # Per-token row template:
+    #   out[t, k] = (start_p + k) % W,  start_p = pos[t] - in_seq_offset[t]
+    # plus a causal mask on the early prefill rows.
+    arange_w = torch.arange(W, dtype=torch.long, device=device)
+
+    # Rotated window for "fully-warm" tokens (pos >= W-1): unrolled with
+    # the modular arithmetic used by `_get_window_topk_idxs`'s warm
+    # branch, this is identical. Early-prefill (pos < W-1) → invalid
+    # future slots = -1.
+    base = pos.unsqueeze(1) - in_seq_offset.unsqueeze(1) + arange_w.unsqueeze(0)
+    ring_idx = base % W
+    valid = (base >= 0) & (base <= pos.unsqueeze(1))
+    out = torch.where(valid, ring_idx, torch.full_like(ring_idx, -1))
+    return out
+
+
 @lru_cache(2)
 def _get_compress_topk_idxs(
     ratio: int,
@@ -985,6 +1063,12 @@ class DeepseekV4Attention(nn.Module):
             self.indexer = None
 
         # ----- KV cache: [B, window_size + max_seq_len/ratio, head_dim] -----
+        # Legacy single-request kv_cache. The W4 path
+        # (forward_batch != None && ATOM_DSV4_USE_W4_PATH=1) consumes a
+        # per-layer view of the engine-owned ``DSV4KVPool`` instead. This
+        # buffer is preserved verbatim so the bit-for-bit legacy fallback
+        # path (warmup, single-seq eager, PR1 toy validation) still works
+        # exactly as it did post-#44 main.
         kv_cache_size = args.window_size + (
             args.max_seq_len // self.compress_ratio if self.compress_ratio else 0
         )
@@ -1091,16 +1175,55 @@ class DeepseekV4Attention(nn.Module):
 
         self.wo_a.quant_type = _QT.No
 
-    def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor:
-        """Compute attention for `x` at absolute position `start_pos`.
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int = 0,
+        forward_batch: Optional[Any] = None,
+    ) -> torch.Tensor:
+        """W4.3-redo (issue sunway513/atom#37): dispatch on flag + forward_batch.
+
+        Two operating modes:
+
+        - **Legacy single-request path** (``_forward_legacy``):
+          ``forward_batch is None`` OR ``ATOM_DSV4_USE_W4_PATH=0``. The
+          pre-W4.3-redo body is preserved bit-for-bit so warmup,
+          single-seq eager, and PR1 toy validation behave exactly as
+          they did post-#44 main.
+
+        - **W4 multi-request path** (``_forward_w4``): both
+          ``forward_batch is not None`` AND ``ATOM_DSV4_USE_W4_PATH=1``.
+          Per-token RoPE, per-seq slot KV scatter via the engine
+          ``DSV4KVPool``, validator gate before ``sparse_attn``.
 
         Args:
-            x: [num_tokens, dim] flat ATOM convention. Single-sequence
+            x: ``[num_tokens, dim]`` flat ATOM convention.
+            start_pos: legacy scalar position (only used in legacy path).
+            forward_batch: optional ``DSV4ForwardBatch`` carrying per-step
+                multi-request metadata.
+        Returns:
+            ``[num_tokens, dim]`` attention output (BF16).
+        """
+        from atom.utils import envs
+
+        if forward_batch is None or not envs.ATOM_DSV4_USE_W4_PATH:
+            return self._forward_legacy(x, start_pos)
+        return self._forward_w4(x, forward_batch)
+
+    def _forward_legacy(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+        """Legacy single-request path. Bit-for-bit preserved post-#44.
+
+        This is the entire pre-W4.3-redo ``forward()`` body, copied
+        verbatim. Do not optimize, refactor, or "improve" — bit-for-bit
+        preservation under flag-off is the contract.
+
+        Args:
+            x: ``[num_tokens, dim]`` flat ATOM convention. Single-sequence
                 (B=1 implicit; multi-sequence batching needs attn_metadata,
-                deferred until ATOM's scheduler integration).
+                handled by ``_forward_w4`` instead).
             start_pos: absolute position of the first token in this batch.
         Returns:
-            [num_tokens, dim] attention output (BF16).
+            ``[num_tokens, dim]`` attention output (BF16).
         """
         assert (
             x.dim() == 2
@@ -1237,6 +1360,168 @@ class DeepseekV4Attention(nn.Module):
 
         # ----- Grouped output LoRA -----
         # o: [1, S, H, D] → drop B; reshape into groups for the einsum.
+        o = o.squeeze(0).view(seqlen, self.n_local_groups, -1)  # [S, g, H/g * D]
+        wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
+        o = torch.einsum("sgd,grd->sgr", o, wo_a)  # [S, g, o_lora_rank]
+        x = self.wo_b(o.flatten(1))  # 2D [S, dim]
+        return x
+
+    def _build_topk_per_token(self, forward_batch: Any) -> torch.Tensor:
+        """Build per-token sliding-window topk_idxs for the W4 path.
+
+        Adapts the W3.2-v6 archive's per-token math to the
+        ``DSV4ForwardBatch`` shape (``positions`` + ``cu_seqlens_q``).
+
+        Returns
+        -------
+        ``[1, num_tokens, window_size]`` int64 tensor (the leading ``B=1``
+        dim matches the legacy ``[1, N, K]`` shape downstream code
+        expects). Sentinels: ``-1`` marks causal-future / invalid slots.
+        """
+        return _get_window_topk_idxs_pertoken(
+            self.window_size,
+            forward_batch.positions,
+            forward_batch.cu_seqlens_q,
+            device=forward_batch.positions.device,
+        ).unsqueeze(0)
+
+    def _forward_w4(
+        self,
+        x: torch.Tensor,
+        forward_batch: Any,
+    ) -> torch.Tensor:
+        """W4 multi-request path (issue sunway513/atom#37).
+
+        Per-token RoPE via ``self.freqs_cis[positions]``, per-seq slot
+        KV scatter via ``DSV4KVPool.compute_out_cache_loc``, validator
+        gate (``ATOM_AITER_VALIDATE``) before ``sparse_attn``. Each
+        token's query attends to its OWN seq's slot row in the pool,
+        eliminating the row-0 collision class of bugs documented in
+        W3.2 v3..v6.1.
+
+        Compressor / Indexer state remains ``register_buffer``-owned in
+        Task 10 (lifted to the pool by Tasks 11/12). The W4 path here
+        skips compressor/indexer activations and uses window-only
+        topk_idxs. Compressed-attention multi-request prefill is
+        explicitly out of scope until Tasks 11/12.
+
+        Args:
+            x: ``[num_tokens, dim]`` flat ATOM convention.
+            forward_batch: ``DSV4ForwardBatch`` (must carry a non-None
+                ``kv_pool``).
+        Returns:
+            ``[num_tokens, dim]`` attention output (BF16).
+        """
+        from atom.utils import envs
+
+        assert (
+            x.dim() == 2
+        ), f"DeepseekV4Attention expects 2D [num_tokens, dim], got {x.shape}"
+        assert (
+            forward_batch.kv_pool is not None
+        ), "_forward_w4 requires a non-None forward_batch.kv_pool"
+
+        positions = forward_batch.positions  # [num_tokens] long
+        rd = self.rope_head_dim
+
+        # Per-layer pool view: [num_active_seqs, ring_main, head_dim].
+        # Zero-copy slice; rebound every step.
+        pool_view = forward_batch.kv_pool.view_for_layer(self.layer_id)
+        kv_cache_view = pool_view["kv_cache"]
+        n_slots, ring_main, head_dim = kv_cache_view.shape
+
+        # ---- Per-token RoPE (CRITICAL — was the W3.2-v5 wall) ----
+        # Gather one row per token by absolute position. Under
+        # multi-request decode, the N tokens in a packed batch belong to
+        # N distinct seqs at N distinct positions; the legacy
+        # `freqs_cis[start_pos:start_pos+seqlen]` contiguous slice
+        # silently gave every seq the same frequency.
+        freqs_cis = self.freqs_cis[positions]
+
+        # ---- Q: low-rank projection + per-head RMSNorm + partial RoPE ----
+        seqlen = x.size(0)
+        qr = self.q_norm(self.wq_a(x))  # [seqlen, q_lora_rank]
+        q = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
+        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.eps)
+        q = q.unsqueeze(0)  # [1, seqlen, H, D]
+        _apply_rotary_emb(q[..., -rd:], freqs_cis)
+
+        # ---- KV: project, RMSNorm, RoPE on rope dims, FP8-sim on nope ----
+        kv = self.wkv(x)  # [seqlen, head_dim]
+        kv = self.kv_norm(kv).unsqueeze(0)  # [1, seqlen, head_dim]
+        _apply_rotary_emb(kv[..., -rd:], freqs_cis)
+        act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
+
+        # ---- Per-token slot scatter into the pool's main ring ----
+        if forward_batch.out_cache_loc is not None:
+            out_cache_loc = forward_batch.out_cache_loc.to(
+                device=x.device, dtype=torch.long
+            )
+        else:
+            out_cache_loc = forward_batch.kv_pool.compute_out_cache_loc(
+                positions=positions,
+                slot_indices=forward_batch.req_pool_indices,
+                cu_seqlens_q=forward_batch.cu_seqlens_q,
+                ring="main",
+            )
+        kv_tok = kv.squeeze(0)  # [num_tokens, head_dim]
+        # Flatten the [N, ring_main, D] pool view to [N*ring_main, D] for
+        # scatter. Zero-copy reshape — pool storage is contiguous.
+        kv_flat = kv_cache_view.view(n_slots * ring_main, head_dim)
+        # Cast scatter source to pool dtype to avoid silent zero-out from
+        # an implicit dtype-mismatch copy_.
+        kv_flat[out_cache_loc] = kv_tok.to(kv_flat.dtype)
+
+        # ---- Per-token window topk_idxs ----
+        topk_idxs = self._build_topk_per_token(forward_batch)  # [1, T, win] int64
+        topk_idxs = topk_idxs.int()
+
+        # ---- Build per-token KV slabs: each token attends to its OWN
+        # seq's pool row. ----
+        num_tokens = kv_tok.shape[0]
+        token_idx = torch.arange(num_tokens, dtype=torch.long, device=x.device)
+        cu_long = forward_batch.cu_seqlens_q.to(device=x.device, dtype=torch.long)
+        seg_id = torch.bucketize(token_idx, cu_long[1:], right=True)
+        slot_per_token = forward_batch.req_pool_indices.to(
+            device=x.device, dtype=torch.long
+        )[seg_id]
+        kv_per_token = kv_cache_view[slot_per_token]  # [T, ring_main, D]
+        q_per_token = q.transpose(0, 1).contiguous()  # [T, 1, H, D]
+        topk_per_token = topk_idxs.transpose(0, 1).contiguous()  # [T, 1, K]
+
+        # ---- Validator gate: catch shape/dtype/OOB BEFORE the GPU kernel ----
+        if envs.ATOM_AITER_VALIDATE:
+            try:
+                from aiter.dsv4_validate import dsv4_validate_sparse_attn_metadata
+
+                dsv4_validate_sparse_attn_metadata(
+                    q=q_per_token,
+                    kv=kv_per_token,
+                    topk_idxs=topk_per_token,
+                    slot_mapping=out_cache_loc,
+                    positions=positions,
+                    cu_seqlens_q=forward_batch.cu_seqlens_q,
+                    pool_capacity=n_slots,
+                )
+            except ImportError:
+                # Validator not available in this aiter build — proceed
+                # without it. ATOM_AITER_VALIDATE is opt-in for debug.
+                pass
+
+        # ---- sparse_attn (W4 per-token call: B=num_tokens, M=1) ----
+        o = sparse_attn(
+            q_per_token,
+            kv_per_token,
+            self.attn_sink,
+            topk_per_token,
+            self.softmax_scale,
+        )
+        o = o.transpose(0, 1).contiguous()  # back to [1, T, H, D]
+
+        # Inverse RoPE on output's rope dims (legacy semantics).
+        _apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
+
+        # ----- Grouped output LoRA -----
         o = o.squeeze(0).view(seqlen, self.n_local_groups, -1)  # [S, g, H/g * D]
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
         o = torch.einsum("sgd,grd->sgr", o, wo_a)  # [S, g, o_lora_rank]
@@ -1768,6 +2053,7 @@ class Block(nn.Module):
         x: torch.Tensor,
         start_pos: int,
         input_ids: Optional[torch.Tensor],
+        forward_batch: Optional[Any] = None,
     ) -> torch.Tensor:
         # ----- Attention sub-layer with mHC mixing -----
         residual = x
@@ -1775,7 +2061,11 @@ class Block(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x = self.attn_norm(x)
-        x = self.attn(x, start_pos)
+        # W4.3-redo (issue sunway513/atom#37): pass the per-step
+        # DSV4ForwardBatch through to Attention. The legacy single-
+        # request path (forward_batch is None or flag off) keeps the
+        # scalar `start_pos` semantics inside `_forward_legacy`.
+        x = self.attn(x, start_pos, forward_batch=forward_batch)
         x = self.hc_post(x, residual, post, comb)
 
         # ----- FFN sub-layer with mHC mixing -----
@@ -1914,7 +2204,11 @@ class MTPBlock(Block):
         self.head: Optional[ParallelHead] = None
 
     def forward(
-        self, x: torch.Tensor, start_pos: int, input_ids: torch.Tensor
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        input_ids: torch.Tensor,
+        forward_batch: Optional[Any] = None,
     ) -> torch.Tensor:
         """Forward.
 
@@ -1923,6 +2217,9 @@ class MTPBlock(Block):
                 (ATOM 2D-flat convention) or [B, S, hc, D] (legacy 4D).
             start_pos: absolute position offset.
             input_ids: matching token ids.
+            forward_batch: optional ``DSV4ForwardBatch`` (W4.3-redo
+                issue sunway513/atom#37). Threaded through to the
+                inherited Block.forward → Attention.
         Returns:
             Logits of the last token (vocab projected by self.head).
         """
@@ -1936,7 +2233,7 @@ class MTPBlock(Block):
         # adds the hc dim before the trailing D so [num_tokens, D] → [num_tokens, 1, D]
         # broadcasts correctly against x [num_tokens, hc, D]. Same for 4D path.
         x = self.e_proj(e).unsqueeze(-2) + self.h_proj(x)
-        x = super().forward(x, start_pos, input_ids)
+        x = super().forward(x, start_pos, input_ids, forward_batch=forward_batch)
         logits = self.head(
             x, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
         )
@@ -1999,6 +2296,7 @@ class DeepseekV4Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         start_pos: int = 0,
+        forward_batch: Optional[Any] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
         """Forward.
@@ -2007,22 +2305,32 @@ class DeepseekV4Model(nn.Module):
             input_ids: 1D `[num_tokens]` (ATOM 2D-flat convention) OR 2D
                 `[B, S]` (legacy reference convention; treated as a single
                 sequence of B*S tokens — only correct for B=1).
-            start_pos: absolute position of the first token.
+            start_pos: absolute position of the first token (legacy
+                single-request fallback). Ignored on the W4 path.
+            forward_batch: optional ``DSV4ForwardBatch`` (W4.3-redo
+                issue sunway513/atom#37). When non-None, threaded into
+                each ``Block.forward`` so ``DeepseekV4Attention`` can
+                dispatch into ``_forward_w4`` (per-token RoPE, per-seq
+                slot scatter).
         Returns:
-            Logits of the last token: `[vocab]` (1D path) or `[B, vocab]` (2D path).
+            Logits per sample row: ``[N_sample, vocab]`` for batched
+            requests (one row per active seq) or ``[vocab]``-style legacy
+            output for the single-request path.
         """
         # Normalize input_ids to 1D [num_tokens] for the 2D internal convention.
         if input_ids.dim() == 2:
-            assert (
-                input_ids.size(0) == 1
-            ), "B>1 batched input_ids needs attn_metadata; not supported yet"
+            if forward_batch is None:
+                # Legacy assert: only B=1 supported in the start_pos path.
+                assert (
+                    input_ids.size(0) == 1
+                ), "B>1 batched input_ids needs forward_batch (W4 path)"
             input_ids = input_ids.flatten()
         h = self.embed(input_ids)  # [num_tokens, dim]
         # Expand to hc_mult copies for Hyper-Connections: [num_tokens, hc, dim]
         h = h.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
         for layer in self.layers:
-            h = layer(h, start_pos, input_ids)
+            h = layer(h, start_pos, input_ids, forward_batch=forward_batch)
 
         # W3.2 (RFC §14 Week 3): slice h to last-token-of-each-sequence
         # using cu_seqlens_q from attn_metadata before the LM head, so a
@@ -2031,17 +2339,21 @@ class DeepseekV4Model(nn.Module):
         # only the trailing row, giving 1 sample for any N — exactly the
         # IndexError@scheduler.py:609 RFC §3.1 #7 evidence chain captured
         # in W3.2-DEBUG (len(prev_token_ids)=1, len(req_ids)=4).
-        try:
-            from atom.utils.forward_context import get_forward_context
+        cu = None
+        if forward_batch is not None:
+            cu = forward_batch.cu_seqlens_q
+        else:
+            try:
+                from atom.utils.forward_context import get_forward_context
 
-            ctx = get_forward_context()
-            attn_meta = getattr(ctx, "attn_metadata", None)
-            cu = getattr(attn_meta, "cu_seqlens_q", None)
-        except Exception:
-            cu = None
+                ctx = get_forward_context()
+                attn_meta = getattr(ctx, "attn_metadata", None)
+                cu = getattr(attn_meta, "cu_seqlens_q", None)
+            except Exception:
+                cu = None
         if cu is not None and cu.numel() >= 2:
             last_token_indices = cu[1:] - 1
-            h = h[last_token_indices]
+            h = h[last_token_indices.to(h.device)]
 
         logits = self.head(
             h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base, self.norm
@@ -2120,8 +2432,40 @@ class DeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         **model_kwargs: dict,
     ) -> torch.Tensor:
+        """W4.3-redo (issue sunway513/atom#37): wire DSV4ForwardBatch into
+        the model.
+
+        Three resolution paths:
+
+        1. Caller passes ``forward_batch=...`` in ``model_kwargs``
+           (used by unit tests).
+        2. ``ForwardContext.dsv4_forward_batch`` is populated by
+           ``ModelRunner._maybe_setup_dsv4_forward_batch`` (Task 9).
+           Promote to the W4 path.
+        3. Otherwise: fall back to the legacy ``start_pos`` scalar path
+           (warmup, single-seq eager, PR1 toy validation).
+        """
+        # Path 1: explicit kwarg from a test caller.
+        forward_batch = model_kwargs.pop("forward_batch", None)
+
+        # Path 2: pull from the engine's ForwardContext.
+        if forward_batch is None:
+            try:
+                from atom.utils.forward_context import get_forward_context
+
+                ctx = get_forward_context()
+                forward_batch = getattr(ctx, "dsv4_forward_batch", None)
+            except Exception:
+                forward_batch = None
+
+        # Path 3: legacy scalar start_pos.
         start_pos = int(positions[0].item()) if positions is not None else 0
-        return self.model(input_ids=input_ids, start_pos=start_pos, **model_kwargs)
+        return self.model(
+            input_ids=input_ids,
+            start_pos=start_pos,
+            forward_batch=forward_batch,
+            **model_kwargs,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # In V4, the LM head is fused into DeepseekV4Model.forward (it consumes
