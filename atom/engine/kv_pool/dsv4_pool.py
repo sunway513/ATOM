@@ -693,6 +693,63 @@ class DSV4KVPool:
 
     # ---- model wiring (consumed in W4.3 / W4.4) ----
 
+    def write_main_kv(
+        self,
+        layer_id: int,
+        out_cache_loc: torch.Tensor,
+        kv: torch.Tensor,
+    ) -> None:
+        """Per-token scatter of main KV into the layer's slab(s).
+
+        Sprint 6 B0b.2: centralizes the layout knowledge in the pool so the
+        model's W4 forward path is layout-agnostic. When ``main_kv_nope_dtype``
+        is set (split-on mode), this writes nope dims into ``_main_kv_nope``
+        at FP8 and rope dims into ``_main_kv_rope`` at BF16 per DSV4 paper
+        §2.3.4. When unset (split-off, Sprint-1/2), this writes the full
+        ``head_dim`` into ``_main_kv`` with the existing single-dtype cast.
+
+        Args
+        ----
+        layer_id: global layer index in [0, cfg.num_layers).
+        out_cache_loc: ``[num_tokens]`` long, flat scatter indices into the
+            layer's ``[N*ring_main]`` virtual flat ring (computed by
+            ``compute_out_cache_loc``).
+        kv: ``[num_tokens, head_dim]`` tensor of per-token KV. The model
+            is responsible for the per-paper quantization on ``kv[..., :-rd]``
+            BEFORE calling this helper; the pool only handles storage.
+
+        Returns nothing (mutates the slab in place).
+        """
+        if not 0 <= layer_id < self.cfg.num_layers:
+            raise IndexError(
+                f"layer_id={layer_id} out of range [0, {self.cfg.num_layers})"
+            )
+        if out_cache_loc.numel() == 0:
+            return  # empty batch — nothing to scatter
+
+        if self._main_kv_nope is not None and self._main_kv_rope is not None:
+            # Split-on path: scatter nope and rope into their respective slabs.
+            # Both slabs share the same ``[N, ring_main]`` layout, so the
+            # flat-scatter indices in ``out_cache_loc`` apply identically to
+            # both — just split the value tensor by last dim.
+            rd = self.cfg.rope_head_dim
+            nope_slab = self._main_kv_nope[layer_id]
+            rope_slab = self._main_kv_rope[layer_id]
+            n_slots, ring_main = nope_slab.shape[:2]
+            nope_flat = nope_slab.view(n_slots * ring_main, -1)
+            rope_flat = rope_slab.view(n_slots * ring_main, -1)
+            kv_nope = kv[..., :-rd].to(nope_flat.dtype)
+            kv_rope = kv[..., -rd:].to(rope_flat.dtype)
+            nope_flat[out_cache_loc] = kv_nope
+            rope_flat[out_cache_loc] = kv_rope
+        else:
+            # Split-off path: legacy behavior, single slab + single cast.
+            assert self._main_kv is not None
+            slab = self._main_kv[layer_id]
+            n_slots, ring_main = slab.shape[:2]
+            kv_flat = slab.view(n_slots * ring_main, slab.shape[-1])
+            kv_flat[out_cache_loc] = kv.to(kv_flat.dtype)
+
     def view_for_layer(self, layer_id: int) -> Dict[str, Optional[torch.Tensor]]:
         """Per-layer zero-copy views into the pool's tensors.
 

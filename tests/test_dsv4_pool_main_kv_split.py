@@ -190,6 +190,83 @@ def test_main_kv_nope_dtype_field_default_is_none():
     assert cfg.main_kv_nope_dtype is None
 
 
+def test_write_main_kv_split_off_roundtrip():
+    """B0b.2: split-off helper writes single slab; read-back matches input."""
+    cfg = _make_cfg(main_kv_nope_dtype=None)
+    # Pool has max_active_seqs=2 * ring_size_main=128 = 256 flat slots [0, 256).
+    pool = DSV4KVPool(cfg)
+    n_tokens = 4
+    kv = torch.randn(n_tokens, 512, dtype=torch.bfloat16)
+    # Write to slot 0 positions 0,1 (flat=0,1) + slot 1 positions 0,1 (flat=128,129).
+    out_cache_loc = torch.tensor([0, 1, 128, 129], dtype=torch.long)
+    pool.write_main_kv(layer_id=0, out_cache_loc=out_cache_loc, kv=kv)
+    slab_flat = pool._main_kv[0].view(-1, 512)
+    assert torch.allclose(slab_flat[0], kv[0], atol=0.0)
+    assert torch.allclose(slab_flat[1], kv[1], atol=0.0)
+    assert torch.allclose(slab_flat[128], kv[2], atol=0.0)
+    assert torch.allclose(slab_flat[129], kv[3], atol=0.0)
+
+
+def test_write_main_kv_split_on_rope_dims_bit_exact():
+    """B0b.2: split-on helper preserves RoPE dims at BF16 (no FP8 coercion)."""
+    cfg = _make_cfg(main_kv_nope_dtype=torch.float8_e4m3fn)
+    pool = DSV4KVPool(cfg)
+    n_tokens = 2
+    # Use values that BF16 can represent exactly.
+    kv = torch.zeros(n_tokens, 512, dtype=torch.bfloat16)
+    kv[0, -64:] = torch.arange(64, dtype=torch.bfloat16) / 8.0  # fractional
+    kv[1, -64:] = torch.arange(64, dtype=torch.bfloat16) * 2.0
+    out_cache_loc = torch.tensor([0, 1], dtype=torch.long)
+    pool.write_main_kv(layer_id=0, out_cache_loc=out_cache_loc, kv=kv)
+    rope_flat = pool._main_kv_rope[0].view(-1, 64)
+    # RoPE dims stayed BF16 — bit-exact.
+    assert torch.equal(rope_flat[0], kv[0, -64:])
+    assert torch.equal(rope_flat[1], kv[1, -64:])
+
+
+def test_write_main_kv_split_on_nope_dims_within_fp8_tolerance():
+    """B0b.2: split-on helper writes nope dims at FP8 (within FP8 quant tolerance)."""
+    cfg = _make_cfg(main_kv_nope_dtype=torch.float8_e4m3fn)
+    pool = DSV4KVPool(cfg)
+    n_tokens = 1
+    # FP8 e4m3 has limited precision; use a value that round-trips cleanly.
+    kv = torch.zeros(n_tokens, 512, dtype=torch.bfloat16)
+    kv[0, :448] = 1.5  # exactly representable in FP8 e4m3
+    out_cache_loc = torch.tensor([0], dtype=torch.long)
+    pool.write_main_kv(layer_id=0, out_cache_loc=out_cache_loc, kv=kv)
+    nope_flat = pool._main_kv_nope[0].view(-1, 448)
+    # Read back via cast to bf16 — should still be 1.5
+    nope_bf16 = nope_flat[0].to(torch.bfloat16)
+    assert torch.allclose(nope_bf16, torch.full((448,), 1.5, dtype=torch.bfloat16))
+
+
+def test_write_main_kv_empty_batch_is_noop():
+    """B0b.2: zero-token call must not crash and must not mutate."""
+    cfg = _make_cfg(main_kv_nope_dtype=torch.float8_e4m3fn)
+    pool = DSV4KVPool(cfg)
+    pre_nope = pool._main_kv_nope.clone()
+    pre_rope = pool._main_kv_rope.clone()
+    pool.write_main_kv(
+        layer_id=0,
+        out_cache_loc=torch.zeros(0, dtype=torch.long),
+        kv=torch.zeros(0, 512, dtype=torch.bfloat16),
+    )
+    assert torch.equal(pool._main_kv_nope, pre_nope)
+    assert torch.equal(pool._main_kv_rope, pre_rope)
+
+
+def test_write_main_kv_invalid_layer_id():
+    """B0b.2: out-of-range layer_id raises IndexError."""
+    cfg = _make_cfg(main_kv_nope_dtype=None)
+    pool = DSV4KVPool(cfg)
+    with pytest.raises(IndexError, match="layer_id"):
+        pool.write_main_kv(
+            layer_id=999,
+            out_cache_loc=torch.tensor([0], dtype=torch.long),
+            kv=torch.zeros(1, 512, dtype=torch.bfloat16),
+        )
+
+
 def test_split_on_assertion_when_nope_dim_invalid():
     """Misconfigured head_dim <= rope_head_dim must fail loudly, not silently."""
     with pytest.raises(AssertionError, match="nope_dim"):
