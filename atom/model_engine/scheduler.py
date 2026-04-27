@@ -469,7 +469,18 @@ class Scheduler:
             return None
 
         # --- Prefill scheduling ---
-        while self.waiting and num_seqs_prefill < self.max_num_seqs:
+        # Sprint 7c (issue #37): gate prefill admits on TOTAL active seqs
+        # (already-running + new prefills), not just new prefills. The pool
+        # allocator (DSV4KVPool.admit_request) raises "no free slot" when
+        # ModelRunner tries to admit a seq that pushes total beyond
+        # max_active_seqs. Original code `num_seqs_prefill < max_num_seqs`
+        # only counted new prefills in this iteration, so at parallel
+        # concurrency (e.g. 4 incoming requests with max_num_seqs=2) the
+        # scheduler could admit 2 prefills while 2 were already running →
+        # 4 admits → pool overflow. Silicon-observed Sprint 7b v10f.
+        while (
+            self.waiting and (num_seqs_prefill + len(self.running)) < self.max_num_seqs
+        ):
             seq = self.waiting.popleft()
 
             # KV Transfer: skip request if still waiting for remote KVs
