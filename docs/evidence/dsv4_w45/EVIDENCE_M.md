@@ -781,3 +781,61 @@ Evidence:
 | Sprint 5e Triton | 0.60 | 0.60 | 37s | 36pp | CK/FlyDSL layout dispatch |
 | Sprint 6 B0a v9b | 0.75 | 0.75 | 34s | 21pp | (later: +15pp partly noise) |
 | **Sprint 7b cast fix v9d** | **0.70** | (~0.70) | 36s | **26pp** | conc>1 dtype mismatch (FIXED), conc>1 admit race (Sprint 7c) |
+
+## Sprint 7c — scheduler-pool admit gate fix + new bug exposed
+
+### Fix (commit `96176c4`)
+
+`atom/model_engine/scheduler.py`: prefill loop gate changed from
+`num_seqs_prefill < self.max_num_seqs` to
+`(num_seqs_prefill + len(self.running)) < self.max_num_seqs`. This prevents
+the scheduler from admitting NEW prefills while existing seqs are still
+RUNNING and the total would exceed the pool's slot capacity.
+
+96/96 DSV4 unit tests pass.
+
+### v11a silicon (Sprint 7c + B0a + cast fix + max_num_seqs=2)
+
+**Scheduler/pool layer**: ✅ FIXED.
+- 4 parallel curls all admitted successfully (no more `DSV4KVPool: no free slot`).
+- Server log shows `200 OK` × 2 admit, then `output send 2 reqs`.
+- All 4 smoke response JSONs landed (439-602 bytes each, real responses).
+
+**Output quality at conc=2**: ❌ STILL BROKEN.
+
+| Prompt | Expected | Got | Verdict |
+|---|---|---|---|
+| Janet 36+4 | 40 | "1 1 1 1 1 1 ..." (token loop) | ❌ |
+| Train 60/2 | 30 | "1 1 1 1 1 1 ..." (token loop) | ❌ |
+| Bob 5+7 | 12 | "＞ ， ， ，… 慨然同意 和和和和..." (random Chinese garble) | ❌ |
+| 17×23 | 391 | "1 1 1 1 1 1 ..." (token loop) | ❌ |
+
+**0/4 — every parallel response is degenerate output (token-loop or random Chinese)**.
+
+This is consistent with Sprint 4's "1/4 fluent at conc=4 with CK backend" pattern but worse — current Triton backend with B0a + cast fix produces 0/4 at conc=2. The 5-shot context prefix that worked perfectly at conc=1 (v9d 0.70 lm_eval) is producing complete garbage when 2+ requests share the same forward pass.
+
+### Sprint 7c verdict: layered bugs
+
+The conc=2 garbled output is a SEPARATE bug from Sprint 7b dtype crash and Sprint 7c admit race. It's at the ATTENTION / KV READ layer — multi-seq batched compute produces wrong values per token. Sprint 4 had a similar symptom; commit `8fa0129` fixed sequential lockstep but left parallel-batched compute broken.
+
+Three candidate root causes (next sprint should bisect):
+1. **KV read aliasing**: multi-seq forward path reads `kv_cache[slot, ...]` per-seq but indexing into a flat ring may alias when 2 seqs land on adjacent slots.
+2. **per-seq RoPE phase**: positions tensor must be per-seq absolute; if all seqs share a single `cu_seqlens_q` index without per-seq position offset, RoPE applies wrong phase.
+3. **Triton MoE batch handling**: Triton kernels may have bs=1 vs bs>1 dispatch with different precision behavior.
+
+Filed as **Sprint 7d** (multi-req attention/KV correctness deep bisection — needs per-token-per-seq trace + comparison vs torch ref single-seq).
+
+### Net Sprint 7 (a + b + c) outcome
+
+| Layer | Status |
+|---|---|
+| Sprint 7a Phase A 4-way audit | ✅ identified B0a dtype + scheduler-pool issues |
+| Sprint 7b cast fix (commit `2d0098c`) | ✅ unblocked conc>1 dtype crash |
+| Sprint 7c scheduler-pool admit gate (commit `96176c4`) | ✅ unblocked conc>1 admit race |
+| Multi-req conc=2 functional output | ❌ NEW bug at attention/KV compute → Sprint 7d |
+| Multi-req conc=4 | ❌ Same bug + plus original OOM headroom needed |
+
+**ATOM DSV4 production state: conc=1 still the only "comfortable" config. Multi-req unlocked at scheduler/pool layer but model output quality at conc>1 is a separate algorithmic bug requiring deeper bisection.**
+
+Evidence:
+- `docs/evidence/dsv4_w45/artifacts/v11a_concsmoke/p{0,1,2,3}.json` (4 garbled outputs at conc=2)
