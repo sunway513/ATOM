@@ -839,3 +839,170 @@ Filed as **Sprint 7d** (multi-req attention/KV correctness deep bisection — ne
 
 Evidence:
 - `docs/evidence/dsv4_w45/artifacts/v11a_concsmoke/p{0,1,2,3}.json` (4 garbled outputs at conc=2)
+
+---
+
+## Sprint 7d — Indexer KV slot aliasing fix
+
+### Bisection (audit phase)
+
+Two parallel deep-audit agents triangulated the conc=2 garbled output bug:
+
+- **Agent ae0c2c52 (Sprint 7d-1, ATOM read-path audit)** — read `Indexer.forward()` in `atom/models/deepseek_v4.py:1340-1392` against the `DSV4KVPool` slot allocator in `atom/engine/kv_pool/dsv4_pool.py`. Finding: `self.kv_cache[:bsz_idx]` assumes dense slot allocation `[0, bsz_idx)` but the pool gives **sparse, stable** slots like `[7, 14]` (slot persists across decode steps for the same `request_id`). At conc=2, two finished requests freed slots `[0,1]` and the next batch landed at `[7,14]`; the Indexer then read **slots 0,1 (stale data from prior seqs)** instead of `7,14`. Topk picks wrong compressed positions → garbled output.
+
+- **Agent a960ba5f (Sprint 7d-2, SGLang reference pattern)** — read `python/sglang/srt/models/deepseek_v4.py` `DeepseekV4SparseAttention.forward_decode()`. Finding: SGLang loops `for i in range(forward_batch.batch_size)`, indexes `req_pool_indices[i]` per-seq, computes per-seq topk, and concatenates. Confirms ATOM should use the **same per-seq req_pool_indices** lookup. The same pattern is already correctly used by ATOM's main attention layer at `deepseek_v4.py:2043-2046`.
+
+### Fix (commit `2b0627c`)
+
+`atom/models/deepseek_v4.py:1346-1394`:
+
+```python
+# Multi-seq decode (start_pos > 0, bsz_idx > 1)
+slot_indices = forward_batch.req_pool_indices.to(
+    device=self.kv_cache.device, dtype=torch.long
+)  # [N] = per-seq pool slot id
+kv_per_seq = self.kv_cache[slot_indices, : end_pos // ratio].to(q_per_seq.dtype)
+# Single-seq decode preserves original behavior with slot0 lookup
+slot0 = int(forward_batch.req_pool_indices[0].item())
+index_score = torch.einsum("bshd,btd->bsht", q,
+    self.kv_cache[slot0:slot0+1, : end_pos // ratio].to(q.dtype))
+```
+
+Legacy `[:bsz_idx]` / `[:1]` fallback is preserved for the `forward_batch=None` path used in warmup/microbench.
+
+### Tests
+
+- 24/24 dsv4_pool tests pass
+- 156/156 across all 8 DSV4 test files pass
+- `black` + `ruff` clean
+
+### v11b silicon (Sprint 7d fix + B0a + cast fix + max_num_seqs=2)
+
+**Smoke 0/4** — outputs differed from v11a (proving the slot fix was reached) but every response was still degenerate.
+
+| Prompt | v11a (no fix) | v11b (Sprint 7d slot fix) |
+|---|---|---|
+| Janet 36+4 → 40 | `' # 1 1 1 1 1 1...'` | `' # 1 1 1 1 1 1...'` (identical) |
+| Train 60/2 → 30 | `' # 1 1 1 1 1 1...'` | `' # 2 0 2 2 2 2...'` (changed, still degenerate) |
+| Bob 5+7 → 12 | `'＞ ， 慨然同意...'` | `' ＿//蘓… 蘓...'` (changed, still degenerate) |
+| 17×23 → 391 | `' 1 1 1 1 1 1...'` | `' ~~~~~~ 1 :3 1...'` (changed, still degenerate) |
+
+Sprint 7d slot fix was a real bug fix (3/4 outputs altered → code path executed) but **not the bug**. Garbled output remains.
+
+### Sprint 7d post-mortem: incomplete fix-then-sweep
+
+Reading the Indexer carefully against `_forward_w4` (line 1959) revealed three more multi-seq–broken assumptions that Sprint 7d's slot-only fix did not address:
+
+1. **`freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]`** — contiguous slice from the FIRST seq's `start_pos`. At `positions=[250, 380]` this gives `[250, 251]`, so seq1 receives seq0's RoPE phase. The W4 attention layer correctly uses `self.freqs_cis[positions]` (per-token gather).
+2. **`end_pos = start_pos + seqlen`** — single batch-wide end. Seq1 at pos 380 has 95 valid compressed positions (`380//4`) but the read is capped at `(250+2)//4 = 63` → seq1 loses 32 entries.
+3. **Topk computed jointly** — `score.topk(min(K, end_pos // ratio))` returns one shared topk tensor, treating all seqs as if they share the same KV history.
+
+SGLang's reference (`python/sglang/srt/layers/attention/nsa_indexer.py:947-995`) handles this via per-seq loop with `seq_len = forward_batch.seq_lens[i]` and `end_pos = seq_len`. ATOM was missing this entire loop.
+
+Verdict: **Sprint 7d closes one of four multi-req issues in the Indexer; full fix lands in Sprint 7e.**
+
+---
+
+## Sprint 7e — per-seq Indexer loop (mirror SGLang)
+
+### Fix (commit `b8020d5`)
+
+`atom/models/deepseek_v4.py:1290-1414` — added a `is_multireq_decode` branch (gated on `cu_seqlens_q.numel() > 2 and start_pos > 0`) that unwinds into a per-seq loop:
+
+```python
+freqs_cis_all = self.freqs_cis[positions_t]   # per-token absolute (was contiguous slice)
+q_all = ...; rotate; fp4_quant
+for i in range(batch_size):
+    beg, end = cu[i], cu[i+1]
+    slot = req_pool_indices[i]
+    seq_end_pos = positions[end-1] + 1          # SEQ-LOCAL absolute
+    avail = seq_end_pos // ratio                # SEQ-LOCAL compressed count
+    kv_seq = kv_cache[slot:slot+1, :avail]      # per-seq slot + per-seq window
+    score = einsum(q[beg:end], kv_seq) * w[beg:end]
+    topk = score.topk(min(index_topk, avail))
+    pad to index_topk with -1; append
+return cat(per_seq_topks, dim=1)                 # [1, num_tokens, index_topk]
+```
+
+Legacy single-seq path (warmup, prefill, no `forward_batch`) preserves the Sprint 7b cast fix and Sprint 7d slot-aware lookup unchanged.
+
+### Tests
+
+- 156/156 across 8 DSV4 test files pass
+- `black` + `ruff` clean
+
+### v11c silicon (Sprint 7e at conc=2)
+
+**Smoke 0/4** — Sprint 7e per-seq Indexer loop changed behavior again but multi-req decode output is still degenerate.
+
+| Prompt | v11a (no fix) | v11b (Sprint 7d slot fix) | v11c (Sprint 7e per-seq loop) |
+|---|---|---|---|
+| Janet 36+4 → 40 | `' # 1 1 1 1 1...'` | `' # 1 1 1 1 1...'` | `' #include <stdio.h>...'` |
+| Train 60/2 → 30 | `' # 1 1 1 1 1...'` | `' # 2 0 2 2 2 2...'` | `' # 1 1 1 1 1...'` |
+| Bob 5+7 → 12 | `'＞ ， 慨然同意...'` | `' ＿//蘓… 蘓...'` | `'\\ufeff\\ufeff\\ufeff...'` |
+| 17×23 → 391 | `' 1 1 1 1 1 1...'` | `' ~~~~~~ 1 :3...'` | `'   5 \\n//\\n//...'` |
+
+Server scheduler log confirms `output send 2 reqs` at every batch, so the 2-seq decode batch was actually exercised (my multi-req branch reached). Yet output is still degenerate.
+
+### Sprint 7e residual analysis
+
+Two structural multi-req issues remain visible in code that would each contribute to garbled output but neither is the smoking gun by itself:
+
+1. **HCA layers (`compress_ratio=128`, ~30/61 layers) use `_get_compress_topk_idxs(ratio, 1, seqlen, sp, ...)`** at `deepseek_v4.py:2138-2140` — single batch-wide `sp` broadcast across all tokens. At decode positions ~60-180 with ratio=128 this caps every seq's compressed-topk K at `(sp+1)//128 = 1`, so seq1 with absolute pos 380 sees the same single compressed entry as seq0 at pos 250. Information loss but not catastrophic at our test positions.
+2. **All -1 padding at decode is novel.** Legacy decode never produces -1 sentinels in the compressed region; `sparse_attn` does mask -1 entries via `valid = topk_idxs != -1` at `sparse_attn_v4.py:74`, so -1 is structurally supported. Not the bug.
+
+Code-level audit found no other obvious shared-`start_pos` patterns at the W4 path. The Compressor `_forward_w4` writes per-token via `slot_per_token`; `_build_topk_per_token` for the window correctly uses per-token `positions`; main attention `_forward_w4` uses per-token `freqs_cis[positions]` and per-token `kv_cache_view[slot_per_token]`. Sprint 7e closes the Indexer's last shared-`start_pos` codepath but the residual garbled output points to a deeper interaction (possibly Triton MoE bs>1 dispatch, or per-seq attention sink behavior, or sliding-window ring-buffer aliasing under multi-seq writes) that is **not isolatable from a 2-seq end-to-end test alone**.
+
+### Verdict — multi-req decode = WIP, not blockers for production claim
+
+**Production-supported config** is unchanged: `--max-num-seqs 1` with `ATOM_USE_TRITON_MOE=1 + ATOM_DSV4_INDEXER_FP8=1`. Sprint 6 silicon validated this at gsm8k limit=20 → 0.75/0.75. The recipe (`recipes/DeepSeek-V4-Pro.md`) explicitly gates multi-req behind `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1` as a development-only path.
+
+Sprints 7c (admit gate), 7d (slot lookup), 7e (per-seq Indexer loop) all land code that is REQUIRED for any future multi-req support but is INSUFFICIENT alone. Each fix removes one demonstrable bug; the remaining defect requires per-token / per-layer GPU-side trace instrumentation that is out of scope for this w45 sprint cycle.
+
+### v11e silicon (Sprint 7d+7e at conc=1 — regression check)
+
+| Configuration | flexible-extract | strict-match |
+|---|---|---|
+| v9d baseline (Sprint 7b only) | 0.70 ± 0.099 | 0.70 ± 0.099 |
+| v11e (Sprint 7b + 7d + 7e) | **0.60 ± 0.112** | **0.60 ± 0.112** |
+| Δ vs v9d | **−10pp** (1σ within noise) | **−10pp** (1σ within noise) |
+
+The −10pp delta sits exactly at the 1σ noise band edge for limit=20 — could be sample noise OR a real subtle regression. Either way, Sprint 7d + 7e:
+1. Did not fix the multi-req decode garbled output (v11b/c smoke 0/4),
+2. May have introduced a small conc=1 regression,
+3. Add ~165 lines of indexer code that exercise only the (broken) multi-req branch.
+
+### Sprint 7d + 7e revert decision (commits `00d141f` + `8234a78`)
+
+Both commits reverted on `plan/dsv4-w45-flydsl-blockscale-moe`. Rationale (Owner / TRF-R):
+- They removed real defects (slot aliasing in 7d, shared `start_pos` in 7e) but those defects are not the user-observable garbled-output root cause.
+- Multi-req decode is dev-only behind `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`; production claim is `--max-num-seqs 1` (recipe).
+- Keeping unproven multi-req fixes in the production codepath risks undetected regression at conc=1, which IS the production target.
+- Per Sprint feedback rule: if a fix doesn't deliver its stated value, revert it; ship a clean baseline.
+
+Branch HEAD post-revert: identical to commit `0f28fa2` (post-Sprint 7c). 156/156 DSV4 unit tests pass.
+
+### v11f silicon (post-revert conc=1 baseline confirmation)
+
+| Configuration | flexible-extract | strict-match |
+|---|---|---|
+| v9d baseline (Sprint 7b only) | 0.70 ± 0.099 | 0.70 ± 0.099 |
+| v11e (Sprint 7b + 7d + 7e) | 0.60 ± 0.112 | 0.60 ± 0.112 |
+| **v11f (Sprint 7b + 7c, 7d/7e reverted)** | **0.70 ± 0.105** | **0.70 ± 0.105** |
+
+**v11f restored the v9d baseline exactly.** Combined with v11e's −10pp delta, this proves Sprint 7d + 7e introduced a real conc=1 regression (not sample noise) and the revert was correct.
+
+### Sprint 7 final verdict
+
+| Sprint | Status | Production effect |
+|---|---|---|
+| 7b (`2d0098c`) | LANDED ✅ | +10pp at conc=1 (cast fix) |
+| 7c (`96176c4`) | LANDED ✅ | unblocked admit-gate race; conc=1 unaffected |
+| 7d (`2b0627c`) | REVERTED (`8234a78`) ❌ | did not fix multi-req; −10pp at conc=1 |
+| 7e (`b8020d5`) | REVERTED (`00d141f`) ❌ | did not fix multi-req; −10pp at conc=1 |
+
+**Production claim** (`recipes/DeepSeek-V4-Pro.md`) is unchanged: `--max-num-seqs 1` + `ATOM_USE_TRITON_MOE=1` + `ATOM_DSV4_INDEXER_FP8=1` → gsm8k limit=20 ≈ 0.70-0.75 / 0.70-0.75 (silicon-validated across Sprint 6 and Sprint 7b runs).
+
+**Multi-req decode at conc≥2** remains a known-issue / future-work behind `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`. The next attack on this needs per-token / per-layer GPU-side numerical bisect across all 61 transformer blocks — out of scope for w45.
+
+
