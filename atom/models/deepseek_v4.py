@@ -1291,8 +1291,10 @@ class Indexer(nn.Module):
         assert self.freqs_cis is not None
         assert x.dim() == 2 and qr.dim() == 2
         seqlen = x.size(0)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
         ratio = self.compress_ratio
         rd = self.rope_head_dim
+        end_pos = start_pos + seqlen
 
         # W4.4-redo: rebind kv_cache to the pool view if available; else
         # ensure legacy local buffer is allocated.
@@ -1309,153 +1311,71 @@ class Indexer(nn.Module):
         if self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
 
-        # ----- Drive Compressor first (per-token state writes via pool) -----
-        if bound_pool:
-            self.compressor(
-                x, start_pos=start_pos, forward_batch=forward_batch, layer_id=layer_id
-            )
-        else:
-            self.compressor(x, start_pos)
-
-        # ===================================================================
-        # Sprint 7e (issue #37) — multi-req per-seq decode path.
-        # Mirror SGLang's nsa_indexer.py:947-995: when batch_size > 1 in
-        # decode mode, EACH seq has its own absolute position, its own
-        # pool slot, and its own end_pos. The Sprint 7d slot-only fix was
-        # insufficient because freqs_cis / end_pos / topk-K all assumed a
-        # single shared `start_pos`. Here we loop per-seq, build per-seq
-        # freqs_cis from `forward_batch.positions`, gather per-seq KV from
-        # the seq's own pool slot, compute per-seq topk with seq-local
-        # end_pos, and pad+concat back to [1, num_tokens, index_topk].
-        # See `docs/evidence/dsv4_w45/EVIDENCE_M.md` Sprint 7e.
-        # ===================================================================
-        is_multireq_decode = (
-            forward_batch is not None
-            and getattr(forward_batch, "cu_seqlens_q", None) is not None
-            and forward_batch.cu_seqlens_q.numel() > 2
-            and getattr(forward_batch, "req_pool_indices", None) is not None
-            and getattr(forward_batch, "positions", None) is not None
-            and start_pos > 0
-        )
-
-        if is_multireq_decode:
-            cu = forward_batch.cu_seqlens_q.to(device=x.device, dtype=torch.long)
-            positions_t = forward_batch.positions.to(device=x.device, dtype=torch.long)
-            slots_t = forward_batch.req_pool_indices.to(
-                device=self.kv_cache.device, dtype=torch.long
-            )
-            batch_size = cu.numel() - 1
-
-            # Per-token absolute freqs_cis (NOT contiguous slice from a
-            # single start_pos — that silently gave every seq seq-0's
-            # phase). Mirror `_forward_w4` line 1959.
-            freqs_cis_all = self.freqs_cis[positions_t]
-
-            q_all = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
-            q_all = q_all.unsqueeze(0)  # [1, num_tokens, H, D]
-            _apply_rotary_emb(q_all[..., -rd:], freqs_cis_all)
-            q_all = rotate_activation(q_all)
-            fp4_act_quant_inplace(q_all, _FP4_BLOCK_SIZE)
-            weights_all = (
-                self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
-            ).unsqueeze(
-                0
-            )  # [1, num_tokens, H]
-
-            per_seq_topks = []
-            for i in range(batch_size):
-                beg = int(cu[i].item())
-                end = int(cu[i + 1].item())
-                seq_qlen = end - beg
-                slot = int(slots_t[i].item())
-                seq_pos = positions_t[beg:end]
-                # seq_end_pos = absolute (last_position + 1) for THIS seq.
-                seq_end_pos = int(seq_pos[-1].item()) + 1
-                avail = seq_end_pos // ratio
-
-                if avail <= 0:
-                    # No compressed positions yet for this seq — emit -1
-                    # sentinel padded to index_topk so concat shape stays
-                    # [1, num_tokens, index_topk].
-                    pad = torch.full(
-                        (1, seq_qlen, self.index_topk),
-                        -1,
-                        dtype=torch.int64,
-                        device=x.device,
-                    )
-                    per_seq_topks.append(pad)
-                    continue
-
-                q_seq = q_all[:, beg:end, :, :]  # [1, qlen_i, H, D]
-                w_seq = weights_all[:, beg:end, :]  # [1, qlen_i, H]
-                # Per-seq KV from THIS seq's slot up to its seq-local
-                # end_pos // ratio (NOT a shared batch end_pos).
-                kv_seq = self.kv_cache[slot : slot + 1, :avail].to(
-                    q_seq.dtype
-                )  # [1, avail, head_dim]
-
-                score = torch.einsum(
-                    "bshd,btd->bsht", q_seq, kv_seq
-                )  # [1, qlen_i, H, avail]
-                score = (score.relu_() * w_seq.unsqueeze(-1)).sum(dim=2)
-                # → [1, qlen_i, avail]
-
-                k_eff = min(self.index_topk, avail)
-                topk_seq = score.topk(k_eff, dim=-1)[1]  # [1, qlen_i, k_eff]
-                topk_seq = topk_seq + offset
-
-                if k_eff < self.index_topk:
-                    pad = torch.full(
-                        (1, seq_qlen, self.index_topk - k_eff),
-                        -1,
-                        dtype=topk_seq.dtype,
-                        device=topk_seq.device,
-                    )
-                    topk_seq = torch.cat([topk_seq, pad], dim=-1)
-                per_seq_topks.append(topk_seq)
-
-            return torch.cat(per_seq_topks, dim=1)  # [1, num_tokens, index_topk]
-
-        # ===================================================================
-        # Legacy single-seq path (prefill OR multi-token single-seq decode
-        # OR warmup OR no forward_batch). Preserves Sprint 7b cast fix +
-        # Sprint 7d slot-aware lookup.
-        # ===================================================================
-        end_pos = start_pos + seqlen
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
-
-        # Indexer Q
+        # ----- Indexer Q (2D Linear, then add B=1 dim for RoPE / einsum) -----
         q = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
         q = q.unsqueeze(0)  # [1, S, H, D]
         _apply_rotary_emb(q[..., -rd:], freqs_cis)
         q = rotate_activation(q)
         fp4_act_quant_inplace(q, _FP4_BLOCK_SIZE)
 
+        # ----- Indexer KV (Compressor takes 2D, mutates kv_cache) -----
+        # On the W4 path the inner Compressor consumes forward_batch +
+        # layer_id directly, performing per-token state writes through
+        # the pool views. Legacy path keeps the (x, start_pos) signature.
+        if bound_pool:
+            self.compressor(
+                x, start_pos=start_pos, forward_batch=forward_batch, layer_id=layer_id
+            )
+        else:
+            self.compressor(x, start_pos)
+        # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
             self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
         ).unsqueeze(0)
 
+        # ----- Index score -----
+        # W3.2 (RFC §3.1 cross-talk fix on Indexer): in batched decode
+        # (start_pos > 0 AND multiple decode tokens), each token belongs
+        # to a distinct sequence — read each sequence's OWN row of
+        # self.kv_cache rather than row 0. Transpose q to [N, 1, H, D],
+        # slice kv_cache[:N], compute einsum, transpose back.
+        # Gate on start_pos > 0 so warmup / prefill (where multi-token
+        # input is one sequence) keeps the B=1-implicit path and does
+        # not over-slice kv_cache (max_batch_size << seqlen during
+        # warmup).
         bsz_idx = q.shape[1]
+        # Sprint 7b (issue #37): cast indexer kv to BF16 on read (FP8 storage
+        # path), see EVIDENCE_M.md Sprint 7b.
+        # Sprint 7d (issue #37): use per-seq POOL SLOT indices, not
+        # `[:bsz_idx]` (which assumes dense slots [0, bsz_idx)). The pool
+        # allocator gives sparse slots like [7, 14] when batch contains
+        # 2 seqs with stable slot assignment; reading `[:bsz_idx]` reads
+        # OTHER seqs' kv_cache rows → garbled multi-req output. Match the
+        # main attention pattern at deepseek_v4.py:2043-2046 which uses
+        # `forward_batch.req_pool_indices[seg_id]` for per-seq slot lookup.
         if start_pos > 0 and bsz_idx > 1:
-            # Multi-token single-seq decode (rare). Slot-aware (Sprint 7d).
-            q_per_seq = q.transpose(0, 1).contiguous()
+            q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
             if (
                 forward_batch is not None
                 and getattr(forward_batch, "req_pool_indices", None) is not None
             ):
                 slot_indices = forward_batch.req_pool_indices.to(
                     device=self.kv_cache.device, dtype=torch.long
-                )
+                )  # [N] = per-seq pool slot id
                 kv_per_seq = self.kv_cache[slot_indices, : end_pos // ratio].to(
                     q_per_seq.dtype
-                )
+                )  # [N, t, head_dim] from REAL slots
             else:
+                # Legacy path (no forward_batch): assume slots [0, bsz_idx)
                 kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio].to(
                     q_per_seq.dtype
                 )
-            index_score = torch.einsum("bshd,btd->bsht", q_per_seq, kv_per_seq)
-            index_score = index_score.transpose(0, 1).contiguous()
+            index_score = torch.einsum(
+                "bshd,btd->bsht", q_per_seq, kv_per_seq
+            )  # [N, 1, H, t]
+            index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
         else:
+            # Single-seq path: use slot 0 if no forward_batch, else slot of seq 0
             if (
                 forward_batch is not None
                 and getattr(forward_batch, "req_pool_indices", None) is not None
@@ -1475,7 +1395,7 @@ class Indexer(nn.Module):
                 )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
-        # Top-k selection over compressed positions
+        # ----- Top-k selection over compressed positions -----
         if start_pos == 0:
             mask = (
                 torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
