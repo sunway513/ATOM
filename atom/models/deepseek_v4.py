@@ -1941,29 +1941,32 @@ class DeepseekV4Attention(nn.Module):
                 ring="main",
             )
         kv_tok = kv.squeeze(0)  # [num_tokens, head_dim]
-        # Flatten the [N, ring_main, D] pool view to [N*ring_main, D] for
-        # scatter. Zero-copy reshape — pool storage is contiguous.
-        kv_flat = kv_cache_view.view(n_slots * ring_main, head_dim)
         # Diagnostic guard (W4.5): silicon HSA 0x1016 was traced to a GPU-side
         # ASSERT_TRAP in this `index_put` (PyTorch's bounds-check). Surface
-        # the OOB at the Python boundary with a useful error instead.
+        # the OOB at the Python boundary with a useful error instead. Compute
+        # the cap from the pool view BEFORE delegating to write_main_kv so we
+        # keep the rich error message for debugging.
         if out_cache_loc.numel() > 0:
+            _cap = n_slots * ring_main
             _max_loc = int(out_cache_loc.max().item())
             _min_loc = int(out_cache_loc.min().item())
-            _cap = kv_flat.size(0)
             if _max_loc >= _cap or _min_loc < 0:
                 raise ValueError(
                     "W4 main KV scatter OOB: "
                     f"out_cache_loc range=[{_min_loc}, {_max_loc}], "
-                    f"kv_flat.size(0)={_cap} (n_slots={n_slots}, ring_main={ring_main}), "
+                    f"flat_capacity={_cap} (n_slots={n_slots}, ring_main={ring_main}), "
                     f"layer_id={getattr(self, 'layer_id', '?')}, "
                     f"num_tokens={out_cache_loc.numel()}, "
                     f"positions.range=[{int(positions.min().item())}, {int(positions.max().item())}], "
                     f"cu_seqlens_q={forward_batch.cu_seqlens_q.tolist()}"
                 )
-        # Cast scatter source to pool dtype to avoid silent zero-out from
-        # an implicit dtype-mismatch copy_.
-        kv_flat[out_cache_loc] = kv_tok.to(kv_flat.dtype)
+        # Sprint 6 B0b.3: delegate to pool helper. Handles both legacy single
+        # slab (split-off) and dual nope/rope slabs (split-on) per paper §2.3.4.
+        forward_batch.kv_pool.write_main_kv(
+            layer_id=self.layer_id,
+            out_cache_loc=out_cache_loc,
+            kv=kv_tok,
+        )
 
         # ---- Per-token window topk_idxs ----
         topk_idxs = self._build_topk_per_token(forward_batch)  # [1, T, win] int64
