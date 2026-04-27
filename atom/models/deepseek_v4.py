@@ -1344,16 +1344,26 @@ class Indexer(nn.Module):
         # not over-slice kv_cache (max_batch_size << seqlen during
         # warmup).
         bsz_idx = q.shape[1]
+        # Sprint 7b (issue #37): cast indexer kv to BF16 on read. When the pool
+        # was allocated with `indexer_dtype=fp8_e4m3fn` (B0a opt-in), the cache
+        # holds FP8 storage; ATOM's pure-PyTorch sparse_attn / einsum requires
+        # BF16. SGLang has a native FP8 kernel (`deep_gemm.fp8_mqa_logits`)
+        # but ATOM doesn't, so we cast on read. Audit: docs/evidence/dsv4_w45/
+        # EVIDENCE_M.md Sprint 7b cast fix.
         if start_pos > 0 and bsz_idx > 1:
             q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
-            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio]  # [N, t, head_dim]
+            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio].to(
+                q_per_seq.dtype
+            )  # [N, t, head_dim]
             index_score = torch.einsum(
                 "bshd,btd->bsht", q_per_seq, kv_per_seq
             )  # [N, 1, H, t]
             index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
         else:
             index_score = torch.einsum(
-                "bshd,btd->bsht", q, self.kv_cache[:1, : end_pos // ratio]
+                "bshd,btd->bsht",
+                q,
+                self.kv_cache[:1, : end_pos // ratio].to(q.dtype),
             )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
@@ -1791,7 +1801,13 @@ class DeepseekV4Attention(nn.Module):
             # assumes B=1 implicit) sees the same shape it always did.
             if batch_decode > 1:
                 q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
-                kv_per_seq = self.kv_cache[:batch_decode]  # [N, max_seq, head_dim]
+                # Sprint 7b: cast main KV cache to q's BF16 dtype on read.
+                # When the pool was allocated with split nope/rope dtypes
+                # (B0b opt-in, default off) or any other narrow storage,
+                # sparse_attn requires BF16 inputs (line 42 of sparse_attn_v4.py).
+                kv_per_seq = self.kv_cache[:batch_decode].to(
+                    q_per_seq.dtype
+                )  # [N, max_seq, head_dim]
                 topk_per_seq = topk_idxs.transpose(0, 1).contiguous()  # [N, 1, K]
                 o = sparse_attn(
                     q_per_seq,
