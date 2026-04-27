@@ -551,7 +551,14 @@
 <blockquote>
 <div><p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: <code class="docutils literal notranslate"><span class="pre">superpowers:subagent-driven-development</span></code> or <code class="docutils literal notranslate"><span class="pre">superpowers:executing-plans</span></code> to implement task-by-task. Steps use checkbox (<code class="docutils literal notranslate"><span class="pre">-</span> <span class="pre">[</span> <span class="pre">]</span></code>) for tracking.</p>
 </div></blockquote>
-<p><strong>Goal:</strong> Restore W4.5 silicon output coherence (currently gibberish in both W4 and baseline <code class="docutils literal notranslate"><span class="pre">flag=0</span></code>) by routing DSV4’s MoE through the FlyDSL <strong>blockscale</strong> kernel (<code class="docutils literal notranslate"><span class="pre">per_1x128</span></code>, FP8/FP8) instead of the currently-misaligned CK MoE backend. Closes the accuracy half of issue sunway513/atom#37.</p>
+<section id="revision-log">
+<h2>Revision log<a class="headerlink" href="#revision-log" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>v1 (initial)</strong> — assumed DSV4 dispatches FP8/FP8 per_1x128 (from <code class="docutils literal notranslate"><span class="pre">config.json</span></code> <code class="docutils literal notranslate"><span class="pre">weight_block_size:[128,128]</span></code>); plan to port FlyDSL <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage</span></code> kernel into aiter.</p></li>
+<li><p><strong>v2 (review fixes)</strong> — addressed 4 review findings: (P1) Apache-2.0 SPDX header on ported file, (P1) substring <code class="docutils literal notranslate"><span class="pre">_blockscale_</span></code> (not <code class="docutils literal notranslate"><span class="pre">startswith</span></code>) in dispatcher, (P1) per-row CSV resolution test, (P2) FlyDSL version preflight.</p></li>
+<li><p><strong>v3 (FP4 pivot, 2026-04-26 W4.5)</strong> — silicon trace with <code class="docutils literal notranslate"><span class="pre">AITER_FMOE_DEBUG_LOOKUP=1</span></code> revealed actual lookup key is <strong>FP4/FP4 per_1x32</strong>, NOT FP8/per_1x128. ATOM’s quant_v4 layer rewrites the dispatch dtype before reaching aiter. <strong>Fix path collapses to a 16-row CSV</strong> (<code class="docutils literal notranslate"><span class="pre">dsv4_fp4_tuned_fmoe.csv</span></code>) reusing existing FlyDSL FP4 kernels (<code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp4_wfp4_bf16_*</span></code>) — the blockscale port (Tasks 1-6.5) remains in-tree as future-proofing if DSV4 ever switches to per_1x128. Tasks 7-10 retargeted to FP4 path.</p></li>
+</ul>
+<p><strong>Goal:</strong> Restore W4.5 silicon output coherence (currently gibberish in both W4 and baseline <code class="docutils literal notranslate"><span class="pre">flag=0</span></code>) by routing DSV4’s MoE through FlyDSL kernels (FP4/per_1x32 in v3, FP8/per_1x128 blockscale in v1-v2) instead of the unmatched CK MoE fallback. Closes the accuracy half of issue sunway513/atom#37.</p>
 <p><strong>Architecture:</strong> Single workstream spanning three repos owned by the same team:</p>
 <ol class="arabic simple">
 <li><p><strong>FlyDSL upstream</strong> (<code class="docutils literal notranslate"><span class="pre">ROCm/FlyDSL</span></code>) — already has <code class="docutils literal notranslate"><span class="pre">kernels/moe_blockscale_2stage.py</span></code> (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128, FP8-only, g1u1) + tested via <code class="docutils literal notranslate"><span class="pre">tests/kernels/test_moe_blockscale.py</span></code>. Source of truth.</p></li>
@@ -565,6 +572,7 @@
 <li><p>AITER <code class="docutils literal notranslate"><span class="pre">sunway513/aiter</span></code> <code class="docutils literal notranslate"><span class="pre">_MIN_FLYDSL_VERSION</span> <span class="pre">=</span> <span class="pre">Version(&quot;0.1.3&quot;)</span></code> (<code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/__init__.py</span></code>); container has <code class="docutils literal notranslate"><span class="pre">flydsl</span> <span class="pre">0.1.4.2</span></code> installed which satisfies the pin. If reviewing against a different aiter checkout that pins <code class="docutils literal notranslate"><span class="pre">0.1.2</span></code>, bump the pin first.</p></li>
 <li><p>License: FlyDSL upstream is <strong>Apache-2.0</strong> with <code class="docutils literal notranslate"><span class="pre">Copyright</span> <span class="pre">(c)</span> <span class="pre">2025</span> <span class="pre">FlyDSL</span> <span class="pre">Project</span> <span class="pre">Contributors</span></code>. AITER and ATOM are MIT. <strong>All ported source MUST preserve the Apache-2.0 SPDX header + Apache copyright notice. The new aiter file is a derivative work licensed Apache-2.0, NOT MIT</strong> (mixing licenses in one file requires explicit dual-license header — we don’t do that).</p></li>
 </ul>
+</section>
 <hr class="docutils" />
 <section id="context-must-read-background">
 <h2>Context (must-read background)<a class="headerlink" href="#context-must-read-background" title="Link to this heading"></a></h2>
@@ -1182,8 +1190,8 @@ git<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </sp
 <p>When approved, invoke <code class="docutils literal notranslate"><span class="pre">superpowers:subagent-driven-development</span></code> to execute Tasks 0-10 with two-stage review per task.</p>
 </section>
 <hr class="docutils" />
-<section id="revision-log">
-<h2>Revision log<a class="headerlink" href="#revision-log" title="Link to this heading"></a></h2>
+<section id="id1">
+<h2>Revision log<a class="headerlink" href="#id1" title="Link to this heading"></a></h2>
 <section id="v2-2026-04-26-review-feedback-addressed">
 <h3>v2 — 2026-04-26 (review feedback addressed)<a class="headerlink" href="#v2-2026-04-26-review-feedback-addressed" title="Link to this heading"></a></h3>
 <ul class="simple">

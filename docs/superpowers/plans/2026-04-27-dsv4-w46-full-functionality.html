@@ -1,0 +1,873 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plan: ATOM DSV4 Full Functionality Closure (Sprint 6) &mdash; ATOM 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #C00000" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            ATOM
+              <img src="../../_static/atom_logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#requirements">Requirements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#from-source">From Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#docker-installation">Docker Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#verification">Verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quickstart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#serving-a-model">Serving a Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#batch-inference">Batch Inference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#distributed-serving">Distributed Serving</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#api-server">API Server</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#performance-tips">Performance Tips</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_run_guide.html">Model Run Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#quick-start">Quick Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#supported-models">Supported Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_run_guide.html#vllm-plugin-backend">vLLM Plugin Backend</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#nightly-ci-benchmark-configurations">Nightly CI Benchmark Configurations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#live-dashboard">Live Dashboard</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">User Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../architecture_guide.html">ATOM Architecture Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#system-overview">1. System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#component-architecture">2. Component Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#request-lifecycle">3. Request Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#forward-context-pattern">4. Forward Context Pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#multi-process-architecture">5. Multi-Process Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#sequence-lifecycle">6. Sequence Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#speculative-decoding-mtp-eagle">7. Speculative Decoding (MTP / EAGLE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#supported-mtp-architectures">Supported MTP architectures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#weight-sharing">Weight sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#propose-loop-mha-vs-mla-branching">Propose loop: MHA vs MLA branching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#prepare-mtp-decode"><code class="docutils literal notranslate"><span class="pre">prepare_mtp_decode()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../configuration_guide.html">ATOM Configuration Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#master-configuration-config">1. Master Configuration (<code class="docutils literal notranslate"><span class="pre">Config</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#compilation-configuration-compilationconfig">2. Compilation Configuration (<code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilation-levels-compilationlevel">2.1 Compilation Levels (<code class="docutils literal notranslate"><span class="pre">CompilationLevel</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilationconfig-fields">2.2 <code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#cuda-graph-mode-cudagraphmode">2.3 CUDA Graph Mode (<code class="docutils literal notranslate"><span class="pre">CUDAGraphMode</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quantization-configuration-quantizationconfig-layerquantconfig">3. Quantization Configuration (<code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> &amp; <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layerquantconfig-fields">3.1 <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quantizationconfig-attributes">3.2 <code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quanttype-values-from-aiter">3.3 <code class="docutils literal notranslate"><span class="pre">QuantType</span></code> Values (from AITER)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#supported-quantization-dtypes">3.4 Supported Quantization Dtypes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#auto-detection-from-huggingface">3.5 Auto-Detection from HuggingFace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layer-level-quantization-dispatch">3.6 Layer-Level Quantization Dispatch</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#parallel-configuration-parallelconfig">4. Parallel Configuration (<code class="docutils literal notranslate"><span class="pre">ParallelConfig</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#speculative-decoding-configuration-speculativeconfig">5. Speculative Decoding Configuration (<code class="docutils literal notranslate"><span class="pre">SpeculativeConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#table-driven-mtp-config">5.1 Table-Driven MTP Config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#post-init-behaviour-hf-config-override">5.2 Post-init behaviour (<code class="docutils literal notranslate"><span class="pre">hf_config_override</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#sampling-parameters-samplingparams">6. Sampling Parameters (<code class="docutils literal notranslate"><span class="pre">SamplingParams</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#cli-arguments-engineargs">7. CLI Arguments (<code class="docutils literal notranslate"><span class="pre">EngineArgs</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#environment-variables">8. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#variables-registered-in-atom-utils-envs-py">8.1 Variables Registered in <code class="docutils literal notranslate"><span class="pre">atom/utils/envs.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#additional-environment-variables-used-outside-envs-py">8.2 Additional Environment Variables (Used Outside <code class="docutils literal notranslate"><span class="pre">envs.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#decision-tree-choosing-a-compilation-level">9. Decision Tree – Choosing a Compilation Level</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_support_guide.html">ATOM Model Support Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#supported-model-architectures">1. Supported Model Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-architecture-details">2. Model Architecture Details</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-qwen3forcausallm">Qwen3 (<code class="docutils literal notranslate"><span class="pre">Qwen3ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qwen3moeforcausallm">Qwen3-MoE (<code class="docutils literal notranslate"><span class="pre">Qwen3MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-llamaforcausallm">Llama (<code class="docutils literal notranslate"><span class="pre">LlamaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mixtral-mixtralforcausallm">Mixtral (<code class="docutils literal notranslate"><span class="pre">MixtralForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-deepseekv2forcausallm">DeepSeek V2/V3 (<code class="docutils literal notranslate"><span class="pre">DeepseekV2ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-mtp-deepseekmtp">DeepSeek MTP (<code class="docutils literal notranslate"><span class="pre">DeepSeekMTP</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#gpt-oss-gptossforcausallm">GPT-OSS (<code class="docutils literal notranslate"><span class="pre">GptOssForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm-5-glmmoedsa-glmmoedsaforcausallm">GLM-5 / GlmMoeDsa (<code class="docutils literal notranslate"><span class="pre">GlmMoeDsaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm4-moe-glm4moeforcausallm">GLM4-MoE (<code class="docutils literal notranslate"><span class="pre">Glm4MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-next-qwen3nextforcausallm">Qwen3-Next (<code class="docutils literal notranslate"><span class="pre">Qwen3NextForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-qwen3-5forconditionalgeneration-and-qwen3-5moeforconditionalgeneration">Qwen3.5 (<code class="docutils literal notranslate"><span class="pre">Qwen3_5ForConditionalGeneration</span></code> and <code class="docutils literal notranslate"><span class="pre">Qwen3_5MoeForConditionalGeneration</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-mtp-qwen3-5mtp">Qwen3.5 MTP (<code class="docutils literal notranslate"><span class="pre">Qwen3_5MTP</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#weight-loading">3. Weight Loading</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#function-signature">Function Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#loading-flow">Loading Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#layers-beyond-num-hidden-layers">Layers Beyond <code class="docutils literal notranslate"><span class="pre">num_hidden_layers</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#adding-a-new-model">4. Adding a New Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-1-create-the-model-file">Step 1: Create the Model File</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-2-implement-layer-classes">Step 2: Implement Layer Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-3-implement-the-model-and-causallm-classes">Step 3: Implement the Model and CausalLM Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-4-register-the-model">Step 4: Register the Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-5-handle-weight-loading">Step 5: Handle Weight Loading</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-specific-optimizations">5. Model-Specific Optimizations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-fused-rmsnorm-quant-and-silu-mul-quant">Llama: Fused RMSNorm+Quant and SiLU+Mul+Quant</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-mla-fused-input-norm-qk-norm-fusion">DeepSeek V2/V3: MLA + Fused Input Norm + QK Norm Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qk-norm-rope-cache-quant-fusion">Qwen3-MoE: QK Norm + RoPE + Cache + Quant Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mtp-multi-token-prediction-speculative-decoding">MTP: Multi-Token Prediction (Speculative Decoding)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_ops_guide.html">ATOM Model Operations Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#aiter-integration-overview">1. AITER Integration Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#aiter-kernel-mapping-table">AITER Kernel Mapping Table</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#linear-operations">2. Linear Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#class-hierarchy">2.1 Class Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-dispatch">2.2 Quantization Dispatch</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#tensor-parallel-sharding">2.3 Tensor Parallel Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#weight-processing">2.4 Weight Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#attention-operations">3. Attention Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#base-attention-base-attention-py">3.1 Base: <code class="docutils literal notranslate"><span class="pre">Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">base_attention.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-attention-attention-mha-py">3.2 Multi-Head Attention (<code class="docutils literal notranslate"><span class="pre">attention_mha.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-latent-attention-attention-mla-py">3.3 Multi-head Latent Attention (<code class="docutils literal notranslate"><span class="pre">attention_mla.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#backend-abstraction-attentions-backends-py">3.4 Backend Abstraction (<code class="docutils literal notranslate"><span class="pre">attentions/backends.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#kv-cache-operations">3.5 KV Cache Operations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#mixture-of-experts-moe">4. Mixture of Experts (MoE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoe-class-moe-py">4.1 <code class="docutils literal notranslate"><span class="pre">FusedMoE</span></code> Class (<code class="docutils literal notranslate"><span class="pre">moe.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-methods">4.2 Quantization Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#topk-routing-topk-py">4.3 TopK Routing (<code class="docutils literal notranslate"><span class="pre">topK.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoeparallelconfig">4.4 <code class="docutils literal notranslate"><span class="pre">FusedMoEParallelConfig</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#mori-integration-fused-moe-mori-prepare-finalize-py">4.5 MORI Integration (<code class="docutils literal notranslate"><span class="pre">fused_moe/mori_prepare_finalize.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#moe-quantization-config-fused-moe-config-py">4.6 MoE Quantization Config (<code class="docutils literal notranslate"><span class="pre">fused_moe/config.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#triton-moe-fallback-fused-moe-triton-py">4.7 Triton MoE Fallback (<code class="docutils literal notranslate"><span class="pre">fused_moe_triton.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#normalization">5. Normalization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rmsnorm-layernorm-py">5.1 <code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#layernorm-layernorm-py">5.2 <code class="docutils literal notranslate"><span class="pre">LayerNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#activation-functions">6. Activation Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#siluandmul-activation-py">6.1 <code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code> (<code class="docutils literal notranslate"><span class="pre">activation.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#embedding-output-head">7. Embedding &amp; Output Head</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#vocabparallelembedding-embed-head-py">7.1 <code class="docutils literal notranslate"><span class="pre">VocabParallelEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#parallellmhead-embed-head-py">7.2 <code class="docutils literal notranslate"><span class="pre">ParallelLMHead</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#rotary-position-embedding-rope">8. Rotary Position Embedding (RoPE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rotaryembedding-rotary-embedding-py">8.1 <code class="docutils literal notranslate"><span class="pre">RotaryEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">rotary_embedding.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#get-rope-factory">8.2 <code class="docutils literal notranslate"><span class="pre">get_rope()</span></code> Factory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#integration-in-attention">8.3 Integration in Attention</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#sampling">9. Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#sampler-sampler-py">9.1 <code class="docutils literal notranslate"><span class="pre">Sampler</span></code> (<code class="docutils literal notranslate"><span class="pre">sampler.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rejectionsampler-rejection-sampler-py">9.2 <code class="docutils literal notranslate"><span class="pre">RejectionSampler</span></code> (<code class="docutils literal notranslate"><span class="pre">rejection_sampler.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#fused-kernel-chains">10. Fused Kernel Chains</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#source-files">Source Files</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-attentions"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/attentions/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-fused-moe"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/fused_moe/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-utils"><code class="docutils literal notranslate"><span class="pre">atom/utils/</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../scheduling_kv_cache_guide.html">ATOM Scheduling &amp; KV Cache Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduling-algorithm">1. Scheduling Algorithm</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-initialization">1.1 Scheduler Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#schedule-flow">1.2 Schedule Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#delay-factor">1.3 Delay Factor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#preemption">1.4 Preemption</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatch-structure">2. ScheduledBatch Structure</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor-signature">2.1 Constructor Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#fields">2.2 Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatchoutput">2.3 ScheduledBatchOutput</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-manager">3. Block Manager</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-class">3.1 Block Class</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#blockmanager-initialization">3.2 BlockManager Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#allocation-allocate">3.3 Allocation (<code class="docutils literal notranslate"><span class="pre">allocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#deallocation-deallocate">3.4 Deallocation (<code class="docutils literal notranslate"><span class="pre">deallocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#can-allocate-and-can-append-checks">3.5 Can-Allocate and Can-Append Checks</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#may-append-decode-extension">3.6 May-Append (Decode Extension)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#prefix-caching">4. Prefix Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-function">4.1 Hash Function</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-chaining">4.2 Hash Chaining</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#cache-lookup-during-allocation">4.3 Cache Lookup During Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#reference-counting">4.4 Reference Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#enabling-prefix-caching">4.5 Enabling Prefix Caching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#postprocessing">5. Postprocessing</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#signature">5.1 Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#token-appending">5.2 Token Appending</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stop-condition-checking">5.3 Stop Condition Checking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stream-output">5.4 Stream Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-cleanup">5.5 Sequence Cleanup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#placeholder-insertion">5.6 Placeholder Insertion</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#speculative-decoding-integration">6. Speculative Decoding Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-tracking">6.1 Scheduler Tracking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-tokens-in-scheduling">6.2 Draft Tokens in Scheduling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#acceptance-statistics">6.3 Acceptance Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-token-storage-on-sequences">6.4 Draft Token Storage on Sequences</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-management">7. Sequence Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor">7.1 Constructor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#core-fields">7.2 Core Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#timing-fields">7.3 Timing Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#computed-properties">7.4 Computed Properties</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#num-tokens-setter">7.5 num_tokens Setter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#lifecycle">7.6 Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencestatus-enum">7.7 SequenceStatus Enum</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencetype-enum">7.8 SequenceType Enum</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../distributed_guide.html">ATOM Distributed Inference Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#tensor-parallelism-tp">1. Tensor Parallelism (TP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#weight-sharding">Weight Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#process-group-initialization">Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#allreduce">AllReduce</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#configuration">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#data-parallelism-dp">2. Data Parallelism (DP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-process-group-initialization">DP Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#synchronized-busy-loop">Synchronized Busy Loop</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dummy-batch-execution">Dummy Batch Execution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#device-assignment">Device Assignment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dpmetadata">DPMetadata</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#coremanager-dp-orchestration">CoreManager (DP Orchestration)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id1">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#expert-parallelism-ep">3. Expert Parallelism (EP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#fusedmoeparallelconfig">FusedMoEParallelConfig</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#expert-distribution">Expert Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#mori-communication">MORI Communication</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id2">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#environment-variables">4. Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#multi-gpu-deployment-examples">5. Multi-GPU Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#deepseek-r1-on-8-gpus-tp8">DeepSeek-R1 on 8 GPUs (TP8)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#qwen3-235b-a22b-on-8-gpus-tp8-ep">Qwen3-235B-A22B on 8 GPUs (TP8 + EP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#kimi-k2-thinking-on-4-gpus-tp4">Kimi-K2-Thinking on 4 GPUs (TP4)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#combined-parallelism-strategies">6. Combined Parallelism Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-only-dense-models">TP Only (Dense Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-ep-moe-models">TP + EP (MoE Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-dense-throughput">TP + DP (Dense Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-ep-moe-throughput">TP + DP + EP (MoE Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-attention-mode">DP Attention Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../compilation_cudagraph_guide.html">ATOM Compilation &amp; CUDA Graphs Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-levels">1. Compilation Levels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-0-no-compilation">Level 0 – NO_COMPILATION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-1-dynamo-as-is">Level 1 – DYNAMO_AS_IS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-2-dynamo-once">Level 2 – DYNAMO_ONCE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-3-piecewise-production-default">Level 3 – PIECEWISE (Production Default)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-modes">2. CUDA Graph Modes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#none-value-0">NONE (value: 0)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-value-1">PIECEWISE (value: 1)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-value-2">FULL (value: 2)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-decode-only-value-full-none">FULL_DECODE_ONLY (value: (FULL, NONE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-and-piecewise-value-full-piecewise">FULL_AND_PIECEWISE (value: (FULL, PIECEWISE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#helper-methods">Helper Methods</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-capture">3. CUDA Graph Capture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#capture-flow">Capture Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-keying">Graph Keying</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-pool-sharing">Graph Pool Sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#default-capture-sizes">Default Capture Sizes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-replay-in-run-model">Graph Replay in run_model()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-compilation">4. Piecewise Compilation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#splitting-operations">Splitting Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cache-management">Cache Management</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forward-context-stateless-dispatch">5. Forward Context &amp; Stateless Dispatch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forwardcontext-fields">ForwardContext Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#lifecycle">Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#context-dataclass">Context Dataclass</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#integration-with-cuda-graphs">Integration with CUDA Graphs</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compiler-backend">6. Compiler Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilermanager">CompilerManager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilerinterface">CompilerInterface</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductoradaptor">InductorAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductorstandaloneadaptor">InductorStandaloneAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#vllmbackend">VllmBackend</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#support-torch-compile-decorator">&#64;support_torch_compile Decorator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#custom-op-registration">Custom Op Registration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#configuration-options">7. Configuration Options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#decision-tree">8. Decision Tree</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#common-configurations">Common Configurations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../serving_benchmarking_guide.html">ATOM Serving &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#openai-compatible-server">1. OpenAI-Compatible Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#endpoints">1.1 Endpoints</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#request-models">1.2 Request Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#response-models">1.3 Response Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#server-startup">1.4 Server Startup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#example-curl">1.5 Example: curl</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-api-llmengine">2. Programmatic API (LLMEngine)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#initialization">2.1 Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#samplingparams">2.2 SamplingParams</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#core-methods">2.3 Core Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#synchronous-generation-example">2.4 Synchronous Generation Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#asynchronous-streaming-usage">2.5 Asynchronous / Streaming Usage</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#simple-inference">3. Simple Inference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#usage">3.1 Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#what-it-does">3.2 What It Does</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#benchmarking">4. Benchmarking</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#metrics">4.1 Metrics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#key-cli-arguments">4.2 Key CLI Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#backend-request-functions">4.3 Backend Request Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#full-benchmark-example">4.4 Full Benchmark Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling">5. Profiling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#configuration">5.1 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#online-profiling-http">5.2 Online Profiling (HTTP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-profiling">5.3 Programmatic Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#offline-profiling-script">5.4 Offline Profiling Script</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling-during-benchmarks">5.5 Profiling During Benchmarks</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#speculative-decoding-mtp">6. Speculative Decoding (MTP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#architecture">6.1 Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#id1">6.2 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#mtp-statistics">6.3 MTP Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#how-rejection-sampling-works">6.4 How Rejection Sampling Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#deployment-examples">7. Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#single-gpu">7.1 Single-GPU</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#multi-gpu-with-tensor-parallelism">7.2 Multi-GPU with Tensor Parallelism</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#docker-deployment">7.3 Docker Deployment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#engine-cli-arguments-engineargs">7.4 Engine CLI Arguments (EngineArgs)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#accuracy-validation">8. Accuracy Validation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#setup">8.1 Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#run-evaluation">8.2 Run Evaluation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Framework Integrations</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../vllm_plugin_backend_guide.html">ATOM vLLM Plugin Backend</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#architecture">1. Architecture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#design-overview">1.1 Design overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-it-works">1.2 How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#plugin-lifecycle">1.3 Plugin lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#key-modules">1.4 Key Modules</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#component-diagram">1.5 Component Diagram</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#configuration-translation">2. Configuration Translation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#pluginconfig-fields">2.1 <code class="docutils literal notranslate"><span class="pre">PluginConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#vllm-config-mapping">2.2 vLLM Config Mapping</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#attention-integration">3. Attention Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-the-backend-is-selected">3.1 How the Backend Is Selected</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#supported-models">4. Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#installation-and-quick-start">5. Installation and Quick Start</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#prerequisites">5.1 Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#set-up-the-environment">5.2 Set Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#launch-vllm-with-atom-plugin">5.3 Launch vLLM with ATOM Plugin</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#benchmark-serving">5.4 Benchmark Serving</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#enable-profiling">5.5 Enable Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#disable-atom-plugin">5.6 Disable ATOM Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/serving.html">Serving API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#llmengine-class">LLMEngine Class</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/serving.html#methods">Methods</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/serving.html#generate">generate()</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#samplingparams">SamplingParams</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#return-values">Return Values</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/models.html">Supported Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#llama-models">Llama Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#gpt-models">GPT Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#mixtral">Mixtral</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#other-architectures">Other Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#model-configuration">Model Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#performance-by-model-size">Performance by Model Size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#quantization">Quantization</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #C00000" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">ATOM</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Plan: ATOM DSV4 Full Functionality Closure (Sprint 6)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/superpowers/plans/2026-04-27-dsv4-w46-full-functionality.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="plan-atom-dsv4-full-functionality-closure-sprint-6">
+<h1>Plan: ATOM DSV4 Full Functionality Closure (Sprint 6)<a class="headerlink" href="#plan-atom-dsv4-full-functionality-closure-sprint-6" title="Link to this heading"></a></h1>
+<p><strong>Date:</strong> 2026-04-27
+<strong>Issue:</strong> sunway513/atom#37 (W4.5+ — full DSV4 functional support)
+<strong>Owner:</strong> code agent + user review gate</p>
+<section id="goal">
+<h2>Goal<a class="headerlink" href="#goal" title="Link to this heading"></a></h2>
+<blockquote>
+<div><p><strong>“Get to the point where we feel comfortable claiming ATOM has full functionality support for DeepSeek V4.”</strong> — user, 2026-04-27</p>
+</div></blockquote>
+<p>This is a <strong>functional-correctness sprint</strong>, not a perf sprint. Acceptance is binary: ATOM either matches the upstream reference behavior end-to-end (all 4 axes below) or it does not. No partial-credit “0.60 vs 0.96 declared production” claims like Sprint 5e.</p>
+</section>
+<section id="pre-sprint-state-of-the-world-post-sprint-5e">
+<h2>Pre-sprint state of the world (post-Sprint 5e)<a class="headerlink" href="#pre-sprint-state-of-the-world-post-sprint-5e" title="Link to this heading"></a></h2>
+<p>Confirmed via 3 silicon experiments + 4 sub-agent comparison reports (DSV4 paper, SGLang code, vLLM code, ATOM W4 audit):</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Axis</p></th>
+<th class="head"><p>Current ATOM state</p></th>
+<th class="head"><p>Source-of-truth (paper / SGLang / vLLM)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>KV cache architecture</p></td>
+<td><p>Per-ratio slabs (<code class="docutils literal notranslate"><span class="pre">_compressor_state_c4</span></code>, <code class="docutils literal notranslate"><span class="pre">_compressor_state_c128</span></code>, <code class="docutils literal notranslate"><span class="pre">_compressor_main_kv_c4</span></code>, <code class="docutils literal notranslate"><span class="pre">_compressor_main_kv_c128</span></code>, <code class="docutils literal notranslate"><span class="pre">_indexer_cache</span></code>) — <strong>matches paper §3.6.1 two-pool design</strong></p></td>
+<td><p>Paper: classical paged KV + state cache slab. SGLang/vLLM use unified buffers as <em>shim</em> for their MLA framework.</p></td>
+</tr>
+<tr class="row-odd"><td><p>Sparse Indexer (CSA <code class="docutils literal notranslate"><span class="pre">m=4</span></code>)</p></td>
+<td><p>Implemented in <code class="docutils literal notranslate"><span class="pre">deepseek_v4.py</span></code> Indexer (<code class="docutils literal notranslate"><span class="pre">index_topk</span></code> reads from config, defaults 1024 = V4-Pro)</p></td>
+<td><p>Paper §2.3.1 lightning indexer. SGLang has equivalent NSA Indexer. vLLM: not yet.</p></td>
+</tr>
+<tr class="row-even"><td><p>Compressor (HCA <code class="docutils literal notranslate"><span class="pre">m'=128</span></code>)</p></td>
+<td><p>Per-token block-boundary loop (post Sprint 4 commit <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code>)</p></td>
+<td><p>Paper §2.3.2. SGLang: equivalent. vLLM: no analog.</p></td>
+</tr>
+<tr class="row-odd"><td><p>MTP layer</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compress_ratios[-1]</span> <span class="pre">==</span> <span class="pre">0</span></code> → SWA-only handling</p></td>
+<td><p>Paper §2.1: 1 MTP block, no compressor. ✅ ATOM matches.</p></td>
+</tr>
+<tr class="row-even"><td><p>Multi-request KV pool</p></td>
+<td><p>LIFO slot allocator, max=512, gated behind <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1</span></code></p></td>
+<td><p>Paper: per-request slabs ✅. SGLang/vLLM: paged + slot_mapping (unconditionally enabled).</p></td>
+</tr>
+<tr class="row-odd"><td><p>Scheduler↔Pool finish-pipeline</p></td>
+<td><p>Cross-process via <code class="docutils literal notranslate"><span class="pre">ScheduledBatch.finished_seq_ids</span></code> (Sprint 4 fix)</p></td>
+<td><p>Equivalent to vLLM/SGLang’s batch lifecycle ✅</p></td>
+</tr>
+<tr class="row-even"><td><p>MoE FP4 backend</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Mxfp4MoEMethod</span></code> with CK/FlyDSL/Triton dispatch — <strong>CK/FlyDSL produces 0.45/0.00, Triton produces 0.60/0.60 at conc=1 5-shot</strong></p></td>
+<td><p>SGLang: single <code class="docutils literal notranslate"><span class="pre">QuantType.per_1x32</span></code> flashinfer/cutlass. vLLM: FlashInfer CUTLASS / Marlin. ATOM is the outlier.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="diff-candidates-3-way-vs-paper-pre-validated">
+<h2>Diff candidates (3-way vs paper) — pre-validated<a class="headerlink" href="#diff-candidates-3-way-vs-paper-pre-validated" title="Link to this heading"></a></h2>
+<p><strong>P0 (functional blockers)</strong>:</p>
+<ol class="arabic simple">
+<li><p><strong>0-shot prompts produce garbled output even with Triton MoE</strong> (silicon-verified 2026-04-27 0/4 raw 0-shot prompts → loop / off-topic / nonsense). 5-shot context masks it (3/4 sensible). Likely root causes (top 3, not yet bisected):</p>
+<ul class="simple">
+<li><p>Sparse Indexer top-k window calculation may have an off-by-one when context is too short (Sprint 4 only fixed warm path)</p></li>
+<li><p>FP8 KV cache scale handling in CSA layers — paper §2.3.4 requires “BF16 for RoPE dims, FP8 for the rest, FP4 for indexer”; ATOM may quantize uniformly</p></li>
+<li><p>Triton MoE precision — 36pp gap to SGLang’s 0.96 even at 5-shot suggests Triton kernel is lossy</p></li>
+</ul>
+</li>
+<li><p><strong>Multi-request batched decode (conc≥4) untested with Triton</strong> — Sprint 4’s 4-distinct-output evidence was on CK backend (1/4 fluent). Sprint 5e Triton lm_eval was conc=1 only. Need silicon validation at conc∈{4, 8}.</p></li>
+<li><p><strong>Multi-request gated behind <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_UNSAFE_MULTIREQ_DEV</span></code> flag</strong> (<code class="docutils literal notranslate"><span class="pre">atom/utils/dsv4_guard.py:59</span></code>). Until conc&gt;1 is silicon-validated, this is correct, but the goal is to remove the flag for production.</p></li>
+</ol>
+<p><strong>P1 (correctness with low blast radius)</strong>:</p>
+<ol class="arabic simple" start="4">
+<li><p><strong>CK/FlyDSL fused MoE layout dispatch bug</strong> (Sprint 5b/5c RCA). Triton bypasses it but at higher latency. Long-term should fix in <code class="docutils literal notranslate"><span class="pre">aiter_lingpeng/aiter/ops/flydsl/moe_kernels.py</span></code> so production has a fast path.</p></li>
+<li><p><strong>MLA-class reuse risk</strong> — V4 uses MQA-with-shared-KV, not MLA. Audit <code class="docutils literal notranslate"><span class="pre">atom/plugin/attention_mla.py</span></code> and <code class="docutils literal notranslate"><span class="pre">attention_mla_sparse.py</span></code> for any MLA-style K/V split assumption that might silently bias V4 outputs.</p></li>
+</ol>
+<p><strong>P2 (cosmetic / external-readability)</strong>:</p>
+<ol class="arabic simple" start="6">
+<li><p><strong>Naming</strong>: rename <code class="docutils literal notranslate"><span class="pre">c4</span></code>/<code class="docutils literal notranslate"><span class="pre">c128</span></code> → <code class="docutils literal notranslate"><span class="pre">csa</span></code>/<code class="docutils literal notranslate"><span class="pre">hca</span></code> to match paper §2.3 vocabulary. Rename <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_USE_W4_PATH</span></code> → <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_PAGED_PATH</span></code> (or similar — <code class="docutils literal notranslate"><span class="pre">W4</span></code> is internal sprint name, confuses external readers). Defer to a separate housekeeping PR.</p></li>
+</ol>
+</section>
+<section id="acceptance-gates">
+<h2>Acceptance gates<a class="headerlink" href="#acceptance-gates" title="Link to this heading"></a></h2>
+<p>To call DSV4 “full functionality support” we must close every row below. Each row has a specific silicon command and pass criterion.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Test</p></th>
+<th class="head"><p>Pass criterion</p></th>
+<th class="head"><p>Silicon cmd</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1</p></td>
+<td><p>gsm8k limit=20, conc=1, 5-shot, Triton</p></td>
+<td><p>flexible-extract ≥ 0.65 (exclude noise: ≥ SGLang_ref - 0.30)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_eval</span> <span class="pre">--tasks</span> <span class="pre">gsm8k</span> <span class="pre">--num_fewshot</span> <span class="pre">5</span> <span class="pre">--limit</span> <span class="pre">20</span> <span class="pre">...</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>2</p></td>
+<td><p>gsm8k full (n=1319), conc=1, 5-shot, Triton</p></td>
+<td><p>flexible-extract ≥ 0.85 (tight stderr)</p></td>
+<td><p>same with <code class="docutils literal notranslate"><span class="pre">--limit</span> <span class="pre">&quot;&quot;</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>3</p></td>
+<td><p>conc=4 sensible smoke, Triton + UNSAFE_MULTIREQ</p></td>
+<td><p>4/4 distinct prompts produce sensible answers</p></td>
+<td><p>4 parallel curls — script ready at <code class="docutils literal notranslate"><span class="pre">/home/pensun/ATOM-lingpeng/conc4_triton.sh</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>4</p></td>
+<td><p>conc=8 sensible smoke, Triton + UNSAFE_MULTIREQ</p></td>
+<td><p>8/8 distinct prompts produce sensible answers</p></td>
+<td><p>extend (3) to 8 prompts</p></td>
+</tr>
+<tr class="row-even"><td><p>5</p></td>
+<td><p>gsm8k limit=20, conc=4 batched</p></td>
+<td><p>flexible-extract ≥ 0.55 (allow 10pp regression vs conc=1)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_eval</span> <span class="pre">--num_concurrent</span> <span class="pre">4</span></code> against <code class="docutils literal notranslate"><span class="pre">--max-num-seqs</span> <span class="pre">4</span></code> server</p></td>
+</tr>
+<tr class="row-odd"><td><p>6</p></td>
+<td><p>0-shot 5-question pop quiz (math + factual + code + summary + list)</p></td>
+<td><p>≥ 4/5 sensible answers (not loop, not off-topic, model-recognized format)</p></td>
+<td><p>manual curl battery</p></td>
+</tr>
+<tr class="row-even"><td><p>7</p></td>
+<td><p>Side-by-side vs SGLang docker</p></td>
+<td><p>Same 5-shot prompt → both ATOM &amp; SGLang produce a “correct” answer per gsm8k strict-match for ≥ 18/20 prompts</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">docker</span> <span class="pre">run</span> <span class="pre">lmsysorg/sglang:deepseek-v4-b300-dev</span></code> (B300 — code-readable but won’t run on MI355X; use SGLang’s published API endpoint or a hosted instance instead for runtime parity)</p></td>
+</tr>
+<tr class="row-odd"><td><p>8</p></td>
+<td><p>Per-layer numerics: ATOM vs paper-defined torch reference (<code class="docutils literal notranslate"><span class="pre">ATOM_V4_TORCH_MOE=1</span></code>)</p></td>
+<td><p>Per-layer L2 norm ratio ≥ 0.95, per-token logit cosine ≥ 0.99</p></td>
+<td><p>new diagnostic harness</p></td>
+</tr>
+<tr class="row-even"><td><p>9</p></td>
+<td><p>Continuous batching stability (1 hour, conc=4, gsm8k stream)</p></td>
+<td><p>No KV pool slot exhaustion, no rank crash, no OOM</p></td>
+<td><p>endurance silicon run</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="plan-of-attack-ordering">
+<h2>Plan-of-attack ordering<a class="headerlink" href="#plan-of-attack-ordering" title="Link to this heading"></a></h2>
+<p>Must respect blast radius — start with smallest diagnostics and only commit code changes after the bug is localized.</p>
+<section id="phase-a-diagnose-no-code-commits-yet">
+<h3>Phase A — Diagnose (no code commits yet)<a class="headerlink" href="#phase-a-diagnose-no-code-commits-yet" title="Link to this heading"></a></h3>
+<p>A1. <strong>Run gate #6 immediately</strong>. Already partially done (0/4 raw 0-shot today). Expand to 5-question battery on the <em>currently running</em> Triton server. Establish baseline 0-shot quality number.</p>
+<p>A2. <strong>Run gate #8 — torch-ref comparison</strong>. Single curl with <code class="docutils literal notranslate"><span class="pre">ATOM_V4_TORCH_MOE=1</span></code>, dump per-layer KV state via instrumentation hook, compare layer-by-layer to fused-kernel server. This isolates which layer first diverges.</p>
+<p>A3. <strong>Audit <code class="docutils literal notranslate"><span class="pre">attention_mla*.py</span></code> for V4 misuse</strong>. Read <code class="docutils literal notranslate"><span class="pre">atom/plugin/attention_mla.py:*</span></code>, <code class="docutils literal notranslate"><span class="pre">attention_mla_sparse.py:*</span></code> and <code class="docutils literal notranslate"><span class="pre">atom/model_ops/attention_mla.py</span></code> (if exists), check whether V4 path goes through any MLA-style decompressed K/V split. Output: file:line diff list.</p>
+<p>A4. <strong>Audit FP8 KV scale handling per paper §2.3.4</strong>. Check <code class="docutils literal notranslate"><span class="pre">atom/quantize/quant_v4.py</span></code> and <code class="docutils literal notranslate"><span class="pre">dsv4_pool.py</span></code> for whether RoPE dims stay BF16 or get quantized along with the rest. Paper requirement is non-uniform.</p>
+</section>
+<section id="phase-b-fix-one-bug-per-commit">
+<h3>Phase B — Fix (one bug per commit)<a class="headerlink" href="#phase-b-fix-one-bug-per-commit" title="Link to this heading"></a></h3>
+<p>Each commit must have a silicon validation showing the gate it closes. No multi-bug commits like Sprint 4.</p>
+<p>B1. Apply A2’s localized fix → silicon validate gate #8 ≥ 0.95.
+B2. Apply A3’s fix (if MLA misuse confirmed) → silicon validate gate #6 ≥ 4/5.
+B3. Apply A4’s fix (if FP8 mis-quant confirmed) → silicon validate gate #2 ≥ 0.85.</p>
+</section>
+<section id="phase-c-multi-request-validation">
+<h3>Phase C — Multi-request validation<a class="headerlink" href="#phase-c-multi-request-validation" title="Link to this heading"></a></h3>
+<p>C1. Silicon gate #3 (conc=4 smoke) with all phase-B fixes applied. If 4/4 → gate #4 (conc=8). If &lt;4/4 → bisect with binary-search prompt sets.
+C2. Silicon gate #5 (lm_eval conc=4). Pass → drop <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_UNSAFE_MULTIREQ_DEV</span></code> flag from <code class="docutils literal notranslate"><span class="pre">dsv4_guard.py</span></code>.</p>
+</section>
+<section id="phase-d-endurance-parity">
+<h3>Phase D — Endurance + parity<a class="headerlink" href="#phase-d-endurance-parity" title="Link to this heading"></a></h3>
+<p>D1. Gate #9 (1-hour stream).
+D2. Gate #7 (vs SGLang). May require pulling SGLang DSV4 instance or using their hosted endpoint.</p>
+</section>
+<section id="phase-e-cosmetic-pr">
+<h3>Phase E — Cosmetic + PR<a class="headerlink" href="#phase-e-cosmetic-pr" title="Link to this heading"></a></h3>
+<p>E1. Rename pass (CSA/HCA, <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_PAGED_PATH</span></code>).
+E2. Update <code class="docutils literal notranslate"><span class="pre">recipes/DeepSeek-V4-Pro.md</span></code> to reflect actual production config (drop or keep <code class="docutils literal notranslate"><span class="pre">ATOM_USE_TRITON_MOE=1</span></code> based on whether B-phase fixes the CK/FlyDSL path).
+E3. Open PR #59 successor or merge into existing #59.</p>
+</section>
+</section>
+<section id="out-of-scope-for-sprint-6-defer">
+<h2>Out of scope for Sprint 6 (defer)<a class="headerlink" href="#out-of-scope-for-sprint-6-defer" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Closing the remaining 36pp gap to SGLang B300 (gate #2 = 0.85 vs SGLang 0.96 still leaves 11pp). Acceptable for “full functional support” claim — perf parity is Sprint 7.</p></li>
+<li><p>Speculative decoding / MTP integration. Paper says MTP block exists; ATOM’s <code class="docutils literal notranslate"><span class="pre">n_mtp_layers=1</span></code> reads it but <code class="docutils literal notranslate"><span class="pre">--method</span> <span class="pre">mtp</span></code> integration with the W4 path is untested. Keep behind a separate flag.</p></li>
+<li><p>Long-context (&gt;4K) silicon validation. All Sprint 5/6 testing was max-model-len=4096. Paper claims million-token; that’s a separate validation campaign.</p></li>
+</ul>
+</section>
+<section id="what-i-m-not-going-to-do-without-explicit-user-approval">
+<h2>What I’m NOT going to do without explicit user approval<a class="headerlink" href="#what-i-m-not-going-to-do-without-explicit-user-approval" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Rename anything in user-visible config / env vars (P2 cosmetic only at the end).</p></li>
+<li><p>Drop <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_UNSAFE_MULTIREQ_DEV</span></code> flag until gate #5 passes.</p></li>
+<li><p>Merge to main / mark PR #59 ready-for-review until all P0 gates close.</p></li>
+<li><p>Touch <code class="docutils literal notranslate"><span class="pre">aiter_lingpeng/</span></code> (CK/FlyDSL kernels) — that’s AITER team scope and a separate PR.</p></li>
+</ul>
+</section>
+<section id="estimated-cost">
+<h2>Estimated cost<a class="headerlink" href="#estimated-cost" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Phase A: 4-6 silicon hours (3 diagnostics × ~1.5h each including server boot/JIT)</p></li>
+<li><p>Phase B: variable — depends on what A finds. If MLA misuse: 4h. If FP8 quant: 2h. If layer-specific kernel bug: 8-16h.</p></li>
+<li><p>Phase C: 3-4 silicon hours</p></li>
+<li><p>Phase D: 6 hours (1h endurance + 5h SGLang parity setup)</p></li>
+<li><p>Phase E: 1 hour</p></li>
+<li><p><strong>Total</strong>: 18-32 silicon hours, ~2-4 calendar days with parallel agent dispatch.</p></li>
+</ul>
+</section>
+<section id="plan-revision-log">
+<h2>Plan-revision log<a class="headerlink" href="#plan-revision-log" title="Link to this heading"></a></h2>
+<section id="v1-2026-04-27-this-draft">
+<h3>v1 — 2026-04-27 (this draft)<a class="headerlink" href="#v1-2026-04-27-this-draft" title="Link to this heading"></a></h3>
+<p>Initial plan based on:</p>
+<ul class="simple">
+<li><p>4 sub-agent reports completed 2026-04-27 (paper, SGLang, vLLM, ATOM audit)</p></li>
+<li><p>Silicon evidence: Sprint 4 (multi-conc CK 1/4 fluent), Sprint 5e (Triton conc=1 5-shot 0.60), Sprint 5f-on-the-fly (Triton conc=1 0-shot 0/4)</p></li>
+<li><p>Confirmed: ATOM’s per-ratio slab design IS paper-faithful (not a divergence to fix). The bugs are in the implementation details (MoE backend, possibly MLA reuse, possibly FP8 quant non-uniformity).</p></li>
+</ul>
+<p>Submitted to user for review. Will not start phase A diagnostics until user signs off on this plan or asks for revisions.</p>
+</section>
+</section>
+<section id="id1">
+<h2>Plan-revision log<a class="headerlink" href="#id1" title="Link to this heading"></a></h2>
+<section id="v2-2026-04-27-post-phase-a-audit">
+<h3>v2 — 2026-04-27 (post Phase A audit)<a class="headerlink" href="#v2-2026-04-27-post-phase-a-audit" title="Link to this heading"></a></h3>
+<p>Phase A audit results landed:</p>
+<ul class="simple">
+<li><p>A0 paper truth: ATOM’s per-ratio slab design is paper-faithful (paper §3.6.1 two-pool). NO architecture change needed. Naming (CSA/HCA vs c4/c128) is cosmetic-only.</p></li>
+<li><p>A3 MLA reuse audit: NEGATIVE. V4 uses own <code class="docutils literal notranslate"><span class="pre">DeepseekV4Attention</span></code>, never enters MLAAttention. Optional guard in MLAAttention.<strong>init</strong> recommended for future-proofing only.</p></li>
+<li><p><strong>A4 KV quantization audit: TWO CONFIRMED BUGS</strong> in <code class="docutils literal notranslate"><span class="pre">dsv4_pool.py</span></code> matching paper §2.3.4 violations.</p></li>
+</ul>
+<p>Plan v2 changes:</p>
+<ul class="simple">
+<li><p>Add <strong>Phase B0</strong> (highest priority code change) to fix A4.1 (main KV uniform dtype) + A4.2 (Indexer non-FP4).</p></li>
+<li><p>B0a (Indexer FP8 storage): <strong>LANDED commit <code class="docutils literal notranslate"><span class="pre">a8e3a02</span></code></strong> — 16 LOC, opt-in via <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_INDEXER_FP8=1</span></code>. 8 new + 23 legacy unit tests pass. No model code change.</p></li>
+<li><p>B0b (Main KV nope/rope split): <strong>DESIGNED, DEFERRED</strong>. ~200 LOC across 6 sub-commits (pool dual-slab + write helper + W4 path migration + legacy migration + wiring + tests). Per plan rule “each commit silicon-validated”, we wait for B0a silicon validation before launching B0b.</p></li>
+<li><p>A1 silicon battery + A2 torch-ref deferred until user’s v9a completes (silicon currently busy).</p></li>
+</ul>
+</section>
+<section id="b0b-deferred-design-summary-full-in-plan-agent-report">
+<h3>B0b deferred-design summary (full in Plan agent report)<a class="headerlink" href="#b0b-deferred-design-summary-full-in-plan-agent-report" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Sub-commit</p></th>
+<th class="head"><p>Files</p></th>
+<th class="head"><p>LOC</p></th>
+<th class="head"><p>Tests after</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>B0b.1 Pool config + dual-slab alloc</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dsv4_pool.py:127,</span> <span class="pre">263-322,</span> <span class="pre">680,</span> <span class="pre">710</span></code></p></td>
+<td><p>~70</p></td>
+<td><p>23 legacy + 1 new pass</p></td>
+</tr>
+<tr class="row-odd"><td><p>B0b.2 Pool write helper <code class="docutils literal notranslate"><span class="pre">write_main_kv</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dsv4_pool.py</span></code> (new method)</p></td>
+<td><p>~35</p></td>
+<td><p>+ roundtrip test</p></td>
+</tr>
+<tr class="row-even"><td><p>B0b.3 Model W4 write site migration</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">deepseek_v4.py:1932-1966,</span> <span class="pre">2027</span></code></p></td>
+<td><p>~25</p></td>
+<td><p>+ W4 path tests</p></td>
+</tr>
+<tr class="row-odd"><td><p>B0b.4 Legacy path migration</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">deepseek_v4.py:1760-1778</span></code></p></td>
+<td><p>~30</p></td>
+<td><p>+ W43_redo tests</p></td>
+</tr>
+<tr class="row-even"><td><p>B0b.5 Env var + wiring</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">envs.py</span></code> + <code class="docutils literal notranslate"><span class="pre">model_runner.py</span></code></p></td>
+<td><p>~12</p></td>
+<td><p>+ envs test</p></td>
+</tr>
+<tr class="row-odd"><td><p>B0b.6 Test suite</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">tests/test_dsv4_pool_main_kv_split.py</span></code> (new)</p></td>
+<td><p>~180</p></td>
+<td><p>41 total pool tests</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>B0b GO/NO-GO criterion</strong> (silicon-driven):</p>
+<ul class="simple">
+<li><p>gsm8k 5-shot limit=20 with B0a only ≥ 0.85 → REJECT (B0a sufficient)</p></li>
+<li><p>gsm8k 5-shot limit=20 with B0a only 0.65-0.84 → GO (need both halves of A4)</p></li>
+<li><p>gsm8k 5-shot limit=20 with B0a only ~0.49 (no improvement) → DEFER (root cause elsewhere; Phase C / D)</p></li>
+</ul>
+</section>
+<section id="pre-b0b-silicon-validation-gate-b0d-pending">
+<h3>Pre-B0b silicon validation gate (B0d) — pending<a class="headerlink" href="#pre-b0b-silicon-validation-gate-b0d-pending" title="Link to this heading"></a></h3>
+<p>When user’s v9a server frees silicon, run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">ATOM_USE_TRITON_MOE</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">ATOM_DSV4_USE_W4_PATH</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">USE_W4_PATH</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="nv">ATOM_DSV4_INDEXER_FP8</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>python<span class="w"> </span>-m<span class="w"> </span>atom.entrypoints.openai_server<span class="w"> </span>...
+<span class="c1"># then lm_eval gsm8k limit=20 num_fewshot=5 max_gen_toks=1024</span>
+<span class="c1"># also: 5-question 0-shot battery (test_dsv4_pool_battery.sh — pending)</span>
+</pre></div>
+</div>
+<p>Compare to v8 baseline (Triton without indexer FP8): flexible 0.60 / strict 0.60.</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, AMD.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -2,7 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement task-by-task. Steps use checkbox (`- [ ]`) for tracking.
 
-**Goal:** Restore W4.5 silicon output coherence (currently gibberish in both W4 and baseline `flag=0`) by routing DSV4's MoE through the FlyDSL **blockscale** kernel (`per_1x128`, FP8/FP8) instead of the currently-misaligned CK MoE backend. Closes the accuracy half of issue sunway513/atom#37.
+## Revision log
+
+- **v1 (initial)** — assumed DSV4 dispatches FP8/FP8 per_1x128 (from `config.json` `weight_block_size:[128,128]`); plan to port FlyDSL `moe_blockscale_2stage` kernel into aiter.
+- **v2 (review fixes)** — addressed 4 review findings: (P1) Apache-2.0 SPDX header on ported file, (P1) substring `_blockscale_` (not `startswith`) in dispatcher, (P1) per-row CSV resolution test, (P2) FlyDSL version preflight.
+- **v3 (FP4 pivot, 2026-04-26 W4.5)** — silicon trace with `AITER_FMOE_DEBUG_LOOKUP=1` revealed actual lookup key is **FP4/FP4 per_1x32**, NOT FP8/per_1x128. ATOM's quant_v4 layer rewrites the dispatch dtype before reaching aiter. **Fix path collapses to a 16-row CSV** (`dsv4_fp4_tuned_fmoe.csv`) reusing existing FlyDSL FP4 kernels (`flydsl_moe1_afp4_wfp4_bf16_*`) — the blockscale port (Tasks 1-6.5) remains in-tree as future-proofing if DSV4 ever switches to per_1x128. Tasks 7-10 retargeted to FP4 path.
+
+**Goal:** Restore W4.5 silicon output coherence (currently gibberish in both W4 and baseline `flag=0`) by routing DSV4's MoE through FlyDSL kernels (FP4/per_1x32 in v3, FP8/per_1x128 blockscale in v1-v2) instead of the unmatched CK MoE fallback. Closes the accuracy half of issue sunway513/atom#37.
 
 **Architecture:** Single workstream spanning three repos owned by the same team:
 1. **FlyDSL upstream** (`ROCm/FlyDSL`) — already has `kernels/moe_blockscale_2stage.py` (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128, FP8-only, g1u1) + tested via `tests/kernels/test_moe_blockscale.py`. Source of truth.

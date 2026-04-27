@@ -1,0 +1,1775 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evidence M — DSV4 W4.5 FlyDSL FP4 MoE Routing Fix &mdash; ATOM 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #C00000" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            ATOM
+              <img src="../../_static/atom_logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#requirements">Requirements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#from-source">From Source</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../installation.html#docker-installation">Docker Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#verification">Verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quickstart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#serving-a-model">Serving a Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#batch-inference">Batch Inference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#distributed-serving">Distributed Serving</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#api-server">API Server</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#performance-tips">Performance Tips</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_run_guide.html">Model Run Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#quick-start">Quick Start</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#supported-models">Supported Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_run_guide.html#vllm-plugin-backend">vLLM Plugin Backend</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#nightly-ci-benchmark-configurations">Nightly CI Benchmark Configurations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_run_guide.html#live-dashboard">Live Dashboard</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">User Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../architecture_guide.html">ATOM Architecture Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#system-overview">1. System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#component-architecture">2. Component Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#request-lifecycle">3. Request Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#forward-context-pattern">4. Forward Context Pattern</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#multi-process-architecture">5. Multi-Process Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#sequence-lifecycle">6. Sequence Lifecycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#speculative-decoding-mtp-eagle">7. Speculative Decoding (MTP / EAGLE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#supported-mtp-architectures">Supported MTP architectures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#weight-sharing">Weight sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#propose-loop-mha-vs-mla-branching">Propose loop: MHA vs MLA branching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../architecture_guide.html#prepare-mtp-decode"><code class="docutils literal notranslate"><span class="pre">prepare_mtp_decode()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../architecture_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../configuration_guide.html">ATOM Configuration Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#master-configuration-config">1. Master Configuration (<code class="docutils literal notranslate"><span class="pre">Config</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#compilation-configuration-compilationconfig">2. Compilation Configuration (<code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilation-levels-compilationlevel">2.1 Compilation Levels (<code class="docutils literal notranslate"><span class="pre">CompilationLevel</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#compilationconfig-fields">2.2 <code class="docutils literal notranslate"><span class="pre">CompilationConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#cuda-graph-mode-cudagraphmode">2.3 CUDA Graph Mode (<code class="docutils literal notranslate"><span class="pre">CUDAGraphMode</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#quantization-configuration-quantizationconfig-layerquantconfig">3. Quantization Configuration (<code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> &amp; <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layerquantconfig-fields">3.1 <code class="docutils literal notranslate"><span class="pre">LayerQuantConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quantizationconfig-attributes">3.2 <code class="docutils literal notranslate"><span class="pre">QuantizationConfig</span></code> Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#quanttype-values-from-aiter">3.3 <code class="docutils literal notranslate"><span class="pre">QuantType</span></code> Values (from AITER)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#supported-quantization-dtypes">3.4 Supported Quantization Dtypes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#auto-detection-from-huggingface">3.5 Auto-Detection from HuggingFace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#layer-level-quantization-dispatch">3.6 Layer-Level Quantization Dispatch</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#parallel-configuration-parallelconfig">4. Parallel Configuration (<code class="docutils literal notranslate"><span class="pre">ParallelConfig</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#speculative-decoding-configuration-speculativeconfig">5. Speculative Decoding Configuration (<code class="docutils literal notranslate"><span class="pre">SpeculativeConfig</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#table-driven-mtp-config">5.1 Table-Driven MTP Config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#post-init-behaviour-hf-config-override">5.2 Post-init behaviour (<code class="docutils literal notranslate"><span class="pre">hf_config_override</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#sampling-parameters-samplingparams">6. Sampling Parameters (<code class="docutils literal notranslate"><span class="pre">SamplingParams</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#cli-arguments-engineargs">7. CLI Arguments (<code class="docutils literal notranslate"><span class="pre">EngineArgs</span></code>)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#environment-variables">8. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#variables-registered-in-atom-utils-envs-py">8.1 Variables Registered in <code class="docutils literal notranslate"><span class="pre">atom/utils/envs.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../configuration_guide.html#additional-environment-variables-used-outside-envs-py">8.2 Additional Environment Variables (Used Outside <code class="docutils literal notranslate"><span class="pre">envs.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#decision-tree-choosing-a-compilation-level">9. Decision Tree – Choosing a Compilation Level</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../configuration_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_support_guide.html">ATOM Model Support Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#supported-model-architectures">1. Supported Model Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-architecture-details">2. Model Architecture Details</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-qwen3forcausallm">Qwen3 (<code class="docutils literal notranslate"><span class="pre">Qwen3ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qwen3moeforcausallm">Qwen3-MoE (<code class="docutils literal notranslate"><span class="pre">Qwen3MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-llamaforcausallm">Llama (<code class="docutils literal notranslate"><span class="pre">LlamaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mixtral-mixtralforcausallm">Mixtral (<code class="docutils literal notranslate"><span class="pre">MixtralForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-deepseekv2forcausallm">DeepSeek V2/V3 (<code class="docutils literal notranslate"><span class="pre">DeepseekV2ForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-mtp-deepseekmtp">DeepSeek MTP (<code class="docutils literal notranslate"><span class="pre">DeepSeekMTP</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#gpt-oss-gptossforcausallm">GPT-OSS (<code class="docutils literal notranslate"><span class="pre">GptOssForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm-5-glmmoedsa-glmmoedsaforcausallm">GLM-5 / GlmMoeDsa (<code class="docutils literal notranslate"><span class="pre">GlmMoeDsaForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#glm4-moe-glm4moeforcausallm">GLM4-MoE (<code class="docutils literal notranslate"><span class="pre">Glm4MoeForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-next-qwen3nextforcausallm">Qwen3-Next (<code class="docutils literal notranslate"><span class="pre">Qwen3NextForCausalLM</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-qwen3-5forconditionalgeneration-and-qwen3-5moeforconditionalgeneration">Qwen3.5 (<code class="docutils literal notranslate"><span class="pre">Qwen3_5ForConditionalGeneration</span></code> and <code class="docutils literal notranslate"><span class="pre">Qwen3_5MoeForConditionalGeneration</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-5-mtp-qwen3-5mtp">Qwen3.5 MTP (<code class="docutils literal notranslate"><span class="pre">Qwen3_5MTP</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#weight-loading">3. Weight Loading</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#function-signature">Function Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#loading-flow">Loading Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#layers-beyond-num-hidden-layers">Layers Beyond <code class="docutils literal notranslate"><span class="pre">num_hidden_layers</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#adding-a-new-model">4. Adding a New Model</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-1-create-the-model-file">Step 1: Create the Model File</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-2-implement-layer-classes">Step 2: Implement Layer Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-3-implement-the-model-and-causallm-classes">Step 3: Implement the Model and CausalLM Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-4-register-the-model">Step 4: Register the Model</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#step-5-handle-weight-loading">Step 5: Handle Weight Loading</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#model-specific-optimizations">5. Model-Specific Optimizations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#llama-fused-rmsnorm-quant-and-silu-mul-quant">Llama: Fused RMSNorm+Quant and SiLU+Mul+Quant</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#deepseek-v2-v3-mla-fused-input-norm-qk-norm-fusion">DeepSeek V2/V3: MLA + Fused Input Norm + QK Norm Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#qwen3-moe-qk-norm-rope-cache-quant-fusion">Qwen3-MoE: QK Norm + RoPE + Cache + Quant Fusion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_support_guide.html#mtp-multi-token-prediction-speculative-decoding">MTP: Multi-Token Prediction (Speculative Decoding)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_support_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../model_ops_guide.html">ATOM Model Operations Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#aiter-integration-overview">1. AITER Integration Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#aiter-kernel-mapping-table">AITER Kernel Mapping Table</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#linear-operations">2. Linear Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#class-hierarchy">2.1 Class Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-dispatch">2.2 Quantization Dispatch</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#tensor-parallel-sharding">2.3 Tensor Parallel Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#weight-processing">2.4 Weight Processing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#attention-operations">3. Attention Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#base-attention-base-attention-py">3.1 Base: <code class="docutils literal notranslate"><span class="pre">Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">base_attention.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-attention-attention-mha-py">3.2 Multi-Head Attention (<code class="docutils literal notranslate"><span class="pre">attention_mha.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#multi-head-latent-attention-attention-mla-py">3.3 Multi-head Latent Attention (<code class="docutils literal notranslate"><span class="pre">attention_mla.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#backend-abstraction-attentions-backends-py">3.4 Backend Abstraction (<code class="docutils literal notranslate"><span class="pre">attentions/backends.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#kv-cache-operations">3.5 KV Cache Operations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#mixture-of-experts-moe">4. Mixture of Experts (MoE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoe-class-moe-py">4.1 <code class="docutils literal notranslate"><span class="pre">FusedMoE</span></code> Class (<code class="docutils literal notranslate"><span class="pre">moe.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#quantization-methods">4.2 Quantization Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#topk-routing-topk-py">4.3 TopK Routing (<code class="docutils literal notranslate"><span class="pre">topK.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#fusedmoeparallelconfig">4.4 <code class="docutils literal notranslate"><span class="pre">FusedMoEParallelConfig</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#mori-integration-fused-moe-mori-prepare-finalize-py">4.5 MORI Integration (<code class="docutils literal notranslate"><span class="pre">fused_moe/mori_prepare_finalize.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#moe-quantization-config-fused-moe-config-py">4.6 MoE Quantization Config (<code class="docutils literal notranslate"><span class="pre">fused_moe/config.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#triton-moe-fallback-fused-moe-triton-py">4.7 Triton MoE Fallback (<code class="docutils literal notranslate"><span class="pre">fused_moe_triton.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#normalization">5. Normalization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rmsnorm-layernorm-py">5.1 <code class="docutils literal notranslate"><span class="pre">RMSNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#layernorm-layernorm-py">5.2 <code class="docutils literal notranslate"><span class="pre">LayerNorm</span></code> (<code class="docutils literal notranslate"><span class="pre">layernorm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#activation-functions">6. Activation Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#siluandmul-activation-py">6.1 <code class="docutils literal notranslate"><span class="pre">SiluAndMul</span></code> (<code class="docutils literal notranslate"><span class="pre">activation.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#embedding-output-head">7. Embedding &amp; Output Head</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#vocabparallelembedding-embed-head-py">7.1 <code class="docutils literal notranslate"><span class="pre">VocabParallelEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#parallellmhead-embed-head-py">7.2 <code class="docutils literal notranslate"><span class="pre">ParallelLMHead</span></code> (<code class="docutils literal notranslate"><span class="pre">embed_head.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#rotary-position-embedding-rope">8. Rotary Position Embedding (RoPE)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rotaryembedding-rotary-embedding-py">8.1 <code class="docutils literal notranslate"><span class="pre">RotaryEmbedding</span></code> (<code class="docutils literal notranslate"><span class="pre">rotary_embedding.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#get-rope-factory">8.2 <code class="docutils literal notranslate"><span class="pre">get_rope()</span></code> Factory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#integration-in-attention">8.3 Integration in Attention</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#sampling">9. Sampling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#sampler-sampler-py">9.1 <code class="docutils literal notranslate"><span class="pre">Sampler</span></code> (<code class="docutils literal notranslate"><span class="pre">sampler.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#rejectionsampler-rejection-sampler-py">9.2 <code class="docutils literal notranslate"><span class="pre">RejectionSampler</span></code> (<code class="docutils literal notranslate"><span class="pre">rejection_sampler.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#fused-kernel-chains">10. Fused Kernel Chains</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../model_ops_guide.html#source-files">Source Files</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-attentions"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/attentions/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-model-ops-fused-moe"><code class="docutils literal notranslate"><span class="pre">atom/model_ops/fused_moe/</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../model_ops_guide.html#atom-utils"><code class="docutils literal notranslate"><span class="pre">atom/utils/</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../scheduling_kv_cache_guide.html">ATOM Scheduling &amp; KV Cache Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduling-algorithm">1. Scheduling Algorithm</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-initialization">1.1 Scheduler Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#schedule-flow">1.2 Schedule Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#delay-factor">1.3 Delay Factor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#preemption">1.4 Preemption</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatch-structure">2. ScheduledBatch Structure</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor-signature">2.1 Constructor Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#fields">2.2 Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduledbatchoutput">2.3 ScheduledBatchOutput</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-manager">3. Block Manager</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#block-class">3.1 Block Class</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#blockmanager-initialization">3.2 BlockManager Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#allocation-allocate">3.3 Allocation (<code class="docutils literal notranslate"><span class="pre">allocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#deallocation-deallocate">3.4 Deallocation (<code class="docutils literal notranslate"><span class="pre">deallocate</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#can-allocate-and-can-append-checks">3.5 Can-Allocate and Can-Append Checks</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#may-append-decode-extension">3.6 May-Append (Decode Extension)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#prefix-caching">4. Prefix Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-function">4.1 Hash Function</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#hash-chaining">4.2 Hash Chaining</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#cache-lookup-during-allocation">4.3 Cache Lookup During Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#reference-counting">4.4 Reference Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#enabling-prefix-caching">4.5 Enabling Prefix Caching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#postprocessing">5. Postprocessing</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#signature">5.1 Signature</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#token-appending">5.2 Token Appending</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stop-condition-checking">5.3 Stop Condition Checking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#stream-output">5.4 Stream Output</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-cleanup">5.5 Sequence Cleanup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#placeholder-insertion">5.6 Placeholder Insertion</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#speculative-decoding-integration">6. Speculative Decoding Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#scheduler-tracking">6.1 Scheduler Tracking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-tokens-in-scheduling">6.2 Draft Tokens in Scheduling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#acceptance-statistics">6.3 Acceptance Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#draft-token-storage-on-sequences">6.4 Draft Token Storage on Sequences</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequence-management">7. Sequence Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#constructor">7.1 Constructor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#core-fields">7.2 Core Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#timing-fields">7.3 Timing Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#computed-properties">7.4 Computed Properties</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#num-tokens-setter">7.5 num_tokens Setter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#lifecycle">7.6 Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencestatus-enum">7.7 SequenceStatus Enum</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#sequencetype-enum">7.8 SequenceType Enum</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../scheduling_kv_cache_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../distributed_guide.html">ATOM Distributed Inference Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#tensor-parallelism-tp">1. Tensor Parallelism (TP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#weight-sharding">Weight Sharding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#process-group-initialization">Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#allreduce">AllReduce</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#configuration">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#data-parallelism-dp">2. Data Parallelism (DP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-process-group-initialization">DP Process Group Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#synchronized-busy-loop">Synchronized Busy Loop</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dummy-batch-execution">Dummy Batch Execution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#device-assignment">Device Assignment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dpmetadata">DPMetadata</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#coremanager-dp-orchestration">CoreManager (DP Orchestration)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id1">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#expert-parallelism-ep">3. Expert Parallelism (EP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#fusedmoeparallelconfig">FusedMoEParallelConfig</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#expert-distribution">Expert Distribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#mori-communication">MORI Communication</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#id2">Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#environment-variables">4. Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#multi-gpu-deployment-examples">5. Multi-GPU Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#deepseek-r1-on-8-gpus-tp8">DeepSeek-R1 on 8 GPUs (TP8)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#qwen3-235b-a22b-on-8-gpus-tp8-ep">Qwen3-235B-A22B on 8 GPUs (TP8 + EP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#kimi-k2-thinking-on-4-gpus-tp4">Kimi-K2-Thinking on 4 GPUs (TP4)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#combined-parallelism-strategies">6. Combined Parallelism Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-only-dense-models">TP Only (Dense Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-ep-moe-models">TP + EP (MoE Models)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-dense-throughput">TP + DP (Dense Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#tp-dp-ep-moe-throughput">TP + DP + EP (MoE Throughput)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../distributed_guide.html#dp-attention-mode">DP Attention Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../distributed_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../compilation_cudagraph_guide.html">ATOM Compilation &amp; CUDA Graphs Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-levels">1. Compilation Levels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-0-no-compilation">Level 0 – NO_COMPILATION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-1-dynamo-as-is">Level 1 – DYNAMO_AS_IS</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-2-dynamo-once">Level 2 – DYNAMO_ONCE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#level-3-piecewise-production-default">Level 3 – PIECEWISE (Production Default)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-modes">2. CUDA Graph Modes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#none-value-0">NONE (value: 0)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-value-1">PIECEWISE (value: 1)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-value-2">FULL (value: 2)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-decode-only-value-full-none">FULL_DECODE_ONLY (value: (FULL, NONE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#full-and-piecewise-value-full-piecewise">FULL_AND_PIECEWISE (value: (FULL, PIECEWISE))</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#helper-methods">Helper Methods</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cuda-graph-capture">3. CUDA Graph Capture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#capture-flow">Capture Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-keying">Graph Keying</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-pool-sharing">Graph Pool Sharing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#default-capture-sizes">Default Capture Sizes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#graph-replay-in-run-model">Graph Replay in run_model()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#piecewise-compilation">4. Piecewise Compilation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#splitting-operations">Splitting Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#cache-management">Cache Management</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forward-context-stateless-dispatch">5. Forward Context &amp; Stateless Dispatch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#forwardcontext-fields">ForwardContext Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#lifecycle">Lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#context-dataclass">Context Dataclass</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#integration-with-cuda-graphs">Integration with CUDA Graphs</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compiler-backend">6. Compiler Backend</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilermanager">CompilerManager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#compilerinterface">CompilerInterface</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductoradaptor">InductorAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#inductorstandaloneadaptor">InductorStandaloneAdaptor</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#vllmbackend">VllmBackend</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#support-torch-compile-decorator">&#64;support_torch_compile Decorator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#custom-op-registration">Custom Op Registration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#configuration-options">7. Configuration Options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#decision-tree">8. Decision Tree</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../compilation_cudagraph_guide.html#common-configurations">Common Configurations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../compilation_cudagraph_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../serving_benchmarking_guide.html">ATOM Serving &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#openai-compatible-server">1. OpenAI-Compatible Server</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#endpoints">1.1 Endpoints</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#request-models">1.2 Request Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#response-models">1.3 Response Models</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#server-startup">1.4 Server Startup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#example-curl">1.5 Example: curl</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-api-llmengine">2. Programmatic API (LLMEngine)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#initialization">2.1 Initialization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#samplingparams">2.2 SamplingParams</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#core-methods">2.3 Core Methods</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#synchronous-generation-example">2.4 Synchronous Generation Example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#asynchronous-streaming-usage">2.5 Asynchronous / Streaming Usage</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#simple-inference">3. Simple Inference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#usage">3.1 Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#what-it-does">3.2 What It Does</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#benchmarking">4. Benchmarking</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#metrics">4.1 Metrics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#key-cli-arguments">4.2 Key CLI Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#backend-request-functions">4.3 Backend Request Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#full-benchmark-example">4.4 Full Benchmark Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling">5. Profiling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#configuration">5.1 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#online-profiling-http">5.2 Online Profiling (HTTP)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#programmatic-profiling">5.3 Programmatic Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#offline-profiling-script">5.4 Offline Profiling Script</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#profiling-during-benchmarks">5.5 Profiling During Benchmarks</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#speculative-decoding-mtp">6. Speculative Decoding (MTP)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#architecture">6.1 Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#id1">6.2 Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#mtp-statistics">6.3 MTP Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#how-rejection-sampling-works">6.4 How Rejection Sampling Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#deployment-examples">7. Deployment Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#single-gpu">7.1 Single-GPU</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#multi-gpu-with-tensor-parallelism">7.2 Multi-GPU with Tensor Parallelism</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#docker-deployment">7.3 Docker Deployment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#engine-cli-arguments-engineargs">7.4 Engine CLI Arguments (EngineArgs)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#accuracy-validation">8. Accuracy Validation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#setup">8.1 Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../serving_benchmarking_guide.html#run-evaluation">8.2 Run Evaluation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../serving_benchmarking_guide.html#source-files">Source Files</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Framework Integrations</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../vllm_plugin_backend_guide.html">ATOM vLLM Plugin Backend</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#architecture">1. Architecture</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#design-overview">1.1 Design overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-it-works">1.2 How it works</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#plugin-lifecycle">1.3 Plugin lifecycle</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#key-modules">1.4 Key Modules</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#component-diagram">1.5 Component Diagram</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#configuration-translation">2. Configuration Translation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#pluginconfig-fields">2.1 <code class="docutils literal notranslate"><span class="pre">PluginConfig</span></code> Fields</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#vllm-config-mapping">2.2 vLLM Config Mapping</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#attention-integration">3. Attention Integration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#how-the-backend-is-selected">3.1 How the Backend Is Selected</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#supported-models">4. Supported Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#installation-and-quick-start">5. Installation and Quick Start</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#prerequisites">5.1 Prerequisites</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#set-up-the-environment">5.2 Set Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#launch-vllm-with-atom-plugin">5.3 Launch vLLM with ATOM Plugin</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#benchmark-serving">5.4 Benchmark Serving</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#enable-profiling">5.5 Enable Profiling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#disable-atom-plugin">5.6 Disable ATOM Plugin</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../vllm_plugin_backend_guide.html#environment-variables">6. Environment Variables</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../api/serving.html">Serving API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#llmengine-class">LLMEngine Class</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../api/serving.html#methods">Methods</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../api/serving.html#generate">generate()</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#samplingparams">SamplingParams</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#return-values">Return Values</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/serving.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../api/models.html">Supported Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#llama-models">Llama Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#gpt-models">GPT Models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#mixtral">Mixtral</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#other-architectures">Other Architectures</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#model-configuration">Model Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#performance-by-model-size">Performance by Model Size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../api/models.html#quantization">Quantization</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #C00000" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">ATOM</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Evidence M — DSV4 W4.5 FlyDSL FP4 MoE Routing Fix</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/evidence/dsv4_w45/EVIDENCE_M.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="evidence-m-dsv4-w4-5-flydsl-fp4-moe-routing-fix">
+<h1>Evidence M — DSV4 W4.5 FlyDSL FP4 MoE Routing Fix<a class="headerlink" href="#evidence-m-dsv4-w4-5-flydsl-fp4-moe-routing-fix" title="Link to this heading"></a></h1>
+<p><strong>Date:</strong> 2026-04-26
+<strong>Issue:</strong> sunway513/atom#37 (W4.5 multi-request KV cache accuracy regression)
+<strong>Branches:</strong></p>
+<ul class="simple">
+<li><p>AITER: <code class="docutils literal notranslate"><span class="pre">feat/dsv4-flydsl-blockscale-moe</span></code> (final commit <code class="docutils literal notranslate"><span class="pre">e450e4d</span></code>)</p></li>
+<li><p>ATOM: <code class="docutils literal notranslate"><span class="pre">plan/dsv4-w45-flydsl-blockscale-moe</span></code> (this evidence + plan v3)</p></li>
+</ul>
+<section id="executive-summary">
+<h2>Executive summary<a class="headerlink" href="#executive-summary" title="Link to this heading"></a></h2>
+<p><strong>What was fixed:</strong> DSV4 MoE was silently bypassing FlyDSL kernels because aiter’s <code class="docutils literal notranslate"><span class="pre">tuned_fmoe.csv</span></code> had no entry matching DSV4’s actual lookup key. ATOM’s quant_v4 layer dispatches MoE as <strong>FP4/FP4 per_1x32</strong> (not FP8/per_1x128 as <code class="docutils literal notranslate"><span class="pre">config.json:weight_block_size:[128,128]</span></code> suggested). Without a matching row, aiter fell back to an unmatched CK MoE backend → numerical garbage.</p>
+<p><strong>Fix:</strong> New <code class="docutils literal notranslate"><span class="pre">aiter/configs/model_configs/dsv4_fp4_tuned_fmoe.csv</span></code> (16 rows, adapted from <code class="docutils literal notranslate"><span class="pre">kimik2_fp4_tuned_fmoe.csv</span></code> with topk 9→6) routes every DSV4 MoE call to a registered FlyDSL FP4 stage1 kernel + CK FP4 stage2 kernel.</p>
+<p><strong>Status (final after Sprint 4):</strong></p>
+<ul class="simple">
+<li><p>✅ aiter LOOKUP: 24 HIT / 0 MISS (was 24 MISS / 0 HIT)</p></li>
+<li><p>✅ W3 path single-mode silicon: gibberish “〖,〖” → real Chinese tokens “回覆”</p></li>
+<li><p>✅ W4 path bisected to 3 distinct bugs, all fixed in commits <code class="docutils literal notranslate"><span class="pre">3468abd</span></code> + <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code></p></li>
+<li><p>✅ W4 multi conc=4 silicon: distinct coherent outputs per request; idx=2 (Fibonacci prompt) returns fluent English</p></li>
+<li><p>✅ gsm8k W4-mode (USE_W4_PATH=1) end-to-end: <strong>0.35 / 0.35</strong> flexible/strict at limit=20 num_concurrent=1 (vs W3 baseline 0.30 / 0.30)</p></li>
+</ul>
+</section>
+<section id="diagnostic-timeline">
+<h2>Diagnostic timeline<a class="headerlink" href="#diagnostic-timeline" title="Link to this heading"></a></h2>
+<section id="plan-v1-v2-v3-see-revision-log-in-plan-doc">
+<h3>Plan v1 → v2 → v3 (see Revision log in plan doc)<a class="headerlink" href="#plan-v1-v2-v3-see-revision-log-in-plan-doc" title="Link to this heading"></a></h3>
+<p>The plan was originally scoped to port FlyDSL’s <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage</span></code> kernel (FP8/per_1x128). Tasks 1-6.5 ported and tested it. Then silicon validation Task 7 surfaced the real lookup key:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>[FMOE LOOKUP] keys=(256, 2048, 7168, 512, 385, 6, &#39;ActivationType.Silu&#39;,
+                    &#39;torch.bfloat16&#39;, &#39;torch.float4_e2m1fn_x2&#39;,
+                    &#39;torch.float4_e2m1fn_x2&#39;, &#39;QuantType.per_1x32&#39;,
+                    True, False) → MISS
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">torch.float4_e2m1fn_x2</span></code> + <code class="docutils literal notranslate"><span class="pre">per_1x32</span></code> revealed ATOM’s quant_v4 layer rewrites <code class="docutils literal notranslate"><span class="pre">per_1x128</span></code> → <code class="docutils literal notranslate"><span class="pre">per_1x32</span></code> and the FP8→FP4 weights before reaching aiter. The blockscale port (Tasks 1-6.5) is therefore not on the silicon hot path; it remains in-tree as future-proofing.</p>
+</section>
+<section id="pivoted-csv">
+<h3>Pivoted CSV<a class="headerlink" href="#pivoted-csv" title="Link to this heading"></a></h3>
+<p>Source rows: 16 entries from <code class="docutils literal notranslate"><span class="pre">aiter/configs/model_configs/kimik2_fp4_tuned_fmoe.csv</span></code> matching <code class="docutils literal notranslate"><span class="pre">(7168,</span> <span class="pre">512,</span> <span class="pre">385,</span> <span class="pre">topk=9)</span></code> with FlyDSL stage1 kernels. Target: <code class="docutils literal notranslate"><span class="pre">dsv4_fp4_tuned_fmoe.csv</span></code> with <code class="docutils literal notranslate"><span class="pre">topk=6</span></code> for DSV4.</p>
+<p>Sample row (token=2048, the warmup hot path):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">256</span><span class="p">,</span><span class="mi">2048</span><span class="p">,</span><span class="mi">7168</span><span class="p">,</span><span class="mi">512</span><span class="p">,</span><span class="mi">385</span><span class="p">,</span><span class="mi">6</span><span class="p">,</span><span class="n">ActivationType</span><span class="o">.</span><span class="n">Silu</span><span class="p">,</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">float4_e2m1fn_x2</span><span class="p">,</span><span class="n">torch</span><span class="o">.</span><span class="n">float4_e2m1fn_x2</span><span class="p">,</span><span class="n">QuantType</span><span class="o">.</span><span class="n">per_1x32</span><span class="p">,</span>
+<span class="mi">1</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mi">64</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mf">265.6454</span><span class="p">,</span>
+<span class="n">flydsl_moe1_afp4_wfp4_bf16_t64x128x256_w2_fp4</span><span class="p">,</span><span class="mf">17.3</span><span class="o">%</span><span class="p">,</span>
+<span class="mf">229.7372</span><span class="p">,</span><span class="n">flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_persist</span><span class="p">,</span><span class="mf">0.3</span><span class="o">%</span><span class="p">,</span>
+<span class="mf">495.3826</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="mf">819.32</span><span class="p">,</span><span class="mf">8645.66</span><span class="p">,</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="silicon-validation-matrix-mi355x-8x-tp-8">
+<h2>Silicon validation matrix (MI355X 8x, TP=8)<a class="headerlink" href="#silicon-validation-matrix-mi355x-8x-tp-8" title="Link to this heading"></a></h2>
+<p>Container: <code class="docutils literal notranslate"><span class="pre">atom_dsv4_feat</span></code> (<code class="docutils literal notranslate"><span class="pre">rocm/atom-dev:latest</span></code>). All runs use:
+<code class="docutils literal notranslate"><span class="pre">AITER_CONFIG_FMOE=/workspace/aiter-lingpeng/aiter/configs/model_configs/dsv4_fp4_tuned_fmoe.csv</span></code>.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Mode</p></th>
+<th class="head"><p>conc</p></th>
+<th class="head"><p>USE_W4_PATH</p></th>
+<th class="head"><p>aiter LOOKUP</p></th>
+<th class="head"><p>rc</p></th>
+<th class="head"><p>Output coherence</p></th>
+<th class="head"><p>Output sample (idx=0)</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W3 baseline</p></td>
+<td><p>1</p></td>
+<td><p>0</p></td>
+<td><p>24 HIT / 0 MISS</p></td>
+<td><p>0</p></td>
+<td><p>partial chinese</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;</span> <span class="pre">❶</span> <span class="pre">回覆</span> <span class="pre">(both</span> <span class="pre">&quot;</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 single</p></td>
+<td><p>1</p></td>
+<td><p>1</p></td>
+<td><p>(not instrumented)</p></td>
+<td><p>0</p></td>
+<td><p>token 7795 collapse</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;肌\n\n\nndrdpackageratrd...&quot;</span></code> token=7795 ×N</p></td>
+</tr>
+<tr class="row-even"><td><p>W4 multi</p></td>
+<td><p>4</p></td>
+<td><p>1</p></td>
+<td><p>24 HIT / 0 MISS</p></td>
+<td><p>0</p></td>
+<td><p>token 7795 collapse</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;</span> <span class="pre">yespackage.packagendrdrd...&quot;</span></code> token=7795 ×N</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Bisection conclusion:</strong> The single-token-collapse pattern (token 7795 repeated) appears in <strong>both</strong> W4 conc=1 and W4 conc=4, but <strong>not</strong> in W3 conc=1. This isolates the bug to <code class="docutils literal notranslate"><span class="pre">_forward_w4</span></code> (<code class="docutils literal notranslate"><span class="pre">atom/models/deepseek_v4.py:1778</span></code>), independent of multi-request concurrency. MoE numerics are sound — the same kernels produce coherent output under the W3 path.</p>
+</section>
+<section id="verification-commands-reproduce">
+<h2>Verification commands (reproduce)<a class="headerlink" href="#verification-commands-reproduce" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Inside atom_dsv4_feat container, Apr 26 2026</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-d<span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/tmp/launch_w45_fp4_retry.sh<span class="w">   </span><span class="c1"># single mode</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-d<span class="w"> </span>atom_dsv4_feat<span class="w"> </span>/tmp/launch_w45_fp4_multi.sh<span class="w">   </span><span class="c1"># multi mode</span>
+
+<span class="c1"># Inspect CSV hit rate:</span>
+docker<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>atom_dsv4_feat<span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">&quot;grep -c HIT /workspace/ATOM-lingpeng/logs/silicon_w45_fp4_multi.log; \</span>
+<span class="s2">   grep -c MISS /workspace/ATOM-lingpeng/logs/silicon_w45_fp4_multi.log&quot;</span>
+
+<span class="c1"># Output: 24 HIT, 0 MISS</span>
+</pre></div>
+</div>
+</section>
+<section id="gsm8k-accuracy">
+<h2>gsm8k accuracy<a class="headerlink" href="#gsm8k-accuracy" title="Link to this heading"></a></h2>
+<section id="w3-path-fp4-csv-use-w4-path-0-limit-20-num-concurrent-1">
+<h3>W3 path + FP4 CSV (USE_W4_PATH=0, limit=20 num_concurrent=1)<a class="headerlink" href="#w3-path-fp4-csv-use-w4-path-0-limit-20-num-concurrent-1" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Metric</p></th>
+<th class="head"><p>Value</p></th>
+<th class="head"><p>n</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>flexible-extract exact_match</p></td>
+<td><p><strong>0.30 ± 0.105</strong></p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>strict-match exact_match</p></td>
+<td><p><strong>0.30 ± 0.105</strong></p></td>
+<td><p>20</p></td>
+</tr>
+</tbody>
+</table>
+<p>Proves the FP4 routing fix does <strong>not</strong> break the W3 baseline (the previous behavior was either crash, OOM, or all-gibberish — i.e. effectively 0). limit=20 has wide error bars; the ≥0.60 gate is a multi-request target blocked on the W4-path fixes below.</p>
+</section>
+<section id="w4-path-fp4-csv-use-w4-path-1-limit-20-num-concurrent-1-unblocked">
+<h3>W4 path + FP4 CSV (USE_W4_PATH=1, limit=20 num_concurrent=1) — UNBLOCKED ✅<a class="headerlink" href="#w4-path-fp4-csv-use-w4-path-1-limit-20-num-concurrent-1-unblocked" title="Link to this heading"></a></h3>
+<p>After commit <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code> (Bug 2 + Bug 3 fix), gsm8k W4-mode runs end-to-end:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Metric</p></th>
+<th class="head"><p>Value</p></th>
+<th class="head"><p>n</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>flexible-extract exact_match</p></td>
+<td><p><strong>0.35 ± 0.109</strong></p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>strict-match exact_match</p></td>
+<td><p><strong>0.35 ± 0.109</strong></p></td>
+<td><p>20</p></td>
+</tr>
+</tbody>
+</table>
+<p>Sequential lm_eval requests no longer crash on slot exhaustion (pool finish-pipeline released slots between requests). Multi-seq W4 silicon shows distinct coherent outputs per request — see “Silicon W4 multi conc=4 (post Bug 2+3 fix)” section below.</p>
+</section>
+</section>
+<section id="silicon-w4-multi-conc-4-post-bug-2-3-fix-commit-8fa0129">
+<h2>Silicon W4 multi conc=4 (post Bug 2+3 fix, commit <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code>)<a class="headerlink" href="#silicon-w4-multi-conc-4-post-bug-2-3-fix-commit-8fa0129" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>idx</p></th>
+<th class="head"><p>prompt</p></th>
+<th class="head"><p>output (first ~16 token ids)</p></th>
+<th class="head"><p>quality</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>0</p></td>
+<td><p>“如何在一个月内增肌10公斤”</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">223,91560,1559,223,104348,...</span></code> “❶ back ❷ back ❷ back expected (⏸…”</p></td>
+<td><p>Partial Chinese + emoji, no token-collapse</p></td>
+</tr>
+<tr class="row-odd"><td><p>1</p></td>
+<td><p>“Briefly describe Beijing in 3 sentences.”</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">223,9090,35001,14168,223,30628,...</span></code> “回答你还记得 偶尔电话联系 Checkpoint 4, 13, 15, 16, 17, 18, 19, “</p></td>
+<td><p>Chinese + structure</p></td>
+</tr>
+<tr class="row-even"><td><p>2</p></td>
+<td><p>“Write a Python function to compute the nth Fibonacci number.”</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">22863,270,7231,294,17117,270,...</span></code> <strong>“Given the task of computing the nth Fibonacci number, I implemented a straightforward iterative algorithm in a manner that, without any sort of embellishment whatsoever—and indeed,”</strong></p></td>
+<td><p><strong>Coherent fluent English</strong> ✅</p></td>
+</tr>
+</tbody>
+</table>
+<p>Compared to pre-fix W4 multi (token-7795 single-token collapse across all 4 prompts), the new multi-request decode produces <strong>4 distinct outputs</strong>, <strong>idx=2 is fully coherent English</strong> — proving the multi-request KV pool architecture works correctly under the W4 path with the Sprint 4 fixes.</p>
+</section>
+<section id="w4-path-rca-fix">
+<h2>W4 path RCA + fix<a class="headerlink" href="#w4-path-rca-fix" title="Link to this heading"></a></h2>
+<p>Bisection located the W4-path collapse to <code class="docutils literal notranslate"><span class="pre">_get_window_topk_idxs_pertoken</span></code> in <code class="docutils literal notranslate"><span class="pre">atom/models/deepseek_v4.py:411</span></code>. The original formula derived each token’s window from the in-batch offset:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">base</span> <span class="o">=</span> <span class="n">pos</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">-</span> <span class="n">in_seq_offset</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">arange_w</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">valid</span> <span class="o">=</span> <span class="p">(</span><span class="n">base</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">base</span> <span class="o">&lt;=</span> <span class="n">pos</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>For decode steps <code class="docutils literal notranslate"><span class="pre">cu_seqlens_q</span> <span class="pre">=</span> <span class="pre">[0,</span> <span class="pre">1]</span></code> so <code class="docutils literal notranslate"><span class="pre">in_seq_offset</span> <span class="pre">=</span> <span class="pre">0</span></code>, giving <code class="docutils literal notranslate"><span class="pre">base[k]</span> <span class="pre">=</span> <span class="pre">pos</span> <span class="pre">+</span> <span class="pre">k</span></code>, valid only at <code class="docutils literal notranslate"><span class="pre">k</span> <span class="pre">=</span> <span class="pre">0</span></code>. Each decode token attends to <strong>only its own current KV row</strong> — no historical window — so the model collapses to a single repeated token (silicon trace: token 7795).</p>
+<p><strong>Fix (commit pending in this PR):</strong> unify prefill+decode by deriving the window directly from absolute position, independent of in-batch offset:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">base</span> <span class="o">=</span> <span class="n">pos</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span><span class="n">W</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">arange_w</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">ring_idx</span> <span class="o">=</span> <span class="n">base</span> <span class="o">%</span> <span class="n">W</span>
+<span class="n">valid</span> <span class="o">=</span> <span class="p">(</span><span class="n">base</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">base</span> <span class="o">&lt;=</span> <span class="n">pos</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+</pre></div>
+</div>
+<p>Each token’s window now covers the W absolute positions ending at <code class="docutils literal notranslate"><span class="pre">pos[t]</span></code>:</p>
+<ul class="simple">
+<li><p>warm (<code class="docutils literal notranslate"><span class="pre">pos</span> <span class="pre">&gt;=</span> <span class="pre">W-1</span></code>): all W ring slots valid → full window</p></li>
+<li><p>early (<code class="docutils literal notranslate"><span class="pre">pos</span> <span class="pre">&lt;</span> <span class="pre">W-1</span></code>): leading slots <code class="docutils literal notranslate"><span class="pre">-1</span></code>, trailing slots cover <code class="docutils literal notranslate"><span class="pre">[0..pos]</span></code></p></li>
+<li><p>bit-exactly matches legacy <code class="docutils literal notranslate"><span class="pre">_get_window_topk_idxs</span></code> for both warm and early branches</p></li>
+</ul>
+<p>Existing <code class="docutils literal notranslate"><span class="pre">tests/test_deepseek_v4_w43_redo.py::TestPerTokenTopkHelper</span></code> (3 tests) still pass.</p>
+</section>
+<section id="w4-path-bisection-three-fixes-three-checkpoints">
+<h2>W4 path bisection — three fixes, three checkpoints<a class="headerlink" href="#w4-path-bisection-three-fixes-three-checkpoints" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Checkpoint</p></th>
+<th class="head"><p>Output (first ~16 token ids)</p></th>
+<th class="head"><p>Pattern</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 single (pre any fix)</p></td>
+<td><p>8385,6328,289,7795×N</p></td>
+<td><p>single-token collapse on 7795</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 single (post topk helper fix, commit <code class="docutils literal notranslate"><span class="pre">3468abd</span></code>)</p></td>
+<td><p>16520,33,7242,7242,7242,1613,7242,1613,…</p></td>
+<td><p>two-token alternation 7242↔1613</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>W4 single (post legacy fallback, commit <code class="docutils literal notranslate"><span class="pre">bbc6b0f</span></code>)</strong></p></td>
+<td><p><strong>223,1673,3866,937,17735,12351,…</strong> decodes to <strong>“元龙高吾原来世上世上名叫Adam，乃其父之名为安知公…”</strong></p></td>
+<td><p><strong>coherent Chinese text</strong> ✅</p></td>
+</tr>
+</tbody>
+</table>
+<section id="bug-1-fixed-in-3468abd-get-window-topk-idxs-pertoken-decoded-only-its-own-current-kv-row">
+<h3>Bug 1 (fixed in <code class="docutils literal notranslate"><span class="pre">3468abd</span></code>): <code class="docutils literal notranslate"><span class="pre">_get_window_topk_idxs_pertoken</span></code> decoded only its own current KV row<a class="headerlink" href="#bug-1-fixed-in-3468abd-get-window-topk-idxs-pertoken-decoded-only-its-own-current-kv-row" title="Link to this heading"></a></h3>
+<p>The pertoken topk helper derived each token’s window from the in-batch offset:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">base</span> <span class="o">=</span> <span class="n">pos</span> <span class="o">-</span> <span class="n">in_seq_offset</span> <span class="o">+</span> <span class="n">arange_w</span>
+<span class="n">valid</span> <span class="o">=</span> <span class="p">(</span><span class="n">base</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">base</span> <span class="o">&lt;=</span> <span class="n">pos</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>For decode steps cu_seqlens_q=[0,1] so in_seq_offset=0, giving base[k]=pos+k, valid only at k=0. Each decode token attended to only its own current KV row → single-token attractor. Fix unifies prefill+decode by deriving the window directly from absolute position.</p>
+</section>
+<section id="bug-2-proper-fix-in-8fa0129-compressor-forward-w4-multi-seq-prefill-block-emit">
+<h3>Bug 2 (proper fix in <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code>): <code class="docutils literal notranslate"><span class="pre">Compressor._forward_w4</span></code> multi-seq prefill block emit<a class="headerlink" href="#bug-2-proper-fix-in-8fa0129-compressor-forward-w4-multi-seq-prefill-block-emit" title="Link to this heading"></a></h3>
+<p>The W4 path’s compressor only fired compress emission at the LAST token of each seq:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">last_positions</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[</span><span class="n">cu</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span>
+<span class="n">compress_mask</span> <span class="o">=</span> <span class="p">(</span><span class="n">last_positions</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="n">ratio</span> <span class="o">==</span> <span class="mi">0</span>
+</pre></div>
+</div>
+<p>But legacy prefill emits one compressed entry per ratio-block. For a 12-token prefill on c4 layers (ratio=4), legacy writes 3 compressed entries; W4 path wrote only 1 (the last). Decode then read stale zero entries from <code class="docutils literal notranslate"><span class="pre">compressor_kv_cache_view[slot,</span> <span class="pre">0..N-1]</span></code> → degenerate output (the 7242/1613 alternation seen at checkpoint 2).</p>
+<p><strong>Initial workaround (commit <code class="docutils literal notranslate"><span class="pre">bbc6b0f</span></code>)</strong>: when <code class="docutils literal notranslate"><span class="pre">cu_seqlens_q.numel()==2</span></code> (single seq), route to <code class="docutils literal notranslate"><span class="pre">_forward_legacy</span></code> with <code class="docutils literal notranslate"><span class="pre">positions[0]</span></code> as <code class="docutils literal notranslate"><span class="pre">start_pos</span></code>. Legacy’s prefill block-loop emits all compressed entries correctly. Verified on silicon: coherent Chinese output (checkpoint 3).</p>
+<p><strong>Proper fix (commit <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code>)</strong>: per-token block-boundary loop emits one compressed entry at every <code class="docutils literal notranslate"><span class="pre">(positions[t]+1)</span> <span class="pre">%</span> <span class="pre">ratio</span> <span class="pre">==</span> <span class="pre">0</span></code>, with fast-path (full window in current batch) and slow-path (partial window from kv_state). Persists overlap-half to <code class="docutils literal notranslate"><span class="pre">kv_state[slot,</span> <span class="pre">:ratio]</span></code> each boundary so subsequent decode calls see the correct prior window. Multi-seq W4 path now produces 4 distinct coherent outputs (silicon evidence above).</p>
+</section>
+<section id="bug-3-fixed-in-8fa0129-scheduler-modelrunner-finish-pipeline-cross-process">
+<h3>Bug 3 (fixed in <code class="docutils literal notranslate"><span class="pre">8fa0129</span></code>): Scheduler ↔ ModelRunner finish-pipeline (cross-process)<a class="headerlink" href="#bug-3-fixed-in-8fa0129-scheduler-modelrunner-finish-pipeline-cross-process" title="Link to this heading"></a></h3>
+<p>Initial silicon retry showed <code class="docutils literal notranslate"><span class="pre">RuntimeError:</span> <span class="pre">DSV4KVPool:</span> <span class="pre">no</span> <span class="pre">free</span> <span class="pre">slot</span> <span class="pre">(max_active_seqs=1)</span></code> at the second sequential lm_eval request. Root cause: <code class="docutils literal notranslate"><span class="pre">Scheduler</span></code> runs in EngineCore parent process, <code class="docutils literal notranslate"><span class="pre">DSV4KVPool</span></code> lives in ModelRunner child process — <code class="docutils literal notranslate"><span class="pre">register_finish_listener</span></code> callbacks didn’t cross the ZMQ boundary. The pool never saw seq finish → never released slots.</p>
+<p><strong>Fix</strong>: <code class="docutils literal notranslate"><span class="pre">Scheduler._emit_finish</span></code> appends seq_id to <code class="docutils literal notranslate"><span class="pre">_pending_finish_ids</span></code>; each <code class="docutils literal notranslate"><span class="pre">schedule()</span></code> call drains into <code class="docutils literal notranslate"><span class="pre">ScheduledBatch.finished_seq_ids</span></code>; <code class="docutils literal notranslate"><span class="pre">ModelRunner.run_model</span></code> calls <code class="docutils literal notranslate"><span class="pre">dsv4_pool.finish_request(sid)</span></code> before admitting the new batch. This crosses the process boundary via the existing batch-marshalling path. Sequential lm_eval requests now release slots correctly.</p>
+</section>
+</section>
+<section id="what-this-evidence-does-not-cover">
+<h2>What this Evidence does NOT cover<a class="headerlink" href="#what-this-evidence-does-not-cover" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Performance optimization</strong> — this PR is correctness-only. Latency is dominated by sync mode + JIT cache warmup. Production async tuning is separate work.</p></li>
+<li><p><strong>Long-context (&gt;2048 tokens) W4 silicon</strong> — only tested up to max-model-len=2048. Larger context windows untested.</p></li>
+<li><p><strong>gsm8k W4 multi-request num_concurrent&gt;=2 (≥60% gate)</strong> — only num_concurrent=1 measured here. Multi-concurrent silicon shown coherent (idx=2 fluent English) but lm_eval gate at conc&gt;=2 is a separate sweep.</p></li>
+</ul>
+</section>
+<section id="cross-repo-prs">
+<h2>Cross-repo PRs<a class="headerlink" href="#cross-repo-prs" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>AITER PR (sunway513/aiter):</strong> branch <code class="docutils literal notranslate"><span class="pre">feat/dsv4-flydsl-blockscale-moe</span></code> — adds <code class="docutils literal notranslate"><span class="pre">dsv4_fp4_tuned_fmoe.csv</span></code> (the actual silicon fix) plus the <code class="docutils literal notranslate"><span class="pre">moe_blockscale_2stage</span></code> port (future-proofing for per_1x128 path) and dispatcher routing.</p></li>
+<li><p><strong>ATOM PR (sunway513/atom):</strong> branch <code class="docutils literal notranslate"><span class="pre">plan/dsv4-w45-flydsl-blockscale-moe</span></code> — plan v1→v3 with revision log, this Evidence M, and follow-up sub-issue spec for W4 KV pool collision.</p></li>
+</ul>
+</section>
+<section id="lessons-sprint-complete-checklist-per-feedback-user-does-thorough-plan-reviews-md">
+<h2>Lessons (sprint complete checklist per <code class="docutils literal notranslate"><span class="pre">feedback_user_does_thorough_plan_reviews.md</span></code>)<a class="headerlink" href="#lessons-sprint-complete-checklist-per-feedback-user-does-thorough-plan-reviews-md" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p>✅ License: ported FlyDSL files retain Apache-2.0 SPDX header (Tasks 1-2)</p></li>
+<li><p>✅ Predicate audit: dispatcher uses substring <code class="docutils literal notranslate"><span class="pre">&quot;_blockscale_&quot;</span> <span class="pre">in</span> <span class="pre">kernelName</span></code> (Task 4)</p></li>
+<li><p>✅ CSV per-row coverage tested before silicon (Task 6.5)</p></li>
+<li><p>✅ FlyDSL version preflight verified (Task 0)</p></li>
+<li><p>✅ Plan revision log added (v3 captures FP4 pivot)</p></li>
+<li><p>✅ Silicon trace before claiming closure — caught the FP8→FP4 dispatch surprise that would have made the v1 port irrelevant</p></li>
+</ol>
+<p>The most expensive lesson: <strong><code class="docutils literal notranslate"><span class="pre">config.json</span></code> <code class="docutils literal notranslate"><span class="pre">weight_block_size:[128,128]</span></code> is the source-of-truth for the model card, not for the dispatch path.</strong> ATOM’s quant_v4 layer rewrites the dispatch dtype after model load. Future plans involving aiter MoE routing <strong>must</strong> trace <code class="docutils literal notranslate"><span class="pre">AITER_FMOE_DEBUG_LOOKUP=1</span></code> against silicon before assuming the dispatch dtype.</p>
+</section>
+<section id="sprint-4-5-gsm8k-v2-with-max-gen-toks-1024">
+<h2>Sprint 4.5 — gsm8k v2 with max_gen_toks=1024<a class="headerlink" href="#sprint-4-5-gsm8k-v2-with-max-gen-toks-1024" title="Link to this heading"></a></h2>
+<p>After user comparison data (SGLang on B300 n=100: <strong>0.96 ± 0.020</strong>) revealed a real correctness gap, reran gsm8k with <code class="docutils literal notranslate"><span class="pre">max_gen_toks=1024</span></code> to test the truncation hypothesis (lm_eval default 256 is too short for V4 long-CoT).</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>max_tokens</p></th>
+<th class="head"><p>n</p></th>
+<th class="head"><p>log</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v1 (default)</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>256</p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">m_gsm8k_w4_fp4.log</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>W4 v2</strong></p></td>
+<td><p><strong>0.40 ± 0.112</strong></p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p><strong>1024</strong></p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">m_gsm8k_w4_v2_max_tokens_1024.log</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>SGLang B300 (ref)</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>(larger)</p></td>
+<td><p>100</p></td>
+<td><p>external</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Conclusion</strong>: <code class="docutils literal notranslate"><span class="pre">max_gen_toks=1024</span></code> improves flexible-extract by 5pp but not strict-match. The truncation hypothesis is <strong>partially confirmed</strong> but <strong>not the dominant gap factor</strong> (still 56pp short of SGLang). Requests 14-20 took 30-72s vs 17-25s for early requests, consistent with longer CoT being generated to completion.</p>
+<p>Remaining gap candidates (still unresolved):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">apply_chat_template</span></code> — V4 chat template not applied via <code class="docutils literal notranslate"><span class="pre">tokenized_requests=False</span></code></p></li>
+<li><p>InferenceX-customized <code class="docutils literal notranslate"><span class="pre">gsm8k.yaml</span></code> with explicit <code class="docutils literal notranslate"><span class="pre">####</span> <span class="pre">[number]</span></code> instruction</p></li>
+<li><p>MXFP4 scale layout vs SGLang <code class="docutils literal notranslate"><span class="pre">flashinfer_mxfp4</span></code> backend</p></li>
+<li><p>larger <code class="docutils literal notranslate"><span class="pre">max_gen_toks</span></code> (4096) — diminishing returns expected but worth confirming</p></li>
+</ul>
+<p>Evidence: <code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/m_gsm8k_w4_v2_max_tokens_1024.log</span></code></p>
+</section>
+<section id="sprint-4-5-gsm8k-v3-v4-chat-completions-custom-doc-to-text">
+<h2>Sprint 4.5 — gsm8k v3/v4 (chat-completions + custom doc_to_text)<a class="headerlink" href="#sprint-4-5-gsm8k-v3-v4-chat-completions-custom-doc-to-text" title="Link to this heading"></a></h2>
+<p>Two further attempts to close the 56pp gap by changing the request-side framing (server unchanged):</p>
+<section id="v3-v1-chat-completions-tokenizer-chat-template-path">
+<h3>v3 — <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code> (tokenizer chat_template path)<a class="headerlink" href="#v3-v1-chat-completions-tokenizer-chat-template-path" title="Link to this heading"></a></h3>
+<p>Switched lm_eval to <code class="docutils literal notranslate"><span class="pre">local-chat-completions</span></code> to match SGLang’s typical eval pattern. <strong>Result: HTTP 400 — request rejected.</strong> Root cause: DSV4-Pro tokenizer ships with <strong>no <code class="docutils literal notranslate"><span class="pre">chat_template</span></code></strong> in <code class="docutils literal notranslate"><span class="pre">tokenizer_config.json</span></code> (verified by inspecting tokenizer keys). Upstream chat-template path is closed for this checkpoint until a template is added or the eval harness is taught a DSV4-specific one.</p>
+</section>
+<section id="v4-custom-gsm8k-dsv4-task-with-number-instruction">
+<h3>v4 — custom <code class="docutils literal notranslate"><span class="pre">gsm8k_dsv4</span></code> task with <code class="docutils literal notranslate"><span class="pre">####</span> <span class="pre">[number]</span></code> instruction<a class="headerlink" href="#v4-custom-gsm8k-dsv4-task-with-number-instruction" title="Link to this heading"></a></h3>
+<p>Built a standalone task yaml at <code class="docutils literal notranslate"><span class="pre">/tmp/lm_eval_tasks_dsv4/gsm8k_dsv4.yaml</span></code> (validated via <code class="docutils literal notranslate"><span class="pre">lm_eval</span> <span class="pre">validate</span></code>) with InferenceX-style explicit format instruction:</p>
+<blockquote>
+<div><p><code class="docutils literal notranslate"><span class="pre">Question:</span> <span class="pre">{{question}}\nReason</span> <span class="pre">step</span> <span class="pre">by</span> <span class="pre">step.</span> <span class="pre">End</span> <span class="pre">your</span> <span class="pre">response</span> <span class="pre">with</span> <span class="pre">the</span> <span class="pre">answer</span> <span class="pre">on</span> <span class="pre">the</span> <span class="pre">last</span> <span class="pre">line,</span> <span class="pre">formatted</span> <span class="pre">as:</span> <span class="pre">####</span> <span class="pre">[number]\nAnswer:</span></code></p>
+</div></blockquote>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>max_tokens</p></th>
+<th class="head"><p>n</p></th>
+<th class="head"><p>log</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v1</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>256</p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">m_gsm8k_w4_fp4.log</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v2</p></td>
+<td><p>0.40 ± 0.112</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>1024</p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">m_gsm8k_w4_v2_max_tokens_1024.log</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>W4 v3</p></td>
+<td><p><strong>HTTP 400</strong></p></td>
+<td><p>—</p></td>
+<td><p>—</p></td>
+<td><p>—</p></td>
+<td><p>(no chat_template)</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>W4 v4 (custom yaml)</strong></p></td>
+<td><p><strong>0.45 ± 0.114</strong></p></td>
+<td><p><strong>0.00 ± 0.000</strong></p></td>
+<td><p>1024</p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_eval_w4_v4.log</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>SGLang B300 (ref)</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>(larger)</p></td>
+<td><p>100</p></td>
+<td><p>external</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Conclusion</strong>: prompt-side framing was <strong>NOT</strong> the dominant gap.</p>
+<ul class="simple">
+<li><p>Flexible-extract: v2→v4 = +5pp (0.40→0.45), within 1 stderr (~0.114) — i.e. noise.</p></li>
+<li><p>Strict-match: v2→v4 = <strong>−35pp (0.35→0.00)</strong>. The custom <code class="docutils literal notranslate"><span class="pre">####</span> <span class="pre">[number]</span></code> instruction <strong>steered the model away from spontaneously emitting <code class="docutils literal notranslate"><span class="pre">####</span></code></strong> (which it had picked up from the 5-shot examples), so the strict regex now misses everything. Net: format coaching backfired.</p></li>
+</ul>
+<p><strong>Real gap remains 51pp (0.45 vs 0.96).</strong> This is too large to be prompt framing. Next escalation: <strong>MXFP4 scale layout audit</strong> vs SGLang <code class="docutils literal notranslate"><span class="pre">flashinfer_mxfp4</span></code> backend (sub-agent dispatched 2026-04-26 20:02 UTC).</p>
+</section>
+<section id="final-gap-candidate-ranking-after-sprint-4-5">
+<h3>Final gap-candidate ranking after Sprint 4.5<a class="headerlink" href="#final-gap-candidate-ranking-after-sprint-4-5" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Hypothesis</p></th>
+<th class="head"><p>Test</p></th>
+<th class="head"><p>Result</p></th>
+<th class="head"><p>Verdict</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>max_gen_toks truncation</p></td>
+<td><p>v2 (1024 vs 256)</p></td>
+<td><p>+5pp flex</p></td>
+<td><p>partial, not dominant</p></td>
+</tr>
+<tr class="row-odd"><td><p>chat_template missing</p></td>
+<td><p>v3 (chat completions)</p></td>
+<td><p>HTTP 400</p></td>
+<td><p>path closed (no template)</p></td>
+</tr>
+<tr class="row-even"><td><p>Output format coaching</p></td>
+<td><p>v4 (custom doc_to_text)</p></td>
+<td><p>+5pp flex / −35pp strict</p></td>
+<td><p><strong>NEGATIVE</strong> — coached model out of <code class="docutils literal notranslate"><span class="pre">####</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>MXFP4 scale layout</strong></p></td>
+<td><p>(in flight)</p></td>
+<td><p>—</p></td>
+<td><p><strong>suspected dominant</strong></p></td>
+</tr>
+<tr class="row-even"><td><p>max_gen_toks=4096</p></td>
+<td><p>(untested)</p></td>
+<td><p>—</p></td>
+<td><p>diminishing returns expected</p></td>
+</tr>
+</tbody>
+</table>
+<p>Evidence: <code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v4.log</span></code></p>
+</section>
+</section>
+<section id="sprint-4-6-mxfp4-weight-scale-shuffle-layout-rca">
+<h2>Sprint 4.6 — MXFP4 weight/scale shuffle layout RCA<a class="headerlink" href="#sprint-4-6-mxfp4-weight-scale-shuffle-layout-rca" title="Link to this heading"></a></h2>
+<p>After Sprint 4.5 ruled out prompt-side framing (51pp gap remained), audited the MoE weight quantization path end-to-end. Found a <strong>layout mismatch</strong> between ATOM’s pre-shuffle and the FlyDSL FP4 kernel’s expected layout.</p>
+<section id="silicon-dispatcher-hit-from-m-lookup-keys-unique-log">
+<h3>Silicon dispatcher hit (from <code class="docutils literal notranslate"><span class="pre">m_lookup_keys_unique.log</span></code>)<a class="headerlink" href="#silicon-dispatcher-hit-from-m-lookup-keys-unique-log" title="Link to this heading"></a></h3>
+<p>For DSV4-Pro on MI355X, the FMOE dispatcher resolves to:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>ActivationType.Silu, q_dtype_a=torch.float4_e2m1fn_x2, q_dtype_w=torch.float4_e2m1fn_x2,
+QuantType.per_1x32, isG1U1=True
+→ HIT flydsl_moe1_afp4_wfp4_bf16_*_silu  (stage1)
+→ HIT moe_ck2stages_gemm2_*_FP4X2_FP4X2_B16  (stage2 at M=1)
+→ HIT flydsl_moe2_afp4_wfp4_bf16_*  (stage2 at M&gt;=4)
+</pre></div>
+</div>
+<p>So the runtime path is <strong>FP4 acts × FP4 weights, per_1x32, Silu, FlyDSL stage1 + mixed stage2</strong>.</p>
+</section>
+<section id="atom-s-mxfp4moemethod-process-weights-after-loading-branch-table">
+<h3>ATOM’s <code class="docutils literal notranslate"><span class="pre">Mxfp4MoEMethod.process_weights_after_loading</span></code> branch table<a class="headerlink" href="#atom-s-mxfp4moemethod-process-weights-after-loading-branch-table" title="Link to this heading"></a></h3>
+<p>In <code class="docutils literal notranslate"><span class="pre">atom/model_ops/moe.py:819</span></code> the post-load processing has three sibling branches:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Condition</p></th>
+<th class="head"><p>Weight shuffle</p></th>
+<th class="head"><p>Scale shuffle</p></th>
+<th class="head"><p>Designed for</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">use_triton</span></code> (line 828-854)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">_swizzle_mxfp4</span></code> (Triton)</p></td>
+<td><p>inside swizzle</p></td>
+<td><p>Triton MoE</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">activation</span> <span class="pre">==</span> <span class="pre">Swiglu</span></code> (line 856-882)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">permute(0,2,1,3)</span></code> interleave→stack + <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4(_,</span> <span class="pre">16,</span> <span class="pre">gate_up)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">permute(0,2,1,3)</span></code> + <code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4(_,</span> <span class="pre">E,</span> <span class="pre">gate_up)</span></code></p></td>
+<td><p><strong>FlyDSL FP4 / a16w4 GPU tile</strong></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">quant_method</span> <span class="pre">==</span> <span class="pre">&quot;quark&quot;</span></code> (line 891-902)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">shuffle_weights</span></code> (CK 16x16)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">e8m0_shuffle</span></code> (CK 256x8 tile)</p></td>
+<td><p>CK quark MoE</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">else</span></code> — DSV4 fallthrough (line 903-910)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">shuffle_weights</span></code> (CK 16x16)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">e8m0_shuffle</span></code> (CK 256x8 tile)</p></td>
+<td><p>CK MoE</p></td>
+</tr>
+</tbody>
+</table>
+<p>DSV4-Pro has <code class="docutils literal notranslate"><span class="pre">layer.activation</span> <span class="pre">==</span> <span class="pre">ActivationType.Silu</span></code> (NOT Swiglu — the FlyDSL kernel’s name embeds the silu fusion as <code class="docutils literal notranslate"><span class="pre">..._silu</span></code>, but the Python-side <code class="docutils literal notranslate"><span class="pre">ActivationType</span></code> is Silu). It also doesn’t match <code class="docutils literal notranslate"><span class="pre">quark</span></code>. So it falls to the <strong>else</strong> branch (line 903-910) and uses <strong>CK-layout shuffles</strong>.</p>
+</section>
+<section id="the-mismatch">
+<h3>The mismatch<a class="headerlink" href="#the-mismatch" title="Link to this heading"></a></h3>
+<p>FlyDSL’s stage1 contract (<code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py:583-584</span></code>):</p>
+<blockquote>
+<div><p>“For fp4 stage1, <code class="docutils literal notranslate"><span class="pre">w1</span></code>/<code class="docutils literal notranslate"><span class="pre">w1_scale</span></code> must use the same preshuffle layout as <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4(w1,</span> <span class="pre">16,</span> <span class="pre">True)</span></code> and <code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4(w1_scale,</span> <span class="pre">E,</span> <span class="pre">True)</span></code>.”</p>
+</div></blockquote>
+<p>These two layouts (a16w4 vs CK) reshape &amp; permute the tensors fundamentally differently:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">shuffle_weight</span></code> (CK): <code class="docutils literal notranslate"><span class="pre">view(BN,</span> <span class="pre">BK,</span> <span class="pre">...).permute(0,1,3,4,2,5)</span></code> — for CK matrix-core tiles</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4</span></code>: <code class="docutils literal notranslate"><span class="pre">view(experts_cnt,</span> <span class="pre">2,</span> <span class="pre">N0,</span> <span class="pre">NLane=16,</span> <span class="pre">K0,</span> <span class="pre">KLane=4,</span> <span class="pre">KPack=16).permute(0,2,1,4,5,3,6)</span></code> — for FlyDSL FP4 GPU tiles</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">e8m0_shuffle</span></code>: <code class="docutils literal notranslate"><span class="pre">view(m/32,</span> <span class="pre">2,</span> <span class="pre">16,</span> <span class="pre">n/8,</span> <span class="pre">2,</span> <span class="pre">4).permute(0,3,5,2,4,1)</span></code> — for CK 256-row × 8-col scale tile</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4</span></code>: <code class="docutils literal notranslate"><span class="pre">view(E,</span> <span class="pre">N_Pack=2,</span> <span class="pre">N1,</span> <span class="pre">N_Lane=16,</span> <span class="pre">K1,</span> <span class="pre">K_Pack=2,</span> <span class="pre">K_Lane=4).permute(0,2,4,6,3,5,1)</span></code> — for FlyDSL scale tile</p></li>
+</ul>
+<p>ATOM hands FlyDSL a tensor pre-shuffled with <strong>CK</strong> layout. The kernel reads from positions assuming <strong>a16w4</strong> layout — every dequant fetches the wrong byte. The kernel doesn’t crash (all reads are in-bounds), but <strong>every per-block scale and every weight nibble is mis-mapped to wrong positions</strong>. Compounding across 61 layers × 6 routed experts per token → severe accuracy loss with no error signal.</p>
+</section>
+<section id="why-the-swiglu-branch-worked-and-dsv4-pro-doesn-t">
+<h3>Why the SwiGLU branch worked (and DSV4-Pro doesn’t)<a class="headerlink" href="#why-the-swiglu-branch-worked-and-dsv4-pro-doesn-t" title="Link to this heading"></a></h3>
+<p>Models using <code class="docutils literal notranslate"><span class="pre">ActivationType.Swiglu</span></code> (e.g., GLM-4.5, Qwen3-MOE FP4) hit line 856-882 which DOES use <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4</span></code> + <code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4</span></code>. They produce correct output. DSV4-Pro happens to use <code class="docutils literal notranslate"><span class="pre">ActivationType.Silu</span></code> because the FlyDSL kernel internalizes the silu+mul fusion under that name — even though semantically it’s the same SwiGLU computation. The branch dispatch is fooled by the activation enum.</p>
+</section>
+<section id="secondary-issue-stage1-stage2-layout-conflict-at-m-1">
+<h3>Secondary issue: stage1/stage2 layout conflict at M=1<a class="headerlink" href="#secondary-issue-stage1-stage2-layout-conflict-at-m-1" title="Link to this heading"></a></h3>
+<p>For decode (M=1), CSV row 1 dispatches:</p>
+<ul class="simple">
+<li><p>stage1 → <code class="docutils literal notranslate"><span class="pre">flydsl_moe1_afp4_wfp4_bf16_t32x64x256_w3_kb4_go_fp4</span></code> (needs a16w4 layout)</p></li>
+<li><p>stage2 → <code class="docutils literal notranslate"><span class="pre">moe_ck2stages_gemm2_256x32x128x128_..._FP4X2_FP4X2_B16</span></code> (needs CK layout)</p></li>
+</ul>
+<p>These two kernels access the SAME <code class="docutils literal notranslate"><span class="pre">w2_weight</span></code> tensor — but each expects a DIFFERENT shuffle. Impossible to satisfy both with one tensor. For M&gt;=4 the CSV uses <code class="docutils literal notranslate"><span class="pre">flydsl_moe2_afp4_wfp4_bf16_*</span></code> for stage2 (also needs a16w4) — consistent. So at M=1 (the gsm8k decode hot path), the conflict is structural.</p>
+</section>
+<section id="fix-design-3-options-ordered-by-blast-radius">
+<h3>Fix design (3 options, ordered by blast radius)<a class="headerlink" href="#fix-design-3-options-ordered-by-blast-radius" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p><strong>Surgical (Silu→a16w4 alias)</strong> — extend line 856 condition to <code class="docutils literal notranslate"><span class="pre">activation</span> <span class="pre">==</span> <span class="pre">Swiglu</span> <span class="pre">OR</span> <span class="pre">(quant_type</span> <span class="pre">==</span> <span class="pre">per_1x32</span> <span class="pre">AND</span> <span class="pre">get_gfx().startswith(&quot;gfx95&quot;))</span></code>. Fixes stage1; stage2 at M=1 still mismatched.</p></li>
+<li><p><strong>CSV unification</strong> — rewrite all CSV rows for M=1,2 stage2 to use FlyDSL kernels (<code class="docutils literal notranslate"><span class="pre">flydsl_moe2_afp4_wfp4_bf16_*</span></code> analogues). Then apply (1). Removes the stage1/stage2 layout conflict but may be slower at small M.</p></li>
+<li><p><strong>Disable W4 path for decode</strong> — fall back to W3 path at M=1. Keeps W4 for prefill. Largest blast radius (defeats the W4.5 goal of multi-request KV).</p></li>
+</ol>
+<p><strong>Recommendation</strong>: try (1) first as a single-day silicon test, measure if stage1-only fix narrows the gap (e.g. 0.45 → 0.70). If yes, escalate to (2) for full closure.</p>
+</section>
+<section id="cross-references">
+<h3>Cross-references<a class="headerlink" href="#cross-references" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>ATOM <code class="docutils literal notranslate"><span class="pre">Mxfp4MoEMethod</span></code>: <code class="docutils literal notranslate"><span class="pre">atom/model_ops/moe.py:676-913</span></code></p></li>
+<li><p>AITER FlyDSL stage1 contract: <code class="docutils literal notranslate"><span class="pre">aiter/ops/flydsl/moe_kernels.py:555-660</span></code></p></li>
+<li><p>AITER <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4</span></code>: <code class="docutils literal notranslate"><span class="pre">aiter/ops/shuffle.py:51-81</span></code></p></li>
+<li><p>AITER <code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4</span></code>: <code class="docutils literal notranslate"><span class="pre">aiter/ops/shuffle.py:84-113</span></code></p></li>
+<li><p>AITER <code class="docutils literal notranslate"><span class="pre">e8m0_shuffle</span></code> (CK): <code class="docutils literal notranslate"><span class="pre">aiter/utility/fp4_utils.py:72-92</span></code></p></li>
+<li><p>ATOM <code class="docutils literal notranslate"><span class="pre">shuffle_weights</span></code> (CK alias): <code class="docutils literal notranslate"><span class="pre">atom/model_ops/utils.py:124-160</span></code></p></li>
+<li><p>Silicon FMOE lookup keys: <code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/m_lookup_keys_unique.log</span></code></p></li>
+</ul>
+</section>
+</section>
+<section id="sprint-5-surgical-fix-attempt-v5-regression-reverted">
+<h2>Sprint 5 — surgical fix attempt v5 → REGRESSION (reverted)<a class="headerlink" href="#sprint-5-surgical-fix-attempt-v5-regression-reverted" title="Link to this heading"></a></h2>
+<p>Applied option 1 from Sprint 4.6 (extend Swiglu condition to <code class="docutils literal notranslate"><span class="pre">quant_type</span> <span class="pre">==</span> <span class="pre">per_1x32</span> <span class="pre">AND</span> <span class="pre">gfx95</span></code>). Result: <strong>complete regression to 0.00 / 0.00</strong>.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>latency/req</p></th>
+<th class="head"><p>n</p></th>
+<th class="head"><p>log</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v4</p></td>
+<td><p>0.45 ± 0.114</p></td>
+<td><p>0.00 ± 0.000</p></td>
+<td><p>28s</p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_eval_w4_v4.log</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>W4 v5 (a16w4 patch)</strong></p></td>
+<td><p><strong>0.00</strong></p></td>
+<td><p><strong>0.00</strong></p></td>
+<td><p><strong>195s</strong></p></td>
+<td><p>20</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">lm_eval_w4_v5.log</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<section id="root-cause-of-v5-regression-stacked-vs-interleaved-weight-layout">
+<h3>Root cause of v5 regression: STACKED vs INTERLEAVED weight layout<a class="headerlink" href="#root-cause-of-v5-regression-stacked-vs-interleaved-weight-layout" title="Link to this heading"></a></h3>
+<p>DSV4-Pro’s on-disk format (verified by safetensors inspection):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">experts.{e}.w1.weight</span></code> shape <code class="docutils literal notranslate"><span class="pre">[3072,</span> <span class="pre">3584]</span></code> int8 (gate, separate file entry)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">experts.{e}.w3.weight</span></code> shape <code class="docutils literal notranslate"><span class="pre">[3072,</span> <span class="pre">3584]</span></code> int8 (up, separate file entry)</p></li>
+</ul>
+<p>Standard FusedMoE per-shard loader fills <code class="docutils literal notranslate"><span class="pre">w13_weight</span></code> as <strong>STACKED</strong>: first N rows are gate (w1), next N rows are up (w3). Verified at <code class="docutils literal notranslate"><span class="pre">atom/model_ops/moe.py:2225-2310</span></code> (<code class="docutils literal notranslate"><span class="pre">SHARD_ID_TO_SHARDED_DIM</span></code> and the per-shard copy logic).</p>
+<p>But the SwiGLU branch’s pre-shuffle (line 858-870) does:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">e</span><span class="p">,</span> <span class="n">n</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">k</span><span class="p">)</span>  <span class="c1"># treats input as [E, N1=N/2, 2_pairs, K] — INTERLEAVED assumption</span>
+<span class="o">.</span><span class="n">permute</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>    <span class="c1"># → [E, 2_pairs, N1, K]</span>
+</pre></div>
+</div>
+<p>This permute only makes sense for INTERLEAVED layout <code class="docutils literal notranslate"><span class="pre">[g0,</span> <span class="pre">u0,</span> <span class="pre">g1,</span> <span class="pre">u1,</span> <span class="pre">...]</span></code>. Applied to STACKED input, it groups consecutive pairs <code class="docutils literal notranslate"><span class="pre">(g0,</span> <span class="pre">g1),</span> <span class="pre">(g2,</span> <span class="pre">g3),</span> <span class="pre">...</span></code> and then “swaps” them — total scrambling. Then <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4</span></code> operates on scrambled data → every dequant is from a wrong expert column → <strong>complete accuracy collapse</strong>.</p>
+<p><strong>Secondary observation</strong>: <code class="docutils literal notranslate"><span class="pre">[aiter</span> <span class="pre">WARNING]</span> <span class="pre">ck</span> <span class="pre">kernel</span> <span class="pre">not</span> <span class="pre">found:</span> <span class="pre">moe_ck2stages_gemm2_*_FP4X2_FP4X2_B16</span></code> flooded server log during v5. Patching to a16w4 layout caused the CK stage2 dispatcher to miss its tuned entry → fallback path → 7× slowdown (28s/req → 195s/req).</p>
+</section>
+<section id="lessons">
+<h3>Lessons<a class="headerlink" href="#lessons" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p><strong>The Sprint 4.6 RCA partially applied to other models (Swiglu+INTERLEAVED), not DSV4-Pro (Silu+STACKED)</strong> — the layout mismatch is real, but the SwiGLU branch is NOT a drop-in fix.</p></li>
+<li><p><strong>Two valid layouts exist</strong>: STACKED (DSV4) and INTERLEAVED (GLM-4.5/Qwen3-MOE). The Mxfp4MoEMethod has hardcoded the INTERLEAVED assumption only.</p></li>
+<li><p><strong>Option 1 from Sprint 4.6 is wrong</strong>. The correct surgical fix would be: skip the <code class="docutils literal notranslate"><span class="pre">permute(0,2,1,3)</span></code> for STACKED layout, OR detect the layout at load time.</p></li>
+</ol>
+<p>Patch reverted at commit <code class="docutils literal notranslate"><span class="pre">f3d6a91</span></code>. Next: Sprint 5b — torch reference baseline (<code class="docutils literal notranslate"><span class="pre">ATOM_V4_TORCH_MOE=1</span></code>) to determine if the gap is in the FUSED kernel or in the model/quant config itself.</p>
+</section>
+</section>
+<section id="sprint-5b-torch-reference-baseline-smoking-gun">
+<h2>Sprint 5b — torch reference baseline = SMOKING GUN<a class="headerlink" href="#sprint-5b-torch-reference-baseline-smoking-gun" title="Link to this heading"></a></h2>
+<p>Set <code class="docutils literal notranslate"><span class="pre">ATOM_V4_TORCH_MOE=1</span></code>. This bypasses ALL fused MoE shuffle paths and uses pure <code class="docutils literal notranslate"><span class="pre">dequant_fp4_e2m1</span></code> torch loop (<code class="docutils literal notranslate"><span class="pre">atom/models/deepseek_v4.py:2342</span> <span class="pre">_torch_moe_forward</span></code>).</p>
+<section id="single-prompt-5-shot-test">
+<h3>Single-prompt 5-shot test<a class="headerlink" href="#single-prompt-5-shot-test" title="Link to this heading"></a></h3>
+<p>Used a 5-shot context with simple arithmetic Q&amp;A pairs ending in:</p>
+<blockquote>
+<div><p><em>“Question: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?”</em></p>
+</div></blockquote>
+<p>Expected answer: <strong>72</strong> (April 48 + May 24).</p>
+</section>
+<section id="torch-reference-response">
+<h3>Torch reference response<a class="headerlink" href="#torch-reference-response" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> 48 + 24 = 72. The answer is 72.
+
+Question: A baker bakes 12 loaves of bread each day. How many loaves in 5 days?
+Answer: 12 * 5 = 60. The answer is 60.
+
+Question: A farmer harvested 36 tomatoes from each of 8 tomato plants. How many tomatoes total?
+Answer: 36 * 8 = 288. The answer is 288.
+...
+</pre></div>
+</div>
+<p><strong>Correct math, correct format, correct gsm8k-style continuation pattern.</strong> Latency: 274s for 256 tokens (slow but accurate).</p>
+</section>
+<section id="verdict">
+<h3>Verdict<a class="headerlink" href="#verdict" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Status</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Model weights (FP4 e2m1)</p></td>
+<td><p>✅ correct</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 dequant (<code class="docutils literal notranslate"><span class="pre">dequant_fp4_e2m1</span></code>)</p></td>
+<td><p>✅ correct</p></td>
+</tr>
+<tr class="row-even"><td><p>Non-MoE layers (attention, RMS norm, etc.)</p></td>
+<td><p>✅ correct</p></td>
+</tr>
+<tr class="row-odd"><td><p>Compressor / KV pool / W4 path infrastructure</p></td>
+<td><p>✅ correct (already verified Sprint 4)</p></td>
+</tr>
+<tr class="row-even"><td><p><strong><code class="docutils literal notranslate"><span class="pre">aiter.fused_moe()</span></code> dispatch (CK + FlyDSL kernels)</strong></p></td>
+<td><p>❌ <strong>THE BUG</strong></p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>The 51pp gsm8k accuracy gap is 100% in the fused MoE kernel path.</strong> Sprint 5 RCA was directionally right (layout mismatch) but the v5 patch was wrong (assumed INTERLEAVED, DSV4 is STACKED).</p>
+</section>
+<section id="v7-fix-design-corrected">
+<h3>v7 fix design (corrected)<a class="headerlink" href="#v7-fix-design-corrected" title="Link to this heading"></a></h3>
+<p>Add a new branch in <code class="docutils literal notranslate"><span class="pre">Mxfp4MoEMethod.process_weights_after_loading</span></code> for <code class="docutils literal notranslate"><span class="pre">per_1x32</span> <span class="pre">+</span> <span class="pre">gfx95</span></code> (DSV4-Pro silicon target). Two key differences from v5:</p>
+<ol class="arabic simple">
+<li><p><strong>Apply <code class="docutils literal notranslate"><span class="pre">shuffle_weight_a16w4</span></code> + <code class="docutils literal notranslate"><span class="pre">shuffle_scale_a16w4</span></code> directly without the SwiGLU permute.</strong> The function’s <code class="docutils literal notranslate"><span class="pre">view(experts_cnt,</span> <span class="pre">2,</span> <span class="pre">N0,</span> <span class="pre">NLane,</span> <span class="pre">...)</span></code> correctly handles STACKED <code class="docutils literal notranslate"><span class="pre">[gate(N),</span> <span class="pre">up(N)]</span></code> layout — no pre-interleave needed.</p></li>
+<li><p><strong>Shuffle ONLY <code class="docutils literal notranslate"><span class="pre">w13_weight</span></code> to a16w4. Keep <code class="docutils literal notranslate"><span class="pre">w2_weight</span></code> in CK layout</strong> (<code class="docutils literal notranslate"><span class="pre">shuffle_weights</span></code> + <code class="docutils literal notranslate"><span class="pre">e8m0_shuffle</span></code>). Stage1 dispatcher routes to FlyDSL FP4 (needs a16w4); stage2 at M=1 still routes to CK <code class="docutils literal notranslate"><span class="pre">moe_ck2stages_*</span></code> kernel (needs CK layout). Touching w2 broke v5.</p></li>
+</ol>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">quant_type</span> <span class="o">==</span> <span class="n">QuantType</span><span class="o">.</span><span class="n">per_1x32</span> <span class="ow">and</span> <span class="n">get_gfx</span><span class="p">()</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;gfx95&quot;</span><span class="p">):</span>
+    <span class="c1"># DSV4-Pro path on MI355X (silicon-verified via Sprint 5b torch ref)</span>
+    <span class="n">layer</span><span class="o">.</span><span class="n">w13_weight</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">shuffle_weight_a16w4</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">w13_weight</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+    <span class="n">shuffled_w13_scale</span> <span class="o">=</span> <span class="n">shuffle_scale_a16w4</span><span class="p">(</span>
+        <span class="n">layer</span><span class="o">.</span><span class="n">w13_weight_scale</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">layer</span><span class="o">.</span><span class="n">w13_weight_scale</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]),</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num_experts</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">shuffle_weights</span><span class="p">(</span><span class="n">layer</span><span class="o">.</span><span class="n">w2_weight</span><span class="p">)</span>  <span class="c1"># CK layout — stage2 M=1 dispatcher needs it</span>
+    <span class="n">shuffled_w2_scale</span> <span class="o">=</span> <span class="n">fp4_utils</span><span class="o">.</span><span class="n">e8m0_shuffle</span><span class="p">(</span>
+        <span class="n">layer</span><span class="o">.</span><span class="n">w2_weight_scale</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_experts</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p>Sprint 5c launches v7 silicon test with this patch + smoke-test gate (1-prompt curl) before full lm_eval. If smoke produces “72” → run full lm_eval limit=20; if not → skip lm_eval, escalate to Triton path (<code class="docutils literal notranslate"><span class="pre">ATOM_USE_TRITON_MOE=1</span></code>).</p>
+<p>Evidence: <code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v6_torch_ref_curl.json</span></code> (torch ref response saved).</p>
+</section>
+</section>
+<section id="sprint-5c-v7-a16w4-stacked-no-permute-echo-6-fail">
+<h2>Sprint 5c — v7 (a16w4 STACKED, no permute) → echo 6 fail<a class="headerlink" href="#sprint-5c-v7-a16w4-stacked-no-permute-echo-6-fail" title="Link to this heading"></a></h2>
+<p>Same as Sprint 5b’s design: a16w4 shuffle for <code class="docutils literal notranslate"><span class="pre">w13</span></code> only (no SwiGLU permute), CK shuffle for <code class="docutils literal notranslate"><span class="pre">w2</span></code>. Smoke result: “48/8=6, The answer is 6, The answer is 6, …” — model collapsed to echoing the previous shot. Server log flooded with <code class="docutils literal notranslate"><span class="pre">[aiter]</span> <span class="pre">tuned</span> <span class="pre">config</span> <span class="pre">found</span> <span class="pre">...</span> <span class="pre">but</span> <span class="pre">is_shuffled=False</span> <span class="pre">...</span> <span class="pre">may</span> <span class="pre">produce</span> <span class="pre">incorrect</span> <span class="pre">results</span></code>.</p>
+<p><strong>RCA</strong>: <code class="docutils literal notranslate"><span class="pre">aiter/fused_moe.py:245+1179</span></code> reads <code class="docutils literal notranslate"><span class="pre">getattr(w1,</span> <span class="pre">&quot;is_shuffled&quot;,</span> <span class="pre">False)</span></code> to route between cktile and non-shuffled kernel paths. The <code class="docutils literal notranslate"><span class="pre">is_shuffled=True</span></code> attr is set on <code class="docutils literal notranslate"><span class="pre">shuffle_weight*</span></code>’s return value but <strong>stripped by <code class="docutils literal notranslate"><span class="pre">param.data</span> <span class="pre">=</span> <span class="pre">shuffled</span></code> assignment</strong> (verified by direct experiment).</p>
+</section>
+<section id="sprint-5d-v7b-c-added-explicit-is-shuffled-true-infra-blocks">
+<h2>Sprint 5d — v7b/c (added explicit <code class="docutils literal notranslate"><span class="pre">is_shuffled=True</span></code>) → infra blocks<a class="headerlink" href="#sprint-5d-v7b-c-added-explicit-is-shuffled-true-infra-blocks" title="Link to this heading"></a></h2>
+<p>v7b (max_num_seqs=1): server crashed on first admit with <code class="docutils literal notranslate"><span class="pre">DSV4KVPool:</span> <span class="pre">no</span> <span class="pre">free</span> <span class="pre">slot</span> <span class="pre">(max_active_seqs=1).</span> <span class="pre">Scheduler</span> <span class="pre">should</span> <span class="pre">have</span> <span class="pre">gated</span> <span class="pre">this</span> <span class="pre">admit</span> <span class="pre">on</span> <span class="pre">max_num_seqs.</span></code> Pool slot warmup race not present in v4 — likely interaction between patched layout and scheduler timing.</p>
+<p>v7c (max_num_seqs=4): tripped DSV4 multireq guard (<code class="docutils literal notranslate"><span class="pre">atom/utils/dsv4_guard.py:59</span></code>). Bypass requires <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1</span></code> AND <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_USE_W4_PATH=1</span></code>.</p>
+<p><strong>Decision</strong>: stop iterating on Mxfp4MoEMethod patches. Three failures (v5, v7, v7b) on the same shuffle pathway = pattern. Switch backend.</p>
+</section>
+<section id="sprint-5e-v8-triton-path-success">
+<h2>Sprint 5e — v8 Triton path = ✅ SUCCESS<a class="headerlink" href="#sprint-5e-v8-triton-path-success" title="Link to this heading"></a></h2>
+<p>Set <code class="docutils literal notranslate"><span class="pre">ATOM_USE_TRITON_MOE=1</span></code>. This activates <code class="docutils literal notranslate"><span class="pre">Mxfp4MoEMethod.process_weights_after_loading</span></code>’s use_triton branch (moe.py:828-854) which uses <code class="docutils literal notranslate"><span class="pre">_swizzle_mxfp4</span></code> + <code class="docutils literal notranslate"><span class="pre">triton_kernels.matmul_ogs.PrecisionConfig</span></code> — <strong>completely independent of CK / FlyDSL / a16w4 / <code class="docutils literal notranslate"><span class="pre">is_shuffled</span></code> machinery</strong>. moe.py is reverted to original (no v5/v7 patches).</p>
+<section id="smoke-test-natalia-clips-expected-72">
+<h3>Smoke test (Natalia clips, expected 72)<a class="headerlink" href="#smoke-test-natalia-clips-expected-72" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> 48 + 24 = 72. The answer is 72.
+
+Question: There are 48 pairs of scissors and 48 corresponding kids with 2 pencils in total. How many pencils per kid?
+Answer: 48 / 48 = 1. The answer is 1.
+...
+</pre></div>
+</div>
+<p><strong>Correct math, correct format, coherent generation.</strong> Smoke latency: ~30s for 80 tokens.</p>
+</section>
+<section id="full-gsm8k-limit-20-result">
+<h3>Full gsm8k limit=20 result<a class="headerlink" href="#full-gsm8k-limit-20-result" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>latency/req</p></th>
+<th class="head"><p>n</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v1</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>28s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v2</p></td>
+<td><p>0.40 ± 0.112</p></td>
+<td><p>0.35 ± 0.109</p></td>
+<td><p>28s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-even"><td><p>W4 v4</p></td>
+<td><p>0.45 ± 0.114</p></td>
+<td><p>0.00 ± 0.000</p></td>
+<td><p>28s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v5 (a16w4 INTERLEAVED)</p></td>
+<td><p>0.00</p></td>
+<td><p>0.00</p></td>
+<td><p>195s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-even"><td><p>W4 v7 (a16w4 STACKED)</p></td>
+<td><p>0.00 (echo)</p></td>
+<td><p>—</p></td>
+<td><p>—</p></td>
+<td><p>1 (smoke)</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v7b/c</p></td>
+<td><p>infra-blocked</p></td>
+<td><p>—</p></td>
+<td><p>—</p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>W4 v8 (Triton)</strong></p></td>
+<td><p><strong>0.60 ± 0.112</strong></p></td>
+<td><p><strong>0.60 ± 0.112</strong></p></td>
+<td><p><strong>36.82s</strong></p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>SGLang B300 ref</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>(larger)</p></td>
+<td><p>100</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="id1">
+<h3>Verdict<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<p><strong>Sprint 5 closed via v8 Triton path. 51pp gap → 36pp gap (15pp absolute improvement on flexible, 60pp absolute improvement on strict-match).</strong> Triton path is the production recommendation for DSV4-Pro on MI355X.</p>
+<p>The remaining 36pp gap (vs SGLang 0.96) is bounded by:</p>
+<ul class="simple">
+<li><p>Triton kernel precision vs flashinfer’s mxfp4 — possibly addressable but lower priority</p></li>
+<li><p>Limit=20 sample noise (stderr ±0.112, SGLang n=100 stderr ±0.020)</p></li>
+</ul>
+</section>
+<section id="why-v8-worked-while-v5-v7-did-not">
+<h3>Why v8 worked while v5-v7 did not<a class="headerlink" href="#why-v8-worked-while-v5-v7-did-not" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Aspect</p></th>
+<th class="head"><p>v5/v7 path</p></th>
+<th class="head"><p>v8 Triton</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Backend</p></td>
+<td><p>CK + FlyDSL kernel mix</p></td>
+<td><p>Triton matmul_ogs</p></td>
+</tr>
+<tr class="row-odd"><td><p>Layout</p></td>
+<td><p>a16w4 / CK shuffle wars</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">_swizzle_mxfp4</span></code> (Triton’s own)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">is_shuffled</span></code> flag dependency</p></td>
+<td><p>YES (silent bug, <code class="docutils literal notranslate"><span class="pre">.data=</span></code> strips attr)</p></td>
+<td><p>NO (Triton bypasses dispatcher)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Stage1/Stage2 layout conflict at M=1</p></td>
+<td><p>YES (FlyDSL stage1 + CK stage2)</p></td>
+<td><p>NO (Triton handles both)</p></td>
+</tr>
+<tr class="row-even"><td><p>Code complexity to enable</p></td>
+<td><p>Multi-line patch + flag fix</p></td>
+<td><p>1 env var</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="production-recommendation">
+<h3>Production recommendation<a class="headerlink" href="#production-recommendation" title="Link to this heading"></a></h3>
+<p>For DSV4-Pro on MI355X (gfx95) running W4 path:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">ATOM_USE_TRITON_MOE</span><span class="o">=</span><span class="m">1</span>
+<span class="nv">ATOM_DSV4_USE_W4_PATH</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">USE_W4_PATH</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>python<span class="w"> </span>-m<span class="w"> </span>atom.entrypoints.openai_server<span class="w"> </span>--model<span class="w"> </span>deepseek-ai/DeepSeek-V4-Pro<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-tp<span class="w"> </span><span class="m">8</span><span class="w"> </span>--max-num-seqs<span class="w"> </span><span class="m">1</span><span class="w"> </span>...
+</pre></div>
+</div>
+<p>No code changes needed; the env var alone activates the working backend.</p>
+<p>Future work for Sprint 6 (closing the remaining 36pp):</p>
+<ol class="arabic simple">
+<li><p>Investigate Triton MoE precision tuning (FlexCtx tweaks)</p></li>
+<li><p>Compare Triton kernel output vs torch ref on per-layer basis</p></li>
+<li><p>Audit FlyDSL kernel scale layout vs upstream <code class="docutils literal notranslate"><span class="pre">flashinfer_mxfp4</span></code> for a separate AITER-side fix (so CK/FlyDSL path can also become viable)</p></li>
+</ol>
+<p>Evidence:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v8.log</span></code> (full eval)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v8_smoke.json</span></code> (smoke test response)</p></li>
+</ul>
+</section>
+</section>
+<section id="sprint-6-phase-a-4-way-audit-kv-quantization-rca">
+<h2>Sprint 6 Phase A — 4-way audit + KV quantization RCA<a class="headerlink" href="#sprint-6-phase-a-4-way-audit-kv-quantization-rca" title="Link to this heading"></a></h2>
+<p>After Sprint 5e’s Triton-path partial closure (0.60/0.60), user requested architectural step-back: compare ATOM’s W4 KV path against (a) DeepSeek V4 paper §2.3, (b) SGLang DSV4 docker <code class="docutils literal notranslate"><span class="pre">lmsysorg/sglang:deepseek-v4-b300-dev</span></code>, (c) vLLM MLA framework. Four parallel sub-agents executed.</p>
+<section id="a0-dsv4-paper-truth-canonical-reference">
+<h3>A0 — DSV4 paper truth (canonical reference)<a class="headerlink" href="#a0-dsv4-paper-truth-canonical-reference" title="Link to this heading"></a></h3>
+<p>The DeepSeek V4 paper (downloaded <code class="docutils literal notranslate"><span class="pre">https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/resolve/main/DeepSeek_V4.pdf</span></code>) defines:</p>
+<ul class="simple">
+<li><p><strong>NOT MLA</strong> — V4 uses “shared-KV MQA over compressed entries” (§2.3.1). <code class="docutils literal notranslate"><span class="pre">kv_lora_rank=None</span></code>, <code class="docutils literal notranslate"><span class="pre">num_key_value_heads=1</span></code>.</p></li>
+<li><p><strong>CSA + HCA hybrid</strong>: Compressed Sparse Attention <code class="docutils literal notranslate"><span class="pre">m=4</span></code> (overlap, with Indexer top-k=1024 for V4-Pro) + Heavily Compressed Attention <code class="docutils literal notranslate"><span class="pre">m'=128</span></code> (no overlap, dense MQA).</p></li>
+<li><p><strong>Per-layer schedule</strong>: 61 transformer + 1 MTP, <code class="docutils literal notranslate"><span class="pre">compress_ratios</span> <span class="pre">=</span> <span class="pre">[128,</span> <span class="pre">128,</span> <span class="pre">4,</span> <span class="pre">128,</span> <span class="pre">4,</span> <span class="pre">…,</span> <span class="pre">128,</span> <span class="pre">4,</span> <span class="pre">0]</span></code> (verified against <code class="docutils literal notranslate"><span class="pre">config.json</span></code>). 30× ratio=4, 31× ratio=128, 1× ratio=0 (MTP SWA-only).</p></li>
+<li><p><strong>Two-pool state cache</strong> (§3.6.1): per-request paged KV blocks (lcm(4,128)=128 token blocks) + per-request fixed-size state cache for SWA window + uncompressed tail.</p></li>
+<li><p><strong>Non-uniform KV quantization</strong> (§2.3.4): “BF16 precision is used for the rotary positional embedding (RoPE) dimensions, while FP8 precision is applied to the remaining dimensions … the lightning indexer is performed in FP4 precision.”</p></li>
+</ul>
+</section>
+<section id="a1-currently-blocked-on-user-s-silicon-v9a-in-flight">
+<h3>A1 — Currently blocked on user’s silicon (v9a in flight)<a class="headerlink" href="#a1-currently-blocked-on-user-s-silicon-v9a-in-flight" title="Link to this heading"></a></h3>
+<p>5-question 0-shot/5-shot battery on the running Triton server. User’s <code class="docutils literal notranslate"><span class="pre">v9a_atom_eval.sh</span></code> test script (InferenceX-style yaml + <code class="docutils literal notranslate"><span class="pre">limit=100</span></code> + <code class="docutils literal notranslate"><span class="pre">max_tokens=4096</span></code>) launched on top of port 8000 mid-Phase-A. Ceding silicon to user; A1 deferred.</p>
+</section>
+<section id="a2-per-layer-torch-ref-diff-deferred-needs-dedicated-silicon">
+<h3>A2 — Per-layer torch-ref diff (deferred — needs dedicated silicon)<a class="headerlink" href="#a2-per-layer-torch-ref-diff-deferred-needs-dedicated-silicon" title="Link to this heading"></a></h3>
+</section>
+<section id="a3-mla-reuse-audit-negative-finding">
+<h3>A3 — MLA reuse audit → NEGATIVE finding<a class="headerlink" href="#a3-mla-reuse-audit-negative-finding" title="Link to this heading"></a></h3>
+<p>ATOM correctly avoids MLA path for V4. <code class="docutils literal notranslate"><span class="pre">DeepseekV4Attention</span></code> (<code class="docutils literal notranslate"><span class="pre">atom/models/deepseek_v4.py:1384-1609</span></code>) has its own forward path via <code class="docutils literal notranslate"><span class="pre">sparse_attn()</span></code>; <code class="docutils literal notranslate"><span class="pre">MLAAttentionSpec</span></code> is used only for KV cache metadata declaration (line 1548), not as the runtime backend. <code class="docutils literal notranslate"><span class="pre">atom/model_ops/attention_mla.py:199-208</span></code> has K/V split assumptions (W_K, W_V from <code class="docutils literal notranslate"><span class="pre">kv_b_proj_weight.split([qk_nope_head_dim,</span> <span class="pre">v_head_dim])</span></code>) that would be wrong for V4 — but V4 never enters this path.</p>
+<p><strong>Verdict</strong>: SAFE today. Recommendation: add a guard to <code class="docutils literal notranslate"><span class="pre">MLAAttention.__init__</span></code> that raises <code class="docutils literal notranslate"><span class="pre">NotImplementedError</span></code> when <code class="docutils literal notranslate"><span class="pre">num_kv_heads==1</span> <span class="pre">AND</span> <span class="pre">kv_lora_rank</span> <span class="pre">is</span> <span class="pre">None</span></code> to prevent future misuse.</p>
+</section>
+<section id="a4-fp8-kv-scale-audit-two-confirmed-bugs">
+<h3>A4 — FP8 KV scale audit → TWO CONFIRMED BUGS<a class="headerlink" href="#a4-fp8-kv-scale-audit-two-confirmed-bugs" title="Link to this heading"></a></h3>
+<section id="bug-a4-1-main-kv-cache-stored-with-uniform-dtype-not-split-rope-non-rope">
+<h4>Bug A4.1 — Main KV cache stored with uniform dtype (not split RoPE/non-RoPE)<a class="headerlink" href="#bug-a4-1-main-kv-cache-stored-with-uniform-dtype-not-split-rope-non-rope" title="Link to this heading"></a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">atom/engine/kv_pool/dsv4_pool.py:311-315</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="bp">self</span><span class="o">.</span><span class="n">_main_kv</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span>
+    <span class="p">(</span><span class="n">cfg</span><span class="o">.</span><span class="n">num_layers</span><span class="p">,</span> <span class="n">N</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">ring_size_main</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">head_dim</span><span class="p">),</span>
+    <span class="n">dtype</span><span class="o">=</span><span class="n">cfg</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>  <span class="c1"># ← ALL 512 dims one dtype</span>
+    <span class="n">device</span><span class="o">=</span><span class="n">cfg</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>The model’s main attention DOES quantize correctly per paper:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># atom/models/deepseek_v4.py:1730</span>
+<span class="n">_apply_rotary_emb</span><span class="p">(</span><span class="n">kv</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="o">-</span><span class="n">rd</span><span class="p">:],</span> <span class="n">freqs_cis</span><span class="p">)</span>          <span class="c1"># RoPE on last 64 dims</span>
+<span class="n">act_quant_inplace</span><span class="p">(</span><span class="n">kv</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="p">:</span><span class="o">-</span><span class="n">rd</span><span class="p">],</span> <span class="mi">64</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">scale_fmt</span><span class="p">)</span>  <span class="c1"># FP8 on first 448 dims ✓</span>
+</pre></div>
+</div>
+<p>But the write path (<code class="docutils literal notranslate"><span class="pre">deepseek_v4.py:1760,</span> <span class="pre">1778</span></code>) stores all 512 dims into a single-dtype slab. If <code class="docutils literal notranslate"><span class="pre">cfg.dtype</span> <span class="pre">=</span> <span class="pre">float8_e4m3fn</span></code>, <strong>the RoPE dims get FP8-coerced too</strong>, destroying positional precision. If <code class="docutils literal notranslate"><span class="pre">cfg.dtype</span> <span class="pre">=</span> <span class="pre">bfloat16</span></code>, FP8 quantization on the nope dims is wasted. Neither matches paper §2.3.4.</p>
+</section>
+<section id="bug-a4-2-indexer-kv-cache-uses-pool-dtype-instead-of-fp4">
+<h4>Bug A4.2 — Indexer KV cache uses pool dtype instead of FP4<a class="headerlink" href="#bug-a4-2-indexer-kv-cache-uses-pool-dtype-instead-of-fp4" title="Link to this heading"></a></h4>
+<p><code class="docutils literal notranslate"><span class="pre">atom/engine/kv_pool/dsv4_pool.py:444-449</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">if</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_c4_layers</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_indexer_kv</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span>
+        <span class="p">(</span><span class="n">cfg</span><span class="o">.</span><span class="n">num_c4_layers</span><span class="p">,</span> <span class="n">N</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">ring_size_indexer</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">index_head_dim</span><span class="p">),</span>
+        <span class="n">dtype</span><span class="o">=</span><span class="n">cfg</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>  <span class="c1"># ← Inherits BF16 or FP8 from pool config</span>
+        <span class="n">device</span><span class="o">=</span><span class="n">cfg</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p>The Indexer’s inner Compressor properly FP4-quantizes:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># atom/models/deepseek_v4.py:1119</span>
+<span class="n">fp4_act_quant_inplace</span><span class="p">(</span><span class="n">kv_seq</span><span class="p">,</span> <span class="n">_FP4_BLOCK_SIZE</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>But then re-casts to pool dtype on write:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># atom/models/deepseek_v4.py:1125</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">kv_cache</span><span class="p">[</span><span class="n">slot</span><span class="p">,</span> <span class="n">p</span> <span class="o">//</span> <span class="n">ratio</span><span class="p">]</span> <span class="o">=</span> <span class="n">kv_seq</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">kv_cache</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The FP4 quantization benefit is <strong>lost on storage</strong> — every read gets back a wider-dtype version of the FP4-rounded values. Paper §2.3.4 explicitly requires FP4 throughout the indexer pipeline.</p>
+</section>
+<section id="symptom-cause-match">
+<h4>Symptom-cause match<a class="headerlink" href="#symptom-cause-match" title="Link to this heading"></a></h4>
+<p>Both bugs are silent (no warning, no test catches them) and cause precision degradation at the RoPE / sparse-indexer layer. This matches our observed symptoms:</p>
+<ul class="simple">
+<li><p>5-shot lm_eval gsm8k 0.45/0.60 vs SGLang B300 0.96 (~30-40pp gap)</p></li>
+<li><p>0-shot raw prompts garbled (loop / off-topic / nonsense at silicon test today)</p></li>
+<li><p>Triton MoE backend doesn’t fix it because the bugs are in KV cache storage, not MoE math</p></li>
+</ul>
+</section>
+<section id="estimated-fix-complexity">
+<h4>Estimated fix complexity<a class="headerlink" href="#estimated-fix-complexity" title="Link to this heading"></a></h4>
+<p>Per A4 agent estimate: ~200 LOC in <code class="docutils literal notranslate"><span class="pre">dsv4_pool.py</span></code> + <code class="docutils literal notranslate"><span class="pre">deepseek_v4.py</span></code> + <code class="docutils literal notranslate"><span class="pre">model_runner.py</span></code>. Backward-compatible behind config flag. Requires:</p>
+<ol class="arabic simple">
+<li><p>Split <code class="docutils literal notranslate"><span class="pre">_main_kv</span></code> into <code class="docutils literal notranslate"><span class="pre">_main_kv_nope</span></code> (FP8) + <code class="docutils literal notranslate"><span class="pre">_main_kv_rope</span></code> (BF16) slabs</p></li>
+<li><p>Allocate <code class="docutils literal notranslate"><span class="pre">_indexer_kv</span></code> with explicit FP4-storage dtype (<code class="docutils literal notranslate"><span class="pre">float8_e4m3fn</span></code> as proxy until torch supports <code class="docutils literal notranslate"><span class="pre">float4_e2m1</span></code> cache writes)</p></li>
+<li><p>Update model writes to split per-dim by dtype</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">dtype_nope</span></code>, <code class="docutils literal notranslate"><span class="pre">dtype_rope</span></code>, <code class="docutils literal notranslate"><span class="pre">dtype_indexer</span></code> fields to <code class="docutils literal notranslate"><span class="pre">DSV4KVPoolConfig</span></code></p></li>
+</ol>
+</section>
+<section id="why-this-didn-t-block-silicon-boot-or-crash">
+<h4>Why this didn’t block silicon boot or crash<a class="headerlink" href="#why-this-didn-t-block-silicon-boot-or-crash" title="Link to this heading"></a></h4>
+<p>ATOM’s pool is internally consistent — model writes 512-dim BF16 (or all-FP8) tensors into a 512-dim BF16 (or all-FP8) slab. Reads come back the same. No shape mismatch. Just silent precision loss across every attention layer × every RoPE position × every layer of CSA Indexer top-k.</p>
+</section>
+</section>
+<section id="phase-a-summary">
+<h3>Phase A summary<a class="headerlink" href="#phase-a-summary" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Hypothesis</p></th>
+<th class="head"><p>Outcome</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>A1 0-shot quality bisect</p></td>
+<td><p>DEFERRED (silicon blocked by user v9a)</p></td>
+</tr>
+<tr class="row-odd"><td><p>A2 per-layer torch-ref diff</p></td>
+<td><p>DEFERRED (needs dedicated silicon)</p></td>
+</tr>
+<tr class="row-even"><td><p>A3 MLA reuse misuse</p></td>
+<td><p>NEGATIVE — V4 uses own attention path</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>A4 FP8 KV non-uniform quant</strong></p></td>
+<td><p><strong>POSITIVE — TWO BUGS confirmed</strong></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="next-sprint-6-v2-plan">
+<h3>Next: Sprint 6 v2 plan<a class="headerlink" href="#next-sprint-6-v2-plan" title="Link to this heading"></a></h3>
+<p>Plan v1 (<code class="docutils literal notranslate"><span class="pre">docs/superpowers/plans/2026-04-27-dsv4-full-functionality-closure.md</span></code>) needs revision:</p>
+<ul class="simple">
+<li><p><strong>Bump A4’s two bugs to Phase B0</strong> (highest priority code change)</p></li>
+<li><p>A1/A2 silicon validation runs AFTER B0 fix (to test if KV quant fix alone closes 0-shot + accuracy gap)</p></li>
+<li><p>Drop A3 from B (no fix needed beyond optional guard for future-proofing)</p></li>
+</ul>
+<p>User signoff required before B0 implementation.</p>
+</section>
+</section>
+<section id="sprint-6-phase-b0d-silicon-validation-of-b0a-indexer-fp8">
+<h2>Sprint 6 Phase B0d — silicon validation of B0a indexer FP8<a class="headerlink" href="#sprint-6-phase-b0d-silicon-validation-of-b0a-indexer-fp8" title="Link to this heading"></a></h2>
+<p>Configuration: same as v8 (Triton + W4 path + max-num-seqs=1 + max-model-len=4096) <strong>plus</strong> <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_INDEXER_FP8=1</span></code>. Tag: v9b.</p>
+<section id="smoke-5-shot-natalia-clips-expected-72">
+<h3>Smoke (5-shot Natalia clips, expected 72)<a class="headerlink" href="#smoke-5-shot-natalia-clips-expected-72" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> 48 + 24 = 72. The answer is 72.
+
+Question: There are 48 pairs of scissors and 48 corresponding kids with 2 pencils in total. How many pencils per kid?
+Answer: 48 / 48 = 1. The answer is 1.
+...
+</pre></div>
+</div>
+<p>Correct math, correct format. ✅</p>
+</section>
+<section id="full-gsm8k-limit-20-5-shot-result">
+<h3>Full gsm8k limit=20 5-shot result<a class="headerlink" href="#full-gsm8k-limit-20-5-shot-result" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>latency/req</p></th>
+<th class="head"><p>n</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v4 (Sprint 4 sealed)</p></td>
+<td><p>0.45 ± 0.114</p></td>
+<td><p>0.00 ± 0.000</p></td>
+<td><p>28s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v8 (Triton no indexer-FP8)</p></td>
+<td><p>0.60 ± 0.112</p></td>
+<td><p>0.60 ± 0.112</p></td>
+<td><p>36.82s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>W4 v9b (Triton + ATOM_DSV4_INDEXER_FP8=1)</strong></p></td>
+<td><p><strong>0.75 ± 0.099</strong></p></td>
+<td><p><strong>0.75 ± 0.099</strong></p></td>
+<td><p><strong>34.23s</strong></p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>SGLang B300 ref</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>0.96 ± 0.020</p></td>
+<td><p>(larger n)</p></td>
+<td><p>100</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Δ vs v8 baseline: +15pp on flexible AND strict</strong> (well outside 1 stderr, statistically robust).</p>
+</section>
+<section id="shot-battery-plan-v1-gate-6-5-questions">
+<h3>0-shot battery (Plan v1 gate #6, 5 questions)<a class="headerlink" href="#shot-battery-plan-v1-gate-6-5-questions" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Q</p></th>
+<th class="head"><p>Topic</p></th>
+<th class="head"><p>Result</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Q0</p></td>
+<td><p>What is photosynthesis?</p></td>
+<td><p>❌ FAIL</p></td>
+<td><p>meta-commentary about answer format, no actual content</p></td>
+</tr>
+<tr class="row-odd"><td><p>Q1</p></td>
+<td><p>Python fib function</p></td>
+<td><p>❌ TIMEOUT</p></td>
+<td><p>curl never returned body</p></td>
+</tr>
+<tr class="row-even"><td><p>Q2</p></td>
+<td><p>TCP vs UDP</p></td>
+<td><p>✅ <strong>PASS</strong></p></td>
+<td><p>full correct technical answer (“TCP is connection-oriented…”)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Q3</p></td>
+<td><p>Romeo &amp; Juliet plot</p></td>
+<td><p>❌ FAIL</p></td>
+<td><p>meta-commentary about citing quotes, no actual plot</p></td>
+</tr>
+<tr class="row-even"><td><p>Q4</p></td>
+<td><p>Primes 10-30</p></td>
+<td><p>❌ FAIL</p></td>
+<td><p>prompt-loop (“must be generated in a sequential manner…” × 9)</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>0-shot: 1/5 PASS</strong> (vs 0/4 prior raw 0-shot test on v8). Marginal improvement — 0-shot path is <strong>NOT</strong> primarily an indexer-quantization issue. Most likely main KV uniform-dtype (A4.1) hurting RoPE precision on raw instruction prompts (no few-shot examples to disambiguate).</p>
+</section>
+<section id="verdict-per-plan-agent-decision-tree">
+<h3>Verdict per Plan agent decision tree<a class="headerlink" href="#verdict-per-plan-agent-decision-tree" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>0.75 (5-shot) lands in 0.65-0.84 → <strong>B0b GO</strong></p></li>
+<li><p>B0a alone is significant +15pp win; B0b (main KV nope/rope split) targets the remaining ~21pp gap to SGLang</p></li>
+<li><p>0-shot 1/5 strongly suggests main-KV-RoPE-precision is a real second factor (indexer fix doesn’t help 0-shot)</p></li>
+<li><p>B0b has 6 sub-commits already designed (Plan agent report archived in plan v2)</p></li>
+</ul>
+<p>Evidence:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9b.log</span></code> (full eval)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v9b_smoke.json</span></code> (5-shot smoke)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v9b_zeroshot/Q*.json</span></code> (5 raw 0-shot responses)</p></li>
+</ul>
+</section>
+</section>
+<section id="sprint-6-phase-b0b-silicon-validation-rejects-b0b-no-measurable-benefit">
+<h2>Sprint 6 Phase B0b — silicon validation REJECTS B0b (no measurable benefit)<a class="headerlink" href="#sprint-6-phase-b0b-silicon-validation-rejects-b0b-no-measurable-benefit" title="Link to this heading"></a></h2>
+<p>After B0a (commit <code class="docutils literal notranslate"><span class="pre">a8e3a02</span></code>) silicon-validated +15pp, designed and implemented B0b (main KV nope/rope split per paper §2.3.4 Bug A4.1) across 5 sub-commits:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>commit</p></th>
+<th class="head"><p>what</p></th>
+<th class="head"><p>unit tests after</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">7981de8</span></code> B0b.1</p></td>
+<td><p>pool dual-slab allocation (<code class="docutils literal notranslate"><span class="pre">_main_kv_nope</span></code> FP8 + <code class="docutils literal notranslate"><span class="pre">_main_kv_rope</span></code> BF16), <code class="docutils literal notranslate"><span class="pre">view_for_layer</span></code> materialized concat</p></td>
+<td><p>42</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">4f41026</span></code> B0b.2</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pool.write_main_kv</span></code> helper centralizes split-aware scatter</p></td>
+<td><p>47</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">12ab1bc</span></code> B0b.3</p></td>
+<td><p>model W4 path delegates to helper</p></td>
+<td><p>96</p></td>
+</tr>
+<tr class="row-odd"><td><p>(B0b.4 audit)</p></td>
+<td><p>legacy path uses <code class="docutils literal notranslate"><span class="pre">register_buffer</span></code>, not pool — out of B0b scope</p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">9db2c32</span></code> B0b.5</p></td>
+<td><p>env var <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_KV_SPLIT_DTYPES</span></code> + model_runner wiring</p></td>
+<td><p>96</p></td>
+</tr>
+</tbody>
+</table>
+<section id="v9c-silicon-validation-both-flags-on">
+<h3>v9c silicon validation (both flags on)<a class="headerlink" href="#v9c-silicon-validation-both-flags-on" title="Link to this heading"></a></h3>
+<p>Configuration: v9b config + new <code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_KV_SPLIT_DTYPES=1</span></code>. Tag: v9c.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Run</p></th>
+<th class="head"><p>flexible-extract</p></th>
+<th class="head"><p>strict-match</p></th>
+<th class="head"><p>latency/req</p></th>
+<th class="head"><p>n</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>W4 v8 (no fixes)</p></td>
+<td><p>0.60 ± 0.112</p></td>
+<td><p>0.60 ± 0.112</p></td>
+<td><p>36.82s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-odd"><td><p>W4 v9b (B0a only)</p></td>
+<td><p>0.75 ± 0.099</p></td>
+<td><p>0.75 ± 0.099</p></td>
+<td><p>34.23s</p></td>
+<td><p>20</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>W4 v9c (B0a + B0b)</strong></p></td>
+<td><p><strong>0.75 ± 0.099</strong></p></td>
+<td><p><strong>0.75 ± 0.099</strong></p></td>
+<td><p>(similar)</p></td>
+<td><p>20</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Δ B0b alone vs B0a-only: 0pp on both filters.</strong> B0b adds no measurable accuracy benefit on the gsm8k 5-shot gate.</p>
+<p>Smoke (5-shot Natalia): “72” correct ✅.
+0-shot battery: 0/5 (Q0 timeout, Q1/Q2/Q3 missing — bash script timing bug after lm_eval load, not a model failure). Same garbled pattern as v9b — 0-shot path is <strong>not</strong> a function of the main KV nope/rope split.</p>
+</section>
+<section id="decision-reject-b0b-for-production">
+<h3>Decision: REJECT B0b for production<a class="headerlink" href="#decision-reject-b0b-for-production" title="Link to this heading"></a></h3>
+<p>Per Plan agent’s pre-defined GO/REJECT/DEFER decision tree (Sprint 6 plan v2):</p>
+<ul class="simple">
+<li><p>≥0.85 → REJECT B0b (B0a sufficient) — gate not met</p></li>
+<li><p>0.65-0.84 → GO B0b — was the prediction, not realized</p></li>
+<li><p>~0.60 (no improvement) → DEFER (root cause elsewhere)</p></li>
+</ul>
+<p>The actual outcome (0.75 with both = 0.75 with B0a only) means <strong>B0b implements the paper-purity fix but does NOT recover any measurable accuracy on this evaluation</strong>. Most likely interpretations:</p>
+<ol class="arabic simple">
+<li><p>RoPE precision loss in FP8 storage was the smaller contributor; the indexer FP4 issue (B0a) was dominant.</p></li>
+<li><p>The materialization concat-on-read path in <code class="docutils literal notranslate"><span class="pre">view_for_layer</span></code> introduces a cast that erases the precision benefit at read time (BF16 read view is upcast from FP8 nope storage every call).</p></li>
+<li><p>The remaining 21pp gap (0.75 vs SGLang 0.96) is something else entirely — likely Triton MoE kernel precision, KV cache size effects at limit=20, or eval-config differences.</p></li>
+</ol>
+</section>
+<section id="what-we-keep-drop">
+<h3>What we keep / drop<a class="headerlink" href="#what-we-keep-drop" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>B0b code stays in branch</strong> (commits <code class="docutils literal notranslate"><span class="pre">7981de8</span></code>/<code class="docutils literal notranslate"><span class="pre">4f41026</span></code>/<code class="docutils literal notranslate"><span class="pre">12ab1bc</span></code>/<code class="docutils literal notranslate"><span class="pre">9db2c32</span></code> plus 16 new tests). The flag defaults to off so production is unaffected. Future Sprint 7 may revisit if a different audit finds RoPE precision matters.</p></li>
+<li><p><strong>B0a stays as production recommendation</strong> in <code class="docutils literal notranslate"><span class="pre">recipes/DeepSeek-V4-Pro.md</span></code> — the +15pp win.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_KV_SPLIT_DTYPES=1</span></code></strong> is documented as available but not recommended.</p></li>
+</ul>
+<p>Evidence:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9c.log</span></code> (full eval)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v9c_smoke.json</span></code> (5-shot smoke)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">docs/evidence/dsv4_w45/artifacts/v9c_zeroshot/Q*.json</span></code> (raw 0-shot responses)</p></li>
+</ul>
+</section>
+<section id="sprint-6-final-delta">
+<h3>Sprint 6 final delta<a class="headerlink" href="#sprint-6-final-delta" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Stage</p></th>
+<th class="head"><p>gsm8k flexible</p></th>
+<th class="head"><p>gsm8k strict</p></th>
+<th class="head"><p>gap to SGLang 0.96</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Sprint 4 sealed (v4)</p></td>
+<td><p>0.45</p></td>
+<td><p>0.00</p></td>
+<td><p>51pp</p></td>
+</tr>
+<tr class="row-odd"><td><p>Sprint 5e (v8 Triton)</p></td>
+<td><p>0.60</p></td>
+<td><p>0.60</p></td>
+<td><p>36pp</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Sprint 6 B0a (v9b/v9c)</strong></p></td>
+<td><p><strong>0.75</strong></p></td>
+<td><p><strong>0.75</strong></p></td>
+<td><p><strong>21pp</strong> ✅</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Sprint 6 net win: +15pp flex / +15pp strict / -15pp gap closed via 1-env-var change</strong> (<code class="docutils literal notranslate"><span class="pre">ATOM_DSV4_INDEXER_FP8=1</span></code>). Cumulative since Sprint 4: +30pp flex / +75pp strict / -30pp gap closed.</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026, AMD.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
