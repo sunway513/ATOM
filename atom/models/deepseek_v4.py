@@ -1344,55 +1344,27 @@ class Indexer(nn.Module):
         # not over-slice kv_cache (max_batch_size << seqlen during
         # warmup).
         bsz_idx = q.shape[1]
-        # Sprint 7b (issue #37): cast indexer kv to BF16 on read (FP8 storage
-        # path), see EVIDENCE_M.md Sprint 7b.
-        # Sprint 7d (issue #37): use per-seq POOL SLOT indices, not
-        # `[:bsz_idx]` (which assumes dense slots [0, bsz_idx)). The pool
-        # allocator gives sparse slots like [7, 14] when batch contains
-        # 2 seqs with stable slot assignment; reading `[:bsz_idx]` reads
-        # OTHER seqs' kv_cache rows → garbled multi-req output. Match the
-        # main attention pattern at deepseek_v4.py:2043-2046 which uses
-        # `forward_batch.req_pool_indices[seg_id]` for per-seq slot lookup.
+        # Sprint 7b (issue #37): cast indexer kv to BF16 on read. When the pool
+        # was allocated with `indexer_dtype=fp8_e4m3fn` (B0a opt-in), the cache
+        # holds FP8 storage; ATOM's pure-PyTorch sparse_attn / einsum requires
+        # BF16. SGLang has a native FP8 kernel (`deep_gemm.fp8_mqa_logits`)
+        # but ATOM doesn't, so we cast on read. Audit: docs/evidence/dsv4_w45/
+        # EVIDENCE_M.md Sprint 7b cast fix.
         if start_pos > 0 and bsz_idx > 1:
             q_per_seq = q.transpose(0, 1).contiguous()  # [N, 1, H, D]
-            if (
-                forward_batch is not None
-                and getattr(forward_batch, "req_pool_indices", None) is not None
-            ):
-                slot_indices = forward_batch.req_pool_indices.to(
-                    device=self.kv_cache.device, dtype=torch.long
-                )  # [N] = per-seq pool slot id
-                kv_per_seq = self.kv_cache[slot_indices, : end_pos // ratio].to(
-                    q_per_seq.dtype
-                )  # [N, t, head_dim] from REAL slots
-            else:
-                # Legacy path (no forward_batch): assume slots [0, bsz_idx)
-                kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio].to(
-                    q_per_seq.dtype
-                )
+            kv_per_seq = self.kv_cache[:bsz_idx, : end_pos // ratio].to(
+                q_per_seq.dtype
+            )  # [N, t, head_dim]
             index_score = torch.einsum(
                 "bshd,btd->bsht", q_per_seq, kv_per_seq
             )  # [N, 1, H, t]
             index_score = index_score.transpose(0, 1).contiguous()  # [1, N, H, t]
         else:
-            # Single-seq path: use slot 0 if no forward_batch, else slot of seq 0
-            if (
-                forward_batch is not None
-                and getattr(forward_batch, "req_pool_indices", None) is not None
-                and forward_batch.req_pool_indices.numel() > 0
-            ):
-                slot0 = int(forward_batch.req_pool_indices[0].item())
-                index_score = torch.einsum(
-                    "bshd,btd->bsht",
-                    q,
-                    self.kv_cache[slot0 : slot0 + 1, : end_pos // ratio].to(q.dtype),
-                )
-            else:
-                index_score = torch.einsum(
-                    "bshd,btd->bsht",
-                    q,
-                    self.kv_cache[:1, : end_pos // ratio].to(q.dtype),
-                )
+            index_score = torch.einsum(
+                "bshd,btd->bsht",
+                q,
+                self.kv_cache[:1, : end_pos // ratio].to(q.dtype),
+            )
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
         # ----- Top-k selection over compressed positions -----
