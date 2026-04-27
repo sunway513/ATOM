@@ -501,3 +501,114 @@ Future work for Sprint 6 (closing the remaining 36pp):
 Evidence:
 - `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v8.log` (full eval)
 - `docs/evidence/dsv4_w45/artifacts/v8_smoke.json` (smoke test response)
+
+## Sprint 6 Phase A — 4-way audit + KV quantization RCA
+
+After Sprint 5e's Triton-path partial closure (0.60/0.60), user requested architectural step-back: compare ATOM's W4 KV path against (a) DeepSeek V4 paper §2.3, (b) SGLang DSV4 docker `lmsysorg/sglang:deepseek-v4-b300-dev`, (c) vLLM MLA framework. Four parallel sub-agents executed.
+
+### A0 — DSV4 paper truth (canonical reference)
+
+The DeepSeek V4 paper (downloaded `https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/resolve/main/DeepSeek_V4.pdf`) defines:
+
+- **NOT MLA** — V4 uses "shared-KV MQA over compressed entries" (§2.3.1). `kv_lora_rank=None`, `num_key_value_heads=1`.
+- **CSA + HCA hybrid**: Compressed Sparse Attention `m=4` (overlap, with Indexer top-k=1024 for V4-Pro) + Heavily Compressed Attention `m'=128` (no overlap, dense MQA).
+- **Per-layer schedule**: 61 transformer + 1 MTP, `compress_ratios = [128, 128, 4, 128, 4, …, 128, 4, 0]` (verified against `config.json`). 30× ratio=4, 31× ratio=128, 1× ratio=0 (MTP SWA-only).
+- **Two-pool state cache** (§3.6.1): per-request paged KV blocks (lcm(4,128)=128 token blocks) + per-request fixed-size state cache for SWA window + uncompressed tail.
+- **Non-uniform KV quantization** (§2.3.4): "BF16 precision is used for the rotary positional embedding (RoPE) dimensions, while FP8 precision is applied to the remaining dimensions … the lightning indexer is performed in FP4 precision."
+
+### A1 — Currently blocked on user's silicon (v9a in flight)
+
+5-question 0-shot/5-shot battery on the running Triton server. User's `v9a_atom_eval.sh` test script (InferenceX-style yaml + `limit=100` + `max_tokens=4096`) launched on top of port 8000 mid-Phase-A. Ceding silicon to user; A1 deferred.
+
+### A2 — Per-layer torch-ref diff (deferred — needs dedicated silicon)
+
+### A3 — MLA reuse audit → NEGATIVE finding
+
+ATOM correctly avoids MLA path for V4. `DeepseekV4Attention` (`atom/models/deepseek_v4.py:1384-1609`) has its own forward path via `sparse_attn()`; `MLAAttentionSpec` is used only for KV cache metadata declaration (line 1548), not as the runtime backend. `atom/model_ops/attention_mla.py:199-208` has K/V split assumptions (W_K, W_V from `kv_b_proj_weight.split([qk_nope_head_dim, v_head_dim])`) that would be wrong for V4 — but V4 never enters this path.
+
+**Verdict**: SAFE today. Recommendation: add a guard to `MLAAttention.__init__` that raises `NotImplementedError` when `num_kv_heads==1 AND kv_lora_rank is None` to prevent future misuse.
+
+### A4 — FP8 KV scale audit → TWO CONFIRMED BUGS
+
+#### Bug A4.1 — Main KV cache stored with uniform dtype (not split RoPE/non-RoPE)
+
+`atom/engine/kv_pool/dsv4_pool.py:311-315`:
+```python
+self._main_kv = torch.zeros(
+    (cfg.num_layers, N, cfg.ring_size_main, cfg.head_dim),
+    dtype=cfg.dtype,  # ← ALL 512 dims one dtype
+    device=cfg.device,
+)
+```
+
+The model's main attention DOES quantize correctly per paper:
+```python
+# atom/models/deepseek_v4.py:1730
+_apply_rotary_emb(kv[..., -rd:], freqs_cis)          # RoPE on last 64 dims
+act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)  # FP8 on first 448 dims ✓
+```
+
+But the write path (`deepseek_v4.py:1760, 1778`) stores all 512 dims into a single-dtype slab. If `cfg.dtype = float8_e4m3fn`, **the RoPE dims get FP8-coerced too**, destroying positional precision. If `cfg.dtype = bfloat16`, FP8 quantization on the nope dims is wasted. Neither matches paper §2.3.4.
+
+#### Bug A4.2 — Indexer KV cache uses pool dtype instead of FP4
+
+`atom/engine/kv_pool/dsv4_pool.py:444-449`:
+```python
+if cfg.num_c4_layers > 0:
+    self._indexer_kv = torch.zeros(
+        (cfg.num_c4_layers, N, cfg.ring_size_indexer, cfg.index_head_dim),
+        dtype=cfg.dtype,  # ← Inherits BF16 or FP8 from pool config
+        device=cfg.device,
+    )
+```
+
+The Indexer's inner Compressor properly FP4-quantizes:
+```python
+# atom/models/deepseek_v4.py:1119
+fp4_act_quant_inplace(kv_seq, _FP4_BLOCK_SIZE)
+```
+
+But then re-casts to pool dtype on write:
+```python
+# atom/models/deepseek_v4.py:1125
+self.kv_cache[slot, p // ratio] = kv_seq.squeeze(0).to(self.kv_cache.dtype)
+```
+
+The FP4 quantization benefit is **lost on storage** — every read gets back a wider-dtype version of the FP4-rounded values. Paper §2.3.4 explicitly requires FP4 throughout the indexer pipeline.
+
+#### Symptom-cause match
+
+Both bugs are silent (no warning, no test catches them) and cause precision degradation at the RoPE / sparse-indexer layer. This matches our observed symptoms:
+- 5-shot lm_eval gsm8k 0.45/0.60 vs SGLang B300 0.96 (~30-40pp gap)
+- 0-shot raw prompts garbled (loop / off-topic / nonsense at silicon test today)
+- Triton MoE backend doesn't fix it because the bugs are in KV cache storage, not MoE math
+
+#### Estimated fix complexity
+
+Per A4 agent estimate: ~200 LOC in `dsv4_pool.py` + `deepseek_v4.py` + `model_runner.py`. Backward-compatible behind config flag. Requires:
+1. Split `_main_kv` into `_main_kv_nope` (FP8) + `_main_kv_rope` (BF16) slabs
+2. Allocate `_indexer_kv` with explicit FP4-storage dtype (`float8_e4m3fn` as proxy until torch supports `float4_e2m1` cache writes)
+3. Update model writes to split per-dim by dtype
+4. Add `dtype_nope`, `dtype_rope`, `dtype_indexer` fields to `DSV4KVPoolConfig`
+
+#### Why this didn't block silicon boot or crash
+
+ATOM's pool is internally consistent — model writes 512-dim BF16 (or all-FP8) tensors into a 512-dim BF16 (or all-FP8) slab. Reads come back the same. No shape mismatch. Just silent precision loss across every attention layer × every RoPE position × every layer of CSA Indexer top-k.
+
+### Phase A summary
+
+| Hypothesis | Outcome |
+|---|---|
+| A1 0-shot quality bisect | DEFERRED (silicon blocked by user v9a) |
+| A2 per-layer torch-ref diff | DEFERRED (needs dedicated silicon) |
+| A3 MLA reuse misuse | NEGATIVE — V4 uses own attention path |
+| **A4 FP8 KV non-uniform quant** | **POSITIVE — TWO BUGS confirmed** |
+
+### Next: Sprint 6 v2 plan
+
+Plan v1 (`docs/superpowers/plans/2026-04-27-dsv4-full-functionality-closure.md`) needs revision:
+- **Bump A4's two bugs to Phase B0** (highest priority code change)
+- A1/A2 silicon validation runs AFTER B0 fix (to test if KV quant fix alone closes 0-shot + accuracy gap)
+- Drop A3 from B (no fix needed beyond optional guard for future-proofing)
+
+User signoff required before B0 implementation.
