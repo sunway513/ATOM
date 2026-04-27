@@ -612,3 +612,53 @@ Plan v1 (`docs/superpowers/plans/2026-04-27-dsv4-full-functionality-closure.md`)
 - Drop A3 from B (no fix needed beyond optional guard for future-proofing)
 
 User signoff required before B0 implementation.
+
+## Sprint 6 Phase B0d — silicon validation of B0a indexer FP8
+
+Configuration: same as v8 (Triton + W4 path + max-num-seqs=1 + max-model-len=4096) **plus** `ATOM_DSV4_INDEXER_FP8=1`. Tag: v9b.
+
+### Smoke (5-shot Natalia clips, expected 72)
+
+```
+ 48 + 24 = 72. The answer is 72.
+
+Question: There are 48 pairs of scissors and 48 corresponding kids with 2 pencils in total. How many pencils per kid?
+Answer: 48 / 48 = 1. The answer is 1.
+...
+```
+Correct math, correct format. ✅
+
+### Full gsm8k limit=20 5-shot result
+
+| Run | flexible-extract | strict-match | latency/req | n |
+|---|---|---|---|---|
+| W4 v4 (Sprint 4 sealed) | 0.45 ± 0.114 | 0.00 ± 0.000 | 28s | 20 |
+| W4 v8 (Triton no indexer-FP8) | 0.60 ± 0.112 | 0.60 ± 0.112 | 36.82s | 20 |
+| **W4 v9b (Triton + ATOM_DSV4_INDEXER_FP8=1)** | **0.75 ± 0.099** | **0.75 ± 0.099** | **34.23s** | 20 |
+| SGLang B300 ref | 0.96 ± 0.020 | 0.96 ± 0.020 | (larger n) | 100 |
+
+**Δ vs v8 baseline: +15pp on flexible AND strict** (well outside 1 stderr, statistically robust).
+
+### 0-shot battery (Plan v1 gate #6, 5 questions)
+
+| Q | Topic | Result | Notes |
+|---|---|---|---|
+| Q0 | What is photosynthesis? | ❌ FAIL | meta-commentary about answer format, no actual content |
+| Q1 | Python fib function | ❌ TIMEOUT | curl never returned body |
+| Q2 | TCP vs UDP | ✅ **PASS** | full correct technical answer ("TCP is connection-oriented...") |
+| Q3 | Romeo & Juliet plot | ❌ FAIL | meta-commentary about citing quotes, no actual plot |
+| Q4 | Primes 10-30 | ❌ FAIL | prompt-loop ("must be generated in a sequential manner..." × 9) |
+
+**0-shot: 1/5 PASS** (vs 0/4 prior raw 0-shot test on v8). Marginal improvement — 0-shot path is **NOT** primarily an indexer-quantization issue. Most likely main KV uniform-dtype (A4.1) hurting RoPE precision on raw instruction prompts (no few-shot examples to disambiguate).
+
+### Verdict per Plan agent decision tree
+
+- 0.75 (5-shot) lands in 0.65-0.84 → **B0b GO**
+- B0a alone is significant +15pp win; B0b (main KV nope/rope split) targets the remaining ~21pp gap to SGLang
+- 0-shot 1/5 strongly suggests main-KV-RoPE-precision is a real second factor (indexer fix doesn't help 0-shot)
+- B0b has 6 sub-commits already designed (Plan agent report archived in plan v2)
+
+Evidence:
+- `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9b.log` (full eval)
+- `docs/evidence/dsv4_w45/artifacts/v9b_smoke.json` (5-shot smoke)
+- `docs/evidence/dsv4_w45/artifacts/v9b_zeroshot/Q*.json` (5 raw 0-shot responses)
