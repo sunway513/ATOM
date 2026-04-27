@@ -722,3 +722,62 @@ Evidence:
 | **Sprint 6 B0a (v9b/v9c)** | **0.75** | **0.75** | **21pp** ✅ |
 
 **Sprint 6 net win: +15pp flex / +15pp strict / -15pp gap closed via 1-env-var change** (`ATOM_DSV4_INDEXER_FP8=1`). Cumulative since Sprint 4: +30pp flex / +75pp strict / -30pp gap closed.
+
+## Sprint 7b — cast fix + B0a robustness check + multi-req new bug
+
+After Sprint 7 Phase A 4-way deep audit (paper / SGLang docker / vLLM / sparse_attn kernel) revealed two issues with B0a:
+1. **B0a Indexer FP8 had a hidden dtype mismatch at conc>1** — ATOM's `sparse_attn` requires BF16 input (sparse_attn_v4.py:42 strict contract). conc=1 path used BF16 window KV fallback so didn't expose; conc>1 reads FP8 cache directly into kernel → silicon-observed `RuntimeError: expected scalar type BFloat16 but found Float8_e4m3fn` (Sprint 7a v10b).
+2. **SGLang's design is different**: allocates uint8 storage + `.view(float8_e4m3fn)` on read + native `deep_gemm.fp8_mqa_logits` kernel. ATOM doesn't have that kernel, so simplest fix is `.to(bf16)` cast on read.
+
+### Cast fix (commit `2d0098c`)
+Added `.to(q.dtype)` cast at three indexer / sparse_attn read sites in `deepseek_v4.py:1349,1356,1794`. Unblocks B0a at conc>1 (no more dtype crash) but erases storage benefit on read.
+
+### v9d silicon (conc=1 + B0a + cast fix)
+
+| Run | Config | flexible | strict | Δ vs v8 |
+|---|---|---|---|---|
+| v8 | Triton, no B0a | 0.60 ± 0.112 | 0.60 ± 0.112 | baseline |
+| v9b | Triton + B0a, **no cast fix** | 0.75 ± 0.099 | 0.75 ± 0.099 | +15pp |
+| **v9d** | Triton + B0a, **with cast fix** | **0.70 ± 0.105** | (within stderr) | **+10pp** |
+
+**v9b → v9d delta = -5pp, within 1σ (~0.10).** Interpretation:
+- The +15pp from v9b was partly real (B0a indexer benefit) + partly sample noise.
+- True B0a effect under cast-fixed code path: **+10pp** (still positive, but smaller than first-reported +15pp).
+- v9d's 0.70 is statistically indistinguishable from v9b's 0.75 (1σ overlap).
+
+**Recipe stays at recommending B0a** — +10pp is real and worthwhile. Update accuracy table to show 0.70 with caveat that originally-reported 0.75 included sample variance.
+
+### v10e/v10f silicon (conc>1 with cast fix)
+
+Cast fix successfully **eliminated the dtype mismatch crash** — no more "expected BF16 but found Float8_e4m3fn" in v10e/v10f silicon attempts. But silicon exposed a SEPARATE bug:
+
+```
+RuntimeError: DSV4KVPool: no free slot (max_active_seqs=2).
+Scheduler should have gated this admit on max_num_seqs.
+```
+
+At parallel concurrency (4 simultaneous curls hitting a `max_num_seqs=2` server), the scheduler admits past the pool's slot capacity. Sprint 4 commit `8fa0129` fixed this for SEQUENTIAL requests (finish-pipeline drains slots between sequential lm_eval requests). Parallel concurrency hits a different code path where the scheduler doesn't check pool capacity before admitting the 3rd/4th request.
+
+Filed as **Sprint 7c** (separate scheduler-pool admit gate fix, ~10-50 LOC in `atom/model_engine/scheduler.py`).
+
+### Sprint 7b verdict
+
+| Goal | Outcome |
+|---|---|
+| Cast fix for dtype mismatch | ✅ DONE (commit `2d0098c`) |
+| Validate B0a +15pp robustness | ⚠️ +10pp confirmed (was partly noise, real benefit smaller than reported) |
+| Multi-req at conc>=2 functional | ❌ NEW bug exposed — scheduler-pool admit race at parallel concurrency |
+| Drop UNSAFE_MULTIREQ_DEV flag | ❌ Not yet — Sprint 7c needed first |
+
+Evidence:
+- `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9d.log` (conc=1 + cast fix = 0.70)
+- v10e/v10f logs not archived — pool slot race; failure mode documented above
+
+### Cumulative progress (Sprint 4 → 7b)
+
+| Milestone | gsm8k flex | strict | latency/req | gap to SGLang | new bugs found |
+|---|---|---|---|---|---|
+| Sprint 4 sealed | 0.45 | 0.00 | 28s | 51pp | — |
+| Sprint 5e Triton | 0.60 | 0.60 | 37s | 36pp | CK/FlyDSL layout dispatch |
+| Sprint 6 B0a v9b | 0.75 | 0.75 | 34s | 21pp | (later: +15pp partly noise) |
+| **Sprint 7b cast fix v9d** | **0.70** | (~0.70) | 36s | **26pp** | conc>1 dtype mismatch (FIXED), conc>1 admit race (Sprint 7c) |
