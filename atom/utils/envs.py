@@ -119,6 +119,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # storage instead of re-casting wider. See
     # `docs/evidence/dsv4_w45/EVIDENCE_M.md` Sprint 6 Phase A4 (Bug A4.2).
     "ATOM_DSV4_INDEXER_FP8": lambda: (os.getenv("ATOM_DSV4_INDEXER_FP8", "0") == "1"),
+    # --- Sprint 6 B0b: main KV non-uniform dtype split per DSV4 paper §2.3.4 ---
+    # When 1, the DSV4 KV pool allocates the main KV slab as TWO physical
+    # tensors: nope dims at float8_e4m3fn (FP8 per paper) + rope dims at
+    # bfloat16 (paper requires BF16 for RoPE positional encoding precision).
+    # The model's W4 path writes via pool.write_main_kv helper (see
+    # `atom/engine/kv_pool/dsv4_pool.py:write_main_kv` and
+    # `atom/models/deepseek_v4.py:_forward_w4`). Reads are concat-on-read
+    # at materialized BF16 — no model-side downstream change required.
+    # See `docs/evidence/dsv4_w45/EVIDENCE_M.md` Sprint 6 Phase A4 (Bug A4.1).
+    "ATOM_DSV4_KV_SPLIT_DTYPES": lambda: (
+        os.getenv("ATOM_DSV4_KV_SPLIT_DTYPES", "0") == "1"
+    ),
     # Enable host-side AITER ABI validator before each sparse_attn call.
     # Zero prod overhead when off.
     "ATOM_AITER_VALIDATE": lambda: (os.getenv("ATOM_AITER_VALIDATE", "0") == "1"),

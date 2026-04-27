@@ -1899,6 +1899,13 @@ class ModelRunner:
         from atom.utils import envs
 
         indexer_dtype = torch.float8_e4m3fn if envs.ATOM_DSV4_INDEXER_FP8 else None
+        # Sprint 6 B0b: opt-in non-uniform main KV (split nope/rope per
+        # paper §2.3.4: nope dims FP8, rope dims BF16). Pool allocates two
+        # slabs; writes go through pool.write_main_kv; reads concat-on-read
+        # in BF16 so downstream sparse_attn sees same shape.
+        main_kv_nope_dtype = (
+            torch.float8_e4m3fn if envs.ATOM_DSV4_KV_SPLIT_DTYPES else None
+        )
 
         cfg = DSV4KVPoolConfig(
             max_active_seqs=self.config.max_num_seqs,
@@ -1921,6 +1928,7 @@ class ModelRunner:
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
             indexer_dtype=indexer_dtype,
+            main_kv_nope_dtype=main_kv_nope_dtype,
             device=self.device,
         )
         pool = DSV4KVPool(cfg)
