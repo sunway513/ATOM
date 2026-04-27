@@ -130,3 +130,47 @@ Initial plan based on:
 - Confirmed: ATOM's per-ratio slab design IS paper-faithful (not a divergence to fix). The bugs are in the implementation details (MoE backend, possibly MLA reuse, possibly FP8 quant non-uniformity).
 
 Submitted to user for review. Will not start phase A diagnostics until user signs off on this plan or asks for revisions.
+
+## Plan-revision log
+
+### v2 — 2026-04-27 (post Phase A audit)
+
+Phase A audit results landed:
+- A0 paper truth: ATOM's per-ratio slab design is paper-faithful (paper §3.6.1 two-pool). NO architecture change needed. Naming (CSA/HCA vs c4/c128) is cosmetic-only.
+- A3 MLA reuse audit: NEGATIVE. V4 uses own `DeepseekV4Attention`, never enters MLAAttention. Optional guard in MLAAttention.__init__ recommended for future-proofing only.
+- **A4 KV quantization audit: TWO CONFIRMED BUGS** in `dsv4_pool.py` matching paper §2.3.4 violations.
+
+Plan v2 changes:
+- Add **Phase B0** (highest priority code change) to fix A4.1 (main KV uniform dtype) + A4.2 (Indexer non-FP4).
+- B0a (Indexer FP8 storage): **LANDED commit `a8e3a02`** — 16 LOC, opt-in via `ATOM_DSV4_INDEXER_FP8=1`. 8 new + 23 legacy unit tests pass. No model code change.
+- B0b (Main KV nope/rope split): **DESIGNED, DEFERRED**. ~200 LOC across 6 sub-commits (pool dual-slab + write helper + W4 path migration + legacy migration + wiring + tests). Per plan rule "each commit silicon-validated", we wait for B0a silicon validation before launching B0b.
+- A1 silicon battery + A2 torch-ref deferred until user's v9a completes (silicon currently busy).
+
+### B0b deferred-design summary (full in Plan agent report)
+
+| Sub-commit | Files | LOC | Tests after |
+|---|---|---|---|
+| B0b.1 Pool config + dual-slab alloc | `dsv4_pool.py:127, 263-322, 680, 710` | ~70 | 23 legacy + 1 new pass |
+| B0b.2 Pool write helper `write_main_kv` | `dsv4_pool.py` (new method) | ~35 | + roundtrip test |
+| B0b.3 Model W4 write site migration | `deepseek_v4.py:1932-1966, 2027` | ~25 | + W4 path tests |
+| B0b.4 Legacy path migration | `deepseek_v4.py:1760-1778` | ~30 | + W43_redo tests |
+| B0b.5 Env var + wiring | `envs.py` + `model_runner.py` | ~12 | + envs test |
+| B0b.6 Test suite | `tests/test_dsv4_pool_main_kv_split.py` (new) | ~180 | 41 total pool tests |
+
+**B0b GO/NO-GO criterion** (silicon-driven):
+- gsm8k 5-shot limit=20 with B0a only ≥ 0.85 → REJECT (B0a sufficient)
+- gsm8k 5-shot limit=20 with B0a only 0.65-0.84 → GO (need both halves of A4)
+- gsm8k 5-shot limit=20 with B0a only ~0.49 (no improvement) → DEFER (root cause elsewhere; Phase C / D)
+
+### Pre-B0b silicon validation gate (B0d) — pending
+
+When user's v9a server frees silicon, run:
+```bash
+ATOM_USE_TRITON_MOE=1 ATOM_DSV4_USE_W4_PATH=1 USE_W4_PATH=1 \
+ATOM_DSV4_INDEXER_FP8=1 \
+  python -m atom.entrypoints.openai_server ...
+# then lm_eval gsm8k limit=20 num_fewshot=5 max_gen_toks=1024
+# also: 5-question 0-shot battery (test_dsv4_pool_battery.sh — pending)
+```
+
+Compare to v8 baseline (Triton without indexer FP8): flexible 0.60 / strict 0.60.
