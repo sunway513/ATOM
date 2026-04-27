@@ -1893,6 +1893,13 @@ class ModelRunner:
         max_compressed_c4 = max(1, max_seq_len // 4)
         max_compressed_c128 = max(1, max_seq_len // 128)
 
+        # Sprint 6 B0a: opt-in non-uniform KV quant for the Indexer slab
+        # (DSV4 paper §2.3.4). torch.float8_e4m3fn is the closest practical
+        # FP4 proxy for cache writes (no native float4 cache write op).
+        from atom.utils import envs
+
+        indexer_dtype = torch.float8_e4m3fn if envs.ATOM_DSV4_INDEXER_FP8 else None
+
         cfg = DSV4KVPoolConfig(
             max_active_seqs=self.config.max_num_seqs,
             num_layers=n_layers,
@@ -1913,6 +1920,7 @@ class ModelRunner:
             max_compressed_c128=max_compressed_c128,
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
+            indexer_dtype=indexer_dtype,
             device=self.device,
         )
         pool = DSV4KVPool(cfg)

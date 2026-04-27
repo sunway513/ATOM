@@ -111,6 +111,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # this flag together with ATOM_DSV4_UNSAFE_MULTIREQ_DEV before allowing
     # max_num_seqs > 1.
     "ATOM_DSV4_USE_W4_PATH": lambda: (os.getenv("ATOM_DSV4_USE_W4_PATH", "0") == "1"),
+    # --- Sprint 6 B0a: non-uniform KV quantization per DSV4 paper §2.3.4 ---
+    # When 1, the DSV4 KV pool allocates the Indexer KV slab in
+    # float8_e4m3fn (FP4 proxy — torch lacks native FP4 cache writes) instead
+    # of the pool's main dtype. The model's `fp4_act_quant_inplace` call
+    # already snaps values to FP4 magnitudes; this flag preserves them on
+    # storage instead of re-casting wider. See
+    # `docs/evidence/dsv4_w45/EVIDENCE_M.md` Sprint 6 Phase A4 (Bug A4.2).
+    "ATOM_DSV4_INDEXER_FP8": lambda: (os.getenv("ATOM_DSV4_INDEXER_FP8", "0") == "1"),
     # Enable host-side AITER ABI validator before each sparse_attn call.
     # Zero prod overhead when off.
     "ATOM_AITER_VALIDATE": lambda: (os.getenv("ATOM_AITER_VALIDATE", "0") == "1"),

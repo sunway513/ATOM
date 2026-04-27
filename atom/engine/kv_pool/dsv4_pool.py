@@ -126,6 +126,13 @@ class DSV4KVPoolConfig:
     compress_ratio_per_layer: List[int] = field(default_factory=list)
     dtype: torch.dtype = torch.bfloat16
     state_dtype: torch.dtype = torch.float32
+    # Sprint 6 B0a — non-uniform KV quantization per DSV4 paper §2.3.4.
+    # Indexer KV should be FP4 (paper); torch lacks float4_e2m1 cache writes,
+    # so fp8_e4m3fn is the closest practical proxy that matches the FP4
+    # magnitude granularity without the 2x storage of bfloat16. Default
+    # ``None`` falls through to ``dtype`` (Sprint-1/2 behavior).
+    # Audit reference: docs/evidence/dsv4_w45/EVIDENCE_M.md Sprint 6 Phase A4.
+    indexer_dtype: Optional[torch.dtype] = None
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     def __post_init__(self) -> None:
@@ -441,10 +448,17 @@ class DSV4KVPool:
 
         # Indexer pool: one slab per c4 layer. Last dim is `index_head_dim`,
         # NOT main attention `head_dim` (Sprint 2 Bug #5 fix).
+        # Storage dtype: paper §2.3.4 specifies FP4. We use ``cfg.indexer_dtype``
+        # (typically fp8_e4m3fn as an FP4 proxy — see DSV4KVPoolConfig docstring)
+        # when set, else fall back to ``cfg.dtype`` (Sprint-1/2 behavior, which
+        # silently re-cast FP4-quantized values to BF16/FP8 — Sprint 6 Bug A4.2).
+        indexer_storage_dtype = (
+            cfg.indexer_dtype if cfg.indexer_dtype is not None else cfg.dtype
+        )
         if cfg.num_c4_layers > 0:
             self._indexer_kv = torch.zeros(
                 (cfg.num_c4_layers, N, cfg.ring_size_indexer, cfg.index_head_dim),
-                dtype=cfg.dtype,
+                dtype=indexer_storage_dtype,
                 device=cfg.device,
             )
             idx_idx = 0
