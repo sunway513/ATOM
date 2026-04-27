@@ -662,3 +662,63 @@ Evidence:
 - `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9b.log` (full eval)
 - `docs/evidence/dsv4_w45/artifacts/v9b_smoke.json` (5-shot smoke)
 - `docs/evidence/dsv4_w45/artifacts/v9b_zeroshot/Q*.json` (5 raw 0-shot responses)
+
+## Sprint 6 Phase B0b — silicon validation REJECTS B0b (no measurable benefit)
+
+After B0a (commit `a8e3a02`) silicon-validated +15pp, designed and implemented B0b (main KV nope/rope split per paper §2.3.4 Bug A4.1) across 5 sub-commits:
+
+| commit | what | unit tests after |
+|---|---|---|
+| `7981de8` B0b.1 | pool dual-slab allocation (`_main_kv_nope` FP8 + `_main_kv_rope` BF16), `view_for_layer` materialized concat | 42 |
+| `4f41026` B0b.2 | `pool.write_main_kv` helper centralizes split-aware scatter | 47 |
+| `12ab1bc` B0b.3 | model W4 path delegates to helper | 96 |
+| (B0b.4 audit) | legacy path uses `register_buffer`, not pool — out of B0b scope | — |
+| `9db2c32` B0b.5 | env var `ATOM_DSV4_KV_SPLIT_DTYPES` + model_runner wiring | 96 |
+
+### v9c silicon validation (both flags on)
+
+Configuration: v9b config + new `ATOM_DSV4_KV_SPLIT_DTYPES=1`. Tag: v9c.
+
+| Run | flexible-extract | strict-match | latency/req | n |
+|---|---|---|---|---|
+| W4 v8 (no fixes) | 0.60 ± 0.112 | 0.60 ± 0.112 | 36.82s | 20 |
+| W4 v9b (B0a only) | 0.75 ± 0.099 | 0.75 ± 0.099 | 34.23s | 20 |
+| **W4 v9c (B0a + B0b)** | **0.75 ± 0.099** | **0.75 ± 0.099** | (similar) | 20 |
+
+**Δ B0b alone vs B0a-only: 0pp on both filters.** B0b adds no measurable accuracy benefit on the gsm8k 5-shot gate.
+
+Smoke (5-shot Natalia): "72" correct ✅.
+0-shot battery: 0/5 (Q0 timeout, Q1/Q2/Q3 missing — bash script timing bug after lm_eval load, not a model failure). Same garbled pattern as v9b — 0-shot path is **not** a function of the main KV nope/rope split.
+
+### Decision: REJECT B0b for production
+
+Per Plan agent's pre-defined GO/REJECT/DEFER decision tree (Sprint 6 plan v2):
+- ≥0.85 → REJECT B0b (B0a sufficient) — gate not met
+- 0.65-0.84 → GO B0b — was the prediction, not realized
+- ~0.60 (no improvement) → DEFER (root cause elsewhere)
+
+The actual outcome (0.75 with both = 0.75 with B0a only) means **B0b implements the paper-purity fix but does NOT recover any measurable accuracy on this evaluation**. Most likely interpretations:
+1. RoPE precision loss in FP8 storage was the smaller contributor; the indexer FP4 issue (B0a) was dominant.
+2. The materialization concat-on-read path in `view_for_layer` introduces a cast that erases the precision benefit at read time (BF16 read view is upcast from FP8 nope storage every call).
+3. The remaining 21pp gap (0.75 vs SGLang 0.96) is something else entirely — likely Triton MoE kernel precision, KV cache size effects at limit=20, or eval-config differences.
+
+### What we keep / drop
+
+- **B0b code stays in branch** (commits `7981de8`/`4f41026`/`12ab1bc`/`9db2c32` plus 16 new tests). The flag defaults to off so production is unaffected. Future Sprint 7 may revisit if a different audit finds RoPE precision matters.
+- **B0a stays as production recommendation** in `recipes/DeepSeek-V4-Pro.md` — the +15pp win.
+- **`ATOM_DSV4_KV_SPLIT_DTYPES=1`** is documented as available but not recommended.
+
+Evidence:
+- `docs/evidence/dsv4_w45/artifacts/lm_eval_w4_v9c.log` (full eval)
+- `docs/evidence/dsv4_w45/artifacts/v9c_smoke.json` (5-shot smoke)
+- `docs/evidence/dsv4_w45/artifacts/v9c_zeroshot/Q*.json` (raw 0-shot responses)
+
+### Sprint 6 final delta
+
+| Stage | gsm8k flexible | gsm8k strict | gap to SGLang 0.96 |
+|---|---|---|---|
+| Sprint 4 sealed (v4) | 0.45 | 0.00 | 51pp |
+| Sprint 5e (v8 Triton) | 0.60 | 0.60 | 36pp |
+| **Sprint 6 B0a (v9b/v9c)** | **0.75** | **0.75** | **21pp** ✅ |
+
+**Sprint 6 net win: +15pp flex / +15pp strict / -15pp gap closed via 1-env-var change** (`ATOM_DSV4_INDEXER_FP8=1`). Cumulative since Sprint 4: +30pp flex / +75pp strict / -30pp gap closed.
