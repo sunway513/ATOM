@@ -1005,4 +1005,52 @@ Branch HEAD post-revert: identical to commit `0f28fa2` (post-Sprint 7c). 156/156
 
 **Multi-req decode at conc≥2** remains a known-issue / future-work behind `ATOM_DSV4_UNSAFE_MULTIREQ_DEV=1`. The next attack on this needs per-token / per-layer GPU-side numerical bisect across all 61 transformer blocks — out of scope for w45.
 
+---
+
+## Sprint 7h — INFRASTRUCTURE BUG DISCOVERY: silicon was running ATOM-feat, not ATOM-lingpeng
+
+### The mistake
+
+The `atom_dsv4_feat` docker container has TWO `ATOM*` directories mounted:
+
+| Host path | Container path | Branch |
+|---|---|---|
+| `/home/pensun/ATOM` | `/workspace/ATOM-feat` | `feat/dsv4-v6-experimental` |
+| `/home/pensun/ATOM-lingpeng` | `/workspace/ATOM-lingpeng` | `plan/dsv4-w45-flydsl-blockscale-moe` |
+
+The python `atom` package was installed into `/opt/venv` from `ATOM-feat` (which is the older, non-W4-multireq branch). All `python -m atom.entrypoints.openai_server` invocations therefore loaded `/workspace/ATOM-feat/atom/...`, NOT the `/workspace/ATOM-lingpeng/atom/...` files this issue's PRs were editing.
+
+**Consequence**: every Sprint 7d / 7e / 7f silicon datum in this evidence file PRIOR to this section was generated against unmodified ATOM-feat code. The "−10pp regression at v11e" and "restoration at v11f" were sample noise on the SAME baseline binary, not a real code-change effect. The "Sprint 7d slot lookup", "Sprint 7e per-seq Indexer loop", and "Sprint 7f m-pad GEMM patch" silicon all tested ATOM-feat unchanged.
+
+### The fix (permanent)
+
+```bash
+sudo docker exec atom_dsv4_feat /opt/venv/bin/pip install -e /workspace/ATOM-lingpeng \
+    --no-deps --no-build-isolation
+```
+
+This replaces the installed `atom` package with an editable install rooted at ATOM-lingpeng. Verified by:
+
+```bash
+sudo docker exec atom_dsv4_feat /opt/venv/bin/python -c \
+    "import atom.models.deepseek_v4 as m; print(m.__file__)"
+# /workspace/ATOM-lingpeng/atom/models/deepseek_v4.py  ✅
+```
+
+The editable install survives container restart because `/workspace/ATOM-lingpeng` is a host-mounted volume. New scripts no longer need `PYTHONPATH=/workspace/ATOM-lingpeng` workarounds.
+
+### Verification protocol going forward
+
+Every silicon script should print the `atom.__file__` path BEFORE `python -m atom.entrypoints.openai_server` so we can fail fast if the wrong package is loaded:
+
+```bash
+/opt/venv/bin/python -c "import atom; print('[sanity] atom package:', atom.__file__)"
+```
+
+This single line would have caught Sprint 7f's 4-hour misdirection in seconds.
+
+### Sprint 7h restart
+
+With the install corrected, all prior multi-req silicon data is invalidated and being regenerated. The first sanity check (`v14_sanity_lingpeng.sh`) confirms ATOM-lingpeng's W4 path at conc=1 FORCE_W4. Subsequent debugging will use the per-stage trace bisection methodology from Sprint 7f, but now actually against ATOM-lingpeng.
+
 

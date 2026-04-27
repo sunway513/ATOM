@@ -41,6 +41,7 @@ Key entry points:
 
 ## Critical Rules
 
+- **VERIFY which `atom` package the docker container is using BEFORE any code-edit silicon test.** The `atom_dsv4_feat` container mounts BOTH `/workspace/ATOM-feat` (= host `/home/pensun/ATOM`, branch `feat/dsv4-v6-experimental`) and `/workspace/ATOM-lingpeng` (= host `/home/pensun/ATOM-lingpeng`, branch `plan/dsv4-w45-flydsl-blockscale-moe`). The pip-installed `atom` package may point to EITHER. Always run `sudo docker exec atom_dsv4_feat /opt/venv/bin/python -c "import atom; print(atom.__file__)"` first. To force lingpeng: `sudo docker exec atom_dsv4_feat /opt/venv/bin/pip install -e /workspace/ATOM-lingpeng --no-deps --no-build-isolation`. **A 4-hour Sprint 7f silicon misdirection in 2026-04-27 was caused by editing ATOM-lingpeng while workers ran ATOM-feat — see `docs/evidence/dsv4_w45/EVIDENCE_M.md` Sprint 7h for the post-mortem.**
 - **NEVER modify `@support_torch_compile` decorated model files** — breaks Dynamo tracing even with `--enforce-eager`. Instrument at call sites instead (e.g., `ModelRunner.run_model()`, `EagleProposer.propose()`)
 - **Multiprocessing must use `spawn`** — `fork` causes CUDA re-initialization crashes
 - **Set `AITER_LOG_LEVEL=WARNING` before starting server** — suppresses aiter kernel log flooding
