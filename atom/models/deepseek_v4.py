@@ -462,24 +462,20 @@ def _get_window_topk_idxs_pertoken(
     if T == 0:
         return torch.zeros(0, W, dtype=torch.long, device=device)
 
-    cu_long = cu_seqlens_q.to(device=device, dtype=torch.long)
-    # token_idx → seq_idx via right-bucketize on cu[1:].
-    token_idx = torch.arange(T, dtype=torch.long, device=device)
-    seg_id = torch.bucketize(token_idx, cu_long[1:], right=True)
-    seq_starts = cu_long[seg_id]  # first token-idx of this token's seq
-    in_seq_offset = token_idx - seq_starts  # 0-based within the seq
-
     pos = positions.to(device=device, dtype=torch.long)
-    # Per-token row template:
-    #   out[t, k] = (start_p + k) % W,  start_p = pos[t] - in_seq_offset[t]
-    # plus a causal mask on the early prefill rows.
     arange_w = torch.arange(W, dtype=torch.long, device=device)
 
-    # Rotated window for "fully-warm" tokens (pos >= W-1): unrolled with
-    # the modular arithmetic used by `_get_window_topk_idxs`'s warm
-    # branch, this is identical. Early-prefill (pos < W-1) → invalid
-    # future slots = -1.
-    base = pos.unsqueeze(1) - in_seq_offset.unsqueeze(1) + arange_w.unsqueeze(0)
+    # Each token's window covers the W absolute positions ending at pos[t]:
+    #   absolute[k] = pos[t] - (W-1) + k    for k in 0..W-1
+    # Valid slots are those whose absolute position is in [0, pos[t]];
+    # for warm tokens (pos[t] >= W-1) all W are valid (full ring); for
+    # early-prefill tokens (pos[t] < W-1) the leading slots are invalid
+    # (-1). This unifies prefill+decode without referring to the seq's
+    # in-batch start, which was the W3.2-v6 bug: in-batch offset is 0 in
+    # decode steps even though the seq has been running for many tokens,
+    # so any formula that derives `start_p = pos - in_seq_offset` collapses
+    # decode to "look only at the current pos" → KV-cache read-skew.
+    base = pos.unsqueeze(1) - (W - 1) + arange_w.unsqueeze(0)
     ring_idx = base % W
     valid = (base >= 0) & (base <= pos.unsqueeze(1))
     out = torch.where(valid, ring_idx, torch.full_like(ring_idx, -1))
@@ -1014,48 +1010,109 @@ class Compressor(nn.Module):
             self.score_state.dtype
         )
 
-        # Per-seq compress-boundary: a seq triggers iff its LAST token in
-        # this batch satisfies ``(pos + 1) % ratio == 0``. cu_seqlens_q
-        # gives us each seq's last-token index in the packed buffer.
+        # Per-token compress-boundary: every token t where
+        # ``(positions[t] + 1) % ratio == 0`` triggers a compress emission.
+        # Bug 2 root cause: the prior code checked only each seq's LAST token,
+        # emitting at most one entry per seq and silently skipping all
+        # intermediate block boundaries during prefill.
         num_seqs = cu.numel() - 1
         if num_seqs == 0:
             return None
-        last_token_idx = cu[1:] - 1  # [num_seqs]
-        last_positions = positions[last_token_idx]  # [num_seqs]
-        compress_mask = (last_positions + 1) % ratio == 0  # [num_seqs] bool
-        compress_seqs = compress_mask.nonzero(as_tuple=False).flatten()
-        if compress_seqs.numel() == 0:
+
+        compress_token_mask = (positions + 1) % ratio == 0  # [num_tokens] bool
+        compress_token_indices = compress_token_mask.nonzero(as_tuple=False).flatten()
+        if compress_token_indices.numel() == 0:
             return None
 
         compressed_outputs: List[torch.Tensor] = []
-        for s_idx in compress_seqs.tolist():
-            slot = int(slot_indices[s_idx].item())
-            p_last = int(last_positions[s_idx].item())
-            if overlap:
-                state_slot = self.kv_state[slot]  # [ring_len, inner]
-                score_slot = self.score_state[slot]
-                kv_state_concat = torch.cat(
-                    [state_slot[:ratio, :d], state_slot[ratio:, d:]], dim=0
-                )
-                score_state_concat = torch.cat(
-                    [score_slot[:ratio, :d], score_slot[ratio:, d:]], dim=0
-                )
-                kv_seq = (kv_state_concat * score_state_concat.softmax(dim=0)).sum(
-                    dim=0, keepdim=True
-                )  # [1, d]
-                # Roll: just-completed window becomes the next overlap.
-                self.kv_state[slot, :ratio] = state_slot[ratio:]
-                self.score_state[slot, :ratio] = score_slot[ratio:]
-            else:
-                state_slot = self.kv_state[slot]
-                score_slot = self.score_state[slot]
-                kv_seq = (state_slot * score_slot.softmax(dim=0)).sum(
-                    dim=0, keepdim=True
-                )  # [1, inner]
+        # For overlap mode: track per-slot previous-window data to chain
+        # consecutive boundary emissions within the same seq. Each window's
+        # roll feeds the next window's overlap half, so these must be
+        # processed in t_idx order (sequential dependency within a slot).
+        slot_prev_kv: dict = {}
+        slot_prev_score: dict = {}
 
-            # Norm + RoPE + QAT round-trip (matches the legacy decode emit).
+        for t_idx_t in compress_token_indices:
+            t_idx = int(t_idx_t.item())
+            slot = int(slot_per_token[t_idx].item())
+            p = int(positions[t_idx].item())
+
+            # Determine if the full window [p+1-ratio .. p] is in the current
+            # batch for this seq. If the seq's first position in this batch is
+            # ≤ p+1-ratio, every window token is available in kv/score tensors
+            # and we can pool directly — avoiding stale kv_state reads caused
+            # by the global scatter overwriting intermediate window rows.
+            seq_id = int(seg_id[t_idx].item())
+            seq_batch_start = int(cu[seq_id].item())
+            seq_pos_start = int(positions[seq_batch_start].item())
+            win_start_pos = p + 1 - ratio
+
+            if seq_pos_start <= win_start_pos:
+                # Full window in current batch: pool from raw kv/score tensors.
+                win_batch_start = seq_batch_start + (win_start_pos - seq_pos_start)
+                kv_win = kv[win_batch_start : t_idx + 1].float()  # [ratio, coff*d]
+                score_win = score_with_ape[win_batch_start : t_idx + 1].float()
+
+                if overlap:
+                    # Overlap half: use tracked previous-window data (from
+                    # earlier boundary in this same call) or persistent state
+                    # (overlap half is NOT touched by the global scatter since
+                    # scatter writes to rows ratio+ only).
+                    if slot in slot_prev_kv:
+                        prev_kv = slot_prev_kv[slot]
+                        prev_score = slot_prev_score[slot]
+                    else:
+                        prev_kv = self.kv_state[slot, :ratio].float()
+                        prev_score = self.score_state[slot, :ratio].float()
+
+                    kv_concat = torch.cat([prev_kv[:, :d], kv_win[:, d:]], dim=0)
+                    score_concat = torch.cat(
+                        [prev_score[:, :d], score_win[:, d:]], dim=0
+                    )
+                    kv_seq = (kv_concat * score_concat.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+                    # Roll: current window becomes next overlap for this slot.
+                    slot_prev_kv[slot] = kv_win
+                    slot_prev_score[slot] = score_win
+                    # Persist overlap half for the next decode call.
+                    self.kv_state[slot, :ratio] = kv_win.to(self.kv_state.dtype)
+                    self.score_state[slot, :ratio] = score_win.to(
+                        self.score_state.dtype
+                    )
+                else:
+                    kv_seq = (kv_win * score_win.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+            else:
+                # Partial window: earlier tokens are in kv_state from previous
+                # calls. Valid for decode (1 token/seq/call): after the global
+                # scatter the state has the full window including the new token.
+                if overlap:
+                    state_slot = self.kv_state[slot].float()
+                    score_slot = self.score_state[slot].float()
+                    kv_concat = torch.cat(
+                        [state_slot[:ratio, :d], state_slot[ratio:, d:]], dim=0
+                    )
+                    score_concat = torch.cat(
+                        [score_slot[:ratio, :d], score_slot[ratio:, d:]], dim=0
+                    )
+                    kv_seq = (kv_concat * score_concat.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+                    # Roll: just-completed window becomes the next overlap.
+                    self.kv_state[slot, :ratio] = state_slot[ratio:]
+                    self.score_state[slot, :ratio] = score_slot[ratio:]
+                else:
+                    state_slot = self.kv_state[slot].float()
+                    score_slot = self.score_state[slot].float()
+                    kv_seq = (state_slot * score_slot.softmax(dim=0)).sum(
+                        dim=0, keepdim=True
+                    )
+
+            # Norm + RoPE + QAT round-trip (matches the legacy emit).
             kv_seq = self.norm(kv_seq.to(dtype))
-            freqs = self.freqs_cis[p_last + 1 - ratio].unsqueeze(0)
+            freqs = self.freqs_cis[p + 1 - ratio].unsqueeze(0)
             _apply_rotary_emb(kv_seq[..., -rd:], freqs)
             if self.rotate:
                 kv_seq = rotate_activation(kv_seq)
@@ -1063,20 +1120,14 @@ class Compressor(nn.Module):
             else:
                 act_quant_inplace(kv_seq[..., :-rd], 64, self.scale_fmt)
 
-            # Per-seq compressed write target: kv_cache[slot, p_last // ratio].
-            # ``self.kv_cache`` is bound by the owning Indexer/Attention to
-            # the appropriate pool view (``indexer_kv`` for the Indexer's
-            # inner compressor; layer-local fallback for a plain Compressor).
+            # Write to kv_cache[slot, p // ratio].
             assert self.kv_cache is not None
-            self.kv_cache[slot, p_last // ratio] = kv_seq.squeeze(0).to(
-                self.kv_cache.dtype
-            )
+            self.kv_cache[slot, p // ratio] = kv_seq.squeeze(0).to(self.kv_cache.dtype)
             compressed_outputs.append(kv_seq)
 
         if not compressed_outputs:
             return None
-        # Stack per-seq emissions in slot order for callers that want to
-        # consume them downstream. Shape: [num_emit, 1, head_dim].
+        # Stack per-boundary emissions. Shape: [num_emit, 1, head_dim].
         return torch.stack(compressed_outputs, dim=0)
 
 
@@ -1588,6 +1639,21 @@ class DeepseekV4Attention(nn.Module):
 
         if forward_batch is None or not envs.ATOM_DSV4_USE_W4_PATH:
             return self._forward_legacy(x, start_pos)
+
+        # Single-seq fast-path (#37 W4.5 sprint-3 stop-gap): when the packed
+        # batch carries exactly one sequence, use the bit-correct
+        # ``_forward_legacy`` path with the seq's first absolute position
+        # as ``start_pos``. This sidesteps the W4-path Compressor prefill
+        # bug (intermediate compress-block boundaries skipped) which
+        # produces degenerate output even at conc=1. Multi-seq batches
+        # still use ``_forward_w4`` while sprint-4 lands the proper fix.
+        if forward_batch.cu_seqlens_q.numel() == 2:
+            sp = (
+                int(forward_batch.positions[0].item())
+                if forward_batch.positions.numel() > 0
+                else 0
+            )
+            return self._forward_legacy(x, sp)
         return self._forward_w4(x, forward_batch)
 
     def _forward_legacy(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
@@ -1875,29 +1941,32 @@ class DeepseekV4Attention(nn.Module):
                 ring="main",
             )
         kv_tok = kv.squeeze(0)  # [num_tokens, head_dim]
-        # Flatten the [N, ring_main, D] pool view to [N*ring_main, D] for
-        # scatter. Zero-copy reshape — pool storage is contiguous.
-        kv_flat = kv_cache_view.view(n_slots * ring_main, head_dim)
         # Diagnostic guard (W4.5): silicon HSA 0x1016 was traced to a GPU-side
         # ASSERT_TRAP in this `index_put` (PyTorch's bounds-check). Surface
-        # the OOB at the Python boundary with a useful error instead.
+        # the OOB at the Python boundary with a useful error instead. Compute
+        # the cap from the pool view BEFORE delegating to write_main_kv so we
+        # keep the rich error message for debugging.
         if out_cache_loc.numel() > 0:
+            _cap = n_slots * ring_main
             _max_loc = int(out_cache_loc.max().item())
             _min_loc = int(out_cache_loc.min().item())
-            _cap = kv_flat.size(0)
             if _max_loc >= _cap or _min_loc < 0:
                 raise ValueError(
                     "W4 main KV scatter OOB: "
                     f"out_cache_loc range=[{_min_loc}, {_max_loc}], "
-                    f"kv_flat.size(0)={_cap} (n_slots={n_slots}, ring_main={ring_main}), "
+                    f"flat_capacity={_cap} (n_slots={n_slots}, ring_main={ring_main}), "
                     f"layer_id={getattr(self, 'layer_id', '?')}, "
                     f"num_tokens={out_cache_loc.numel()}, "
                     f"positions.range=[{int(positions.min().item())}, {int(positions.max().item())}], "
                     f"cu_seqlens_q={forward_batch.cu_seqlens_q.tolist()}"
                 )
-        # Cast scatter source to pool dtype to avoid silent zero-out from
-        # an implicit dtype-mismatch copy_.
-        kv_flat[out_cache_loc] = kv_tok.to(kv_flat.dtype)
+        # Sprint 6 B0b.3: delegate to pool helper. Handles both legacy single
+        # slab (split-off) and dual nope/rope slabs (split-on) per paper §2.3.4.
+        forward_batch.kv_pool.write_main_kv(
+            layer_id=self.layer_id,
+            out_cache_loc=out_cache_loc,
+            kv=kv_tok,
+        )
 
         # ---- Per-token window topk_idxs ----
         topk_idxs = self._build_topk_per_token(forward_batch)  # [1, T, win] int64

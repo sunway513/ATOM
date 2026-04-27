@@ -1800,6 +1800,15 @@ class ModelRunner:
         if getattr(self, "_dsv4_pool", None) is None:
             self._dsv4_pool = self._build_dsv4_pool()
 
+        # Free slots for seqs that finished in the previous forward pass.
+        # finished_seq_ids is populated by Scheduler._emit_finish and carried
+        # through ScheduledBatch, bridging the cross-process gap where
+        # register_finish_listener is a no-op (scheduler in EngineCore parent,
+        # pool in ModelRunner child).
+        if batch is not None:
+            for sid in getattr(batch, "finished_seq_ids", []):
+                self._dsv4_pool.finish_request(sid)
+
         # Admit any seqs in this batch the pool hasn't seen yet. Idempotent
         # under re-admit (DSV4KVPool.admit_request returns the same slot).
         seq_ids: list[int] = []
@@ -1884,6 +1893,20 @@ class ModelRunner:
         max_compressed_c4 = max(1, max_seq_len // 4)
         max_compressed_c128 = max(1, max_seq_len // 128)
 
+        # Sprint 6 B0a: opt-in non-uniform KV quant for the Indexer slab
+        # (DSV4 paper §2.3.4). torch.float8_e4m3fn is the closest practical
+        # FP4 proxy for cache writes (no native float4 cache write op).
+        from atom.utils import envs
+
+        indexer_dtype = torch.float8_e4m3fn if envs.ATOM_DSV4_INDEXER_FP8 else None
+        # Sprint 6 B0b: opt-in non-uniform main KV (split nope/rope per
+        # paper §2.3.4: nope dims FP8, rope dims BF16). Pool allocates two
+        # slabs; writes go through pool.write_main_kv; reads concat-on-read
+        # in BF16 so downstream sparse_attn sees same shape.
+        main_kv_nope_dtype = (
+            torch.float8_e4m3fn if envs.ATOM_DSV4_KV_SPLIT_DTYPES else None
+        )
+
         cfg = DSV4KVPoolConfig(
             max_active_seqs=self.config.max_num_seqs,
             num_layers=n_layers,
@@ -1904,6 +1927,8 @@ class ModelRunner:
             max_compressed_c128=max_compressed_c128,
             compress_ratio_per_layer=compress_ratio_per_layer,
             dtype=self.config.torch_dtype,
+            indexer_dtype=indexer_dtype,
+            main_kv_nope_dtype=main_kv_nope_dtype,
             device=self.device,
         )
         pool = DSV4KVPool(cfg)

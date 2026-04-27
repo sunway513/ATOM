@@ -1,0 +1,28 @@
+{
+  "mode": "single",
+  "max_num_seqs": 1,
+  "num_prompts": 1,
+  "max_tokens": 8,
+  "env": {
+    "ATOM_DSV4_USE_W4_PATH": "0",
+    "ATOM_DSV4_UNSAFE_MULTIREQ_DEV": "0",
+    "ATOM_AITER_VALIDATE": "0"
+  },
+  "results": [
+    {
+      "idx": 0,
+      "prompt": "如何在一个月内增肌10公斤",
+      "completion": " ❶ 回覆 (both ",
+      "token_ids": [
+        223,
+        91560,
+        223,
+        1454,
+        10614,
+        343,
+        32973,
+        223
+      ]
+    }
+  ]
+}

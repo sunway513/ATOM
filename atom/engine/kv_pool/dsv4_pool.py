@@ -126,6 +126,26 @@ class DSV4KVPoolConfig:
     compress_ratio_per_layer: List[int] = field(default_factory=list)
     dtype: torch.dtype = torch.bfloat16
     state_dtype: torch.dtype = torch.float32
+    # Sprint 6 B0a — non-uniform KV quantization per DSV4 paper §2.3.4.
+    # Indexer KV should be FP4 (paper); torch lacks float4_e2m1 cache writes,
+    # so fp8_e4m3fn is the closest practical proxy that matches the FP4
+    # magnitude granularity without the 2x storage of bfloat16. Default
+    # ``None`` falls through to ``dtype`` (Sprint-1/2 behavior).
+    # Audit reference: docs/evidence/dsv4_w45/EVIDENCE_M.md Sprint 6 Phase A4.
+    indexer_dtype: Optional[torch.dtype] = None
+    # Sprint 6 B0b — main KV non-uniform dtype split per DSV4 paper §2.3.4:
+    # "BF16 precision is used for the rotary positional embedding (RoPE)
+    # dimensions, while FP8 precision is applied to the remaining dimensions".
+    # When set (typically ``torch.float8_e4m3fn``), the main KV slab is
+    # split into TWO physical allocations:
+    #   _main_kv_nope: [L, N, ring_main, head_dim - rope_head_dim] dtype=this field
+    #   _main_kv_rope: [L, N, ring_main, rope_head_dim]            dtype=cfg.dtype (BF16)
+    # When None (default), the legacy single ``_main_kv`` allocation is used
+    # (Sprint-1/2 behavior). Reads via ``view_for_layer`` always materialize
+    # a BF16-cat ``[N, ring_main, head_dim]`` tensor regardless of split, so
+    # downstream ``sparse_attn`` sees the same shape/dtype.
+    # Audit reference: docs/evidence/dsv4_w45/EVIDENCE_M.md Sprint 6 Phase A4 Bug A4.1.
+    main_kv_nope_dtype: Optional[torch.dtype] = None
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     def __post_init__(self) -> None:
@@ -253,7 +273,11 @@ class DSV4KVPool:
         # Per-cache tensors. Layouts mirror the model's existing
         # ``register_buffer`` shapes (``deepseek_v4.py:662, :949, :1215``)
         # so W4.4 can rebind without resizing.
-        self._main_kv: torch.Tensor
+        # Sprint 6 B0b: legacy single slab (split-off mode) OR None (split-on).
+        self._main_kv: Optional[torch.Tensor]
+        # Sprint 6 B0b: dual slabs, allocated only when ``main_kv_nope_dtype`` set.
+        self._main_kv_nope: Optional[torch.Tensor]
+        self._main_kv_rope: Optional[torch.Tensor]
         # Sprint 2 (Evidence K Bug #1+#2): Compressor state is split into
         # per-ratio slabs. The unified ``_compressor_state`` / `_score` are
         # backward-compat views that exist only when both slabs happen to
@@ -308,11 +332,38 @@ class DSV4KVPool:
         cfg = self.cfg
         N = cfg.max_active_seqs
 
-        self._main_kv = torch.zeros(
-            (cfg.num_layers, N, cfg.ring_size_main, cfg.head_dim),
-            dtype=cfg.dtype,
-            device=cfg.device,
-        )
+        # Sprint 6 B0b — main KV split per DSV4 paper §2.3.4.
+        # When ``cfg.main_kv_nope_dtype`` is set, the main KV tensor is
+        # backed by TWO physical allocations: nope dims at the requested
+        # narrow dtype (typically fp8_e4m3fn) + rope dims at cfg.dtype
+        # (BF16). The legacy ``_main_kv`` is left as None to surface any
+        # accidental direct access. ``view_for_layer`` materializes a
+        # BF16-cat read view so downstream callers see the same shape.
+        if cfg.main_kv_nope_dtype is not None:
+            nope_dim = cfg.head_dim - cfg.rope_head_dim
+            assert nope_dim > 0, (
+                f"main_kv_nope_dtype set but head_dim={cfg.head_dim} <= "
+                f"rope_head_dim={cfg.rope_head_dim} (nope_dim={nope_dim})"
+            )
+            self._main_kv_nope = torch.zeros(
+                (cfg.num_layers, N, cfg.ring_size_main, nope_dim),
+                dtype=cfg.main_kv_nope_dtype,
+                device=cfg.device,
+            )
+            self._main_kv_rope = torch.zeros(
+                (cfg.num_layers, N, cfg.ring_size_main, cfg.rope_head_dim),
+                dtype=cfg.dtype,
+                device=cfg.device,
+            )
+            self._main_kv = None  # split-on path: legacy slab not allocated
+        else:
+            self._main_kv = torch.zeros(
+                (cfg.num_layers, N, cfg.ring_size_main, cfg.head_dim),
+                dtype=cfg.dtype,
+                device=cfg.device,
+            )
+            self._main_kv_nope = None
+            self._main_kv_rope = None
 
         # ---- Compressor pool: SPLIT into c4 + c128 slabs (Sprint 2) ----
         if cfg.num_c4_layers > 0:
@@ -441,10 +492,17 @@ class DSV4KVPool:
 
         # Indexer pool: one slab per c4 layer. Last dim is `index_head_dim`,
         # NOT main attention `head_dim` (Sprint 2 Bug #5 fix).
+        # Storage dtype: paper §2.3.4 specifies FP4. We use ``cfg.indexer_dtype``
+        # (typically fp8_e4m3fn as an FP4 proxy — see DSV4KVPoolConfig docstring)
+        # when set, else fall back to ``cfg.dtype`` (Sprint-1/2 behavior, which
+        # silently re-cast FP4-quantized values to BF16/FP8 — Sprint 6 Bug A4.2).
+        indexer_storage_dtype = (
+            cfg.indexer_dtype if cfg.indexer_dtype is not None else cfg.dtype
+        )
         if cfg.num_c4_layers > 0:
             self._indexer_kv = torch.zeros(
                 (cfg.num_c4_layers, N, cfg.ring_size_indexer, cfg.index_head_dim),
-                dtype=cfg.dtype,
+                dtype=indexer_storage_dtype,
                 device=cfg.device,
             )
             idx_idx = 0
@@ -635,6 +693,63 @@ class DSV4KVPool:
 
     # ---- model wiring (consumed in W4.3 / W4.4) ----
 
+    def write_main_kv(
+        self,
+        layer_id: int,
+        out_cache_loc: torch.Tensor,
+        kv: torch.Tensor,
+    ) -> None:
+        """Per-token scatter of main KV into the layer's slab(s).
+
+        Sprint 6 B0b.2: centralizes the layout knowledge in the pool so the
+        model's W4 forward path is layout-agnostic. When ``main_kv_nope_dtype``
+        is set (split-on mode), this writes nope dims into ``_main_kv_nope``
+        at FP8 and rope dims into ``_main_kv_rope`` at BF16 per DSV4 paper
+        §2.3.4. When unset (split-off, Sprint-1/2), this writes the full
+        ``head_dim`` into ``_main_kv`` with the existing single-dtype cast.
+
+        Args
+        ----
+        layer_id: global layer index in [0, cfg.num_layers).
+        out_cache_loc: ``[num_tokens]`` long, flat scatter indices into the
+            layer's ``[N*ring_main]`` virtual flat ring (computed by
+            ``compute_out_cache_loc``).
+        kv: ``[num_tokens, head_dim]`` tensor of per-token KV. The model
+            is responsible for the per-paper quantization on ``kv[..., :-rd]``
+            BEFORE calling this helper; the pool only handles storage.
+
+        Returns nothing (mutates the slab in place).
+        """
+        if not 0 <= layer_id < self.cfg.num_layers:
+            raise IndexError(
+                f"layer_id={layer_id} out of range [0, {self.cfg.num_layers})"
+            )
+        if out_cache_loc.numel() == 0:
+            return  # empty batch — nothing to scatter
+
+        if self._main_kv_nope is not None and self._main_kv_rope is not None:
+            # Split-on path: scatter nope and rope into their respective slabs.
+            # Both slabs share the same ``[N, ring_main]`` layout, so the
+            # flat-scatter indices in ``out_cache_loc`` apply identically to
+            # both — just split the value tensor by last dim.
+            rd = self.cfg.rope_head_dim
+            nope_slab = self._main_kv_nope[layer_id]
+            rope_slab = self._main_kv_rope[layer_id]
+            n_slots, ring_main = nope_slab.shape[:2]
+            nope_flat = nope_slab.view(n_slots * ring_main, -1)
+            rope_flat = rope_slab.view(n_slots * ring_main, -1)
+            kv_nope = kv[..., :-rd].to(nope_flat.dtype)
+            kv_rope = kv[..., -rd:].to(rope_flat.dtype)
+            nope_flat[out_cache_loc] = kv_nope
+            rope_flat[out_cache_loc] = kv_rope
+        else:
+            # Split-off path: legacy behavior, single slab + single cast.
+            assert self._main_kv is not None
+            slab = self._main_kv[layer_id]
+            n_slots, ring_main = slab.shape[:2]
+            kv_flat = slab.view(n_slots * ring_main, slab.shape[-1])
+            kv_flat[out_cache_loc] = kv.to(kv_flat.dtype)
+
     def view_for_layer(self, layer_id: int) -> Dict[str, Optional[torch.Tensor]]:
         """Per-layer zero-copy views into the pool's tensors.
 
@@ -663,7 +778,24 @@ class DSV4KVPool:
 
         ratio = self.cfg.compress_ratio_per_layer[layer_id]
 
-        kv_view = self._main_kv[layer_id]
+        # Sprint 6 B0b: when split is on, the legacy ``_main_kv`` is None;
+        # downstream callers that want zero-copy split access read
+        # ``kv_cache_split`` (a 2-tuple of nope/rope views). The ``kv_cache``
+        # key always returns a single 3D ``[N, ring_main, head_dim]`` tensor;
+        # for split-on, that is materialized via concat-on-read in cfg.dtype
+        # so existing readers (sparse_attn etc.) see the same shape/dtype.
+        kv_split_view: Optional[tuple] = None
+        if self._main_kv_nope is not None and self._main_kv_rope is not None:
+            nope_view = self._main_kv_nope[layer_id]
+            rope_view = self._main_kv_rope[layer_id]
+            kv_split_view = (nope_view, rope_view)
+            kv_view = torch.cat(
+                [nope_view.to(self.cfg.dtype), rope_view],
+                dim=-1,
+            )
+        else:
+            assert self._main_kv is not None
+            kv_view = self._main_kv[layer_id]
 
         kv_state_view: Optional[torch.Tensor] = None
         score_state_view: Optional[torch.Tensor] = None
@@ -700,4 +832,8 @@ class DSV4KVPool:
             # Sprint 3 (Bug #6): the outer Compressor's main-attention kv_cache
             # slab — main attention concatenates this to its window KV.
             "compressor_kv_cache": compressor_kv_cache_view,
+            # Sprint 6 B0b: 2-tuple ``(nope_view, rope_view)`` when split-on,
+            # else ``None``. Allows zero-copy split-aware writes via the new
+            # ``write_main_kv`` helper without forcing a concat round-trip.
+            "kv_cache_split": kv_split_view,
         }

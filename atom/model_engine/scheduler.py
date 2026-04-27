@@ -224,9 +224,14 @@ class ScheduledBatch:
         is_dummy_run: bool = False,
         num_spec_step: int = 0,
         scheduled_spec_decode_tokens: dict[int, np.ndarray] | None = None,
+        finished_seq_ids: list[int] | None = None,
     ):
         if scheduled_spec_decode_tokens is None:
             scheduled_spec_decode_tokens = {}
+        # Seq-ids whose pool slots ModelRunner must free before admitting this batch.
+        self.finished_seq_ids: list[int] = (
+            finished_seq_ids if finished_seq_ids is not None else []
+        )
 
         self.req_ids = list(seqs.keys())
         # self.scheduled_tokens = [
@@ -402,6 +407,11 @@ class Scheduler:
         # pool-agnostic — it must not import or reference any concrete pool.
         self._admit_listeners: list = []
         self._finish_listeners: list = []
+        # Pending finish seq_ids accumulated since the last schedule() call.
+        # Drained into ScheduledBatch.finished_seq_ids so ModelRunner can
+        # free pool slots even when the pool lives in a child process
+        # (where register_finish_listener wiring is a no-op).
+        self._pending_finish_ids: list[int] = []
 
     def register_admit_listener(self, fn) -> None:
         """Subscribe a callable(seq_id: int) -> None to be invoked on admit.
@@ -423,6 +433,8 @@ class Scheduler:
                 logger.warning("Seq admit listener %s raised %s; ignoring", listener, e)
 
     def _emit_finish(self, seq_id: int) -> None:
+        # Accumulate for cross-process delivery via ScheduledBatch.finished_seq_ids.
+        self._pending_finish_ids.append(seq_id)
         for listener in self._finish_listeners:
             try:
                 listener(seq_id)
@@ -537,6 +549,7 @@ class Scheduler:
             connector_meta_output = None
             if self.kv_connector is not None:
                 connector_meta_output = self.kv_connector.build_connector_meta()
+            finished_ids, self._pending_finish_ids = self._pending_finish_ids, []
             return (
                 ScheduledBatch(
                     seqs=scheduled_seqs,
@@ -546,6 +559,7 @@ class Scheduler:
                     total_seqs_num=num_seqs_prefill,
                     total_seqs_num_prefill=num_seqs_prefill,
                     connector_meta_output=connector_meta_output,
+                    finished_seq_ids=finished_ids,
                 ),
                 scheduled_seqs,
             )
@@ -583,6 +597,7 @@ class Scheduler:
         if self.kv_connector is not None:
             connector_meta_output = self.kv_connector.build_connector_meta()
 
+        finished_ids, self._pending_finish_ids = self._pending_finish_ids, []
         decode_batch = ScheduledBatch(
             seqs=scheduled_seqs,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -594,6 +609,7 @@ class Scheduler:
             connector_meta_output=connector_meta_output,
             num_spec_step=self.mtp_k,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            finished_seq_ids=finished_ids,
         )
         return (decode_batch, scheduled_seqs)
 

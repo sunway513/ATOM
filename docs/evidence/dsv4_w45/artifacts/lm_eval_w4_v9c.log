@@ -1,0 +1,28 @@
+2026-04-27:01:27:51 WARNING  [config.evaluate_config:281] --limit SHOULD ONLY BE USED FOR TESTING. REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.
+2026-04-27:01:27:52 INFO     [_cli.run:375] Selected Tasks: ['gsm8k']
+2026-04-27:01:27:53 INFO     [evaluator:203] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+2026-04-27:01:27:53 WARNING  [evaluator:215] generation_kwargs: {'max_gen_toks': 1024, 'temperature': 0.0, 'do_sample': False} specified through cli, these settings will update set parameters in yaml tasks. Ensure 'do_sample=True' for non-greedy decoding!
+2026-04-27:01:27:53 INFO     [evaluator:228] Initializing local-completions model, with arguments: {'model': '/data/hf_models/deepseek-ai/DeepSeek-V4-Pro', 'base_url': 'http://localhost:8000/v1/completions', 'num_concurrent': 1, 'max_retries': 3, 'tokenized_requests': False}
+2026-04-27:01:27:53 INFO     [models.openai_completions:42] Remote tokenizer not supported. Using huggingface tokenizer backend.
+2026-04-27:01:27:53 INFO     [models.api_models:172] Using max length 2048 - 1
+2026-04-27:01:27:53 INFO     [models.api_models:175] Concurrent requests are disabled. To enable concurrent requests, set `num_concurrent` > 1.
+2026-04-27:01:27:53 INFO     [models.api_models:193] Using tokenizer huggingface
+You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-04-27:01:27:56 INFO     [tasks:700] Selected tasks:
+2026-04-27:01:27:56 INFO     [tasks:691] Task: gsm8k (gsm8k/gsm8k.yaml)
+2026-04-27:01:27:56 INFO     [evaluator:306] gsm8k: Using gen_kwargs: {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0, 'max_gen_toks': 1024}
+2026-04-27:01:27:56 WARNING  [evaluator:325] Overwriting default num_fewshot of gsm8k from 5 to 5
+2026-04-27:01:27:56 INFO     [api.task:436] Building contexts for gsm8k on rank 0...
+  0%|          | 0/20 [00:00<?, ?it/s]100%|██████████| 20/20 [00:00<00:00, 672.67it/s]
+2026-04-27:01:27:56 INFO     [evaluator:575] Running generate_until requests
+2026-04-27:01:27:56 INFO     [models.api_models:733] Tokenized requests are disabled. Context + generation length is not checked.
+Requesting API:   0%|          | 0/20 [00:00<?, ?it/s]Requesting API:   5%|▌         | 1/20 [00:31<09:57, 31.43s/it]Requesting API:  10%|█         | 2/20 [00:39<05:19, 17.75s/it]Requesting API:  15%|█▌        | 3/20 [00:59<05:16, 18.64s/it]Requesting API:  20%|██        | 4/20 [01:27<05:59, 22.45s/it]Requesting API:  25%|██▌       | 5/20 [02:29<09:10, 36.71s/it]Requesting API:  30%|███       | 6/20 [02:45<06:56, 29.74s/it]Requesting API:  35%|███▌      | 7/20 [03:21<06:51, 31.63s/it]Requesting API:  40%|████      | 8/20 [03:44<05:47, 28.96s/it]Requesting API:  45%|████▌     | 9/20 [04:19<05:37, 30.67s/it]Requesting API:  50%|█████     | 10/20 [04:36<04:27, 26.74s/it]Requesting API:  55%|█████▌    | 11/20 [04:50<03:23, 22.61s/it]Requesting API:  60%|██████    | 12/20 [05:25<03:31, 26.38s/it]Requesting API:  65%|██████▌   | 13/20 [06:42<04:53, 41.87s/it]Requesting API:  70%|███████   | 14/20 [07:02<03:30, 35.12s/it]Requesting API:  75%|███████▌  | 15/20 [07:35<02:53, 34.70s/it]Requesting API:  80%|████████  | 16/20 [07:52<01:56, 29.15s/it]Requesting API:  85%|████████▌ | 17/20 [08:23<01:29, 29.68s/it]Requesting API:  90%|█████████ | 18/20 [08:38<00:50, 25.39s/it]Requesting API:  95%|█████████▌| 19/20 [09:04<00:25, 25.67s/it]Requesting API: 100%|██████████| 20/20 [11:50<00:00, 67.68s/it]Requesting API: 100%|██████████| 20/20 [11:50<00:00, 35.52s/it]
+fatal: not a git repository: /home/pensun/ATOM/.git/worktrees/ATOM-lingpeng
+2026-04-27:01:39:47 INFO     [loggers.evaluation_tracker:280] Output path not provided, skipping saving results aggregated
+local-completions ({'model': '/data/hf_models/deepseek-ai/DeepSeek-V4-Pro', 'base_url': 'http://localhost:8000/v1/completions', 'num_concurrent': 1, 'max_retries': 3, 'tokenized_requests': False}), gen_kwargs: ({'max_gen_toks': 1024, 'temperature': 0.0, 'do_sample': False}), limit: 20.0, num_fewshot: 5, batch_size: 1
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
+|gsm8k|      3|flexible-extract|     5|exact_match|↑  | 0.75|±  |0.0993|
+|     |       |strict-match    |     5|exact_match|↑  | 0.75|±  |0.0993|
+
