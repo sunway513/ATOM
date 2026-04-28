@@ -1657,7 +1657,12 @@ class DeepseekV4Attention(nn.Module):
         # bug (intermediate compress-block boundaries skipped) which
         # produces degenerate output even at conc=1. Multi-seq batches
         # still use ``_forward_w4`` while sprint-4 lands the proper fix.
-        if forward_batch.cu_seqlens_q.numel() == 2:
+        # Sprint 7h: ATOM_DSV4_FORCE_W4=1 bypasses this fast-path so we can
+        # exercise the W4 path at conc=1 for trace bisect.
+        import os as _os_dispatch
+
+        _force_w4 = _os_dispatch.environ.get("ATOM_DSV4_FORCE_W4") == "1"
+        if not _force_w4 and forward_batch.cu_seqlens_q.numel() == 2:
             sp = (
                 int(forward_batch.positions[0].item())
                 if forward_batch.positions.numel() > 0
@@ -1932,11 +1937,63 @@ class DeepseekV4Attention(nn.Module):
 
         # ---- Q: low-rank projection + per-head RMSNorm + partial RoPE ----
         seqlen = x.size(0)
-        qr = self.q_norm(self.wq_a(x))  # [seqlen, q_lora_rank]
-        q = self.wq_b(qr).view(seqlen, self.n_local_heads, self.head_dim)
+
+        # Sprint 7h trace hook (issue #37): per-stage Q dump for multi-req
+        # divergence bisect. Off by default; enable via ATOM_DSV4_TRACE_QSTAGE_DIR.
+        import os as _os_q
+
+        _trace_qstage = _os_q.environ.get("ATOM_DSV4_TRACE_QSTAGE_DIR")
+        _do_trace_q = (
+            _trace_qstage is not None
+            and forward_batch.positions.numel() > 0
+            and int(forward_batch.positions.min().item()) > 0
+        )
+
+        _wq_a_x = self.wq_a(x)
+        qr = self.q_norm(_wq_a_x)  # [seqlen, q_lora_rank]
+        _wq_b_qr = self.wq_b(qr)
+        q = _wq_b_qr.view(seqlen, self.n_local_heads, self.head_dim)
+        q_pre_rmsnorm = q.detach().clone() if _do_trace_q else None
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.eps)
+        q_post_rmsnorm = q.detach().clone() if _do_trace_q else None
         q = q.unsqueeze(0)  # [1, seqlen, H, D]
         _apply_rotary_emb(q[..., -rd:], freqs_cis)
+        q_post_rope = q.detach().clone() if _do_trace_q else None
+
+        if _do_trace_q:
+            if not hasattr(self, "_trace_qstage_step"):
+                self._trace_qstage_step = 0
+            _max_steps = int(_os_q.environ.get("ATOM_DSV4_TRACE_MAX_STEPS", "1"))
+            if self._trace_qstage_step < _max_steps:
+                try:
+                    _os_q.makedirs(_trace_qstage, exist_ok=True)
+                    # Rank-suffix prevents TP-shard race: TP=8 → 8 workers
+                    # write to disjoint files; downstream diff matches same rank.
+                    try:
+                        import torch.distributed as _td
+                        _rank = _td.get_rank() if _td.is_initialized() else 0
+                    except Exception:
+                        _rank = 0
+                    torch.save(
+                        {
+                            "x_in": x.detach().cpu().contiguous(),
+                            "wq_a_out": _wq_a_x.detach().cpu().contiguous(),
+                            "qr_post_qnorm": qr.detach().cpu().contiguous(),
+                            "wq_b_out": _wq_b_qr.detach().cpu().contiguous(),
+                            "q_pre_rmsnorm": q_pre_rmsnorm.cpu().contiguous(),
+                            "q_post_rmsnorm": q_post_rmsnorm.cpu().contiguous(),
+                            "q_post_rope": q_post_rope.cpu().contiguous(),
+                            "positions": forward_batch.positions.detach().cpu(),
+                            "cu_seqlens_q": forward_batch.cu_seqlens_q.detach().cpu(),
+                            "req_pool_indices": forward_batch.req_pool_indices.detach().cpu(),
+                            "layer_id": int(self.layer_id),
+                            "rank": int(_rank),
+                        },
+                        f"{_trace_qstage}/L{self.layer_id:02d}_S{self._trace_qstage_step:02d}_R{_rank:02d}.pt",
+                    )
+                except Exception:
+                    pass
+            self._trace_qstage_step += 1
 
         # ---- KV: project, RMSNorm, RoPE on rope dims, FP8-sim on nope ----
         kv = self.wkv(x)  # [seqlen, head_dim]
