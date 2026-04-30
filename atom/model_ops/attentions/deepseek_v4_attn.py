@@ -46,7 +46,7 @@ from atom.model_ops.attentions.backends import (
     CommonAttentionBuilder,
 )
 from atom.utils import CpuGpuBuffer
-from atom.utils.forward_context import AttentionMetaData
+from atom.utils.forward_context import AttentionMetaData, Context
 
 
 class DeepseekV4Backend(AttentionBackend):
@@ -666,9 +666,15 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             return gpu, groups_np
         return gpu
 
-    def build_for_cudagraph_capture(self, bs: int) -> AttentionMetaData:
-        # CUDA Graph capture is disabled for V4 (PR4 scope). Return a stub.
-        return AttentionMetaData(
+    def build_for_cudagraph_capture(self, bs: int):
+        # PR4 scope: full V4 capture pipeline still TODO (Phases 1-5 in
+        # docs/design/dsv4_cudagraph_phaseplan.md). Stub here matches the
+        # (metadata, context) tuple contract used by aiter_mla.py:910 so
+        # ModelRunner.capture_cudagraph can advance past the unpack site
+        # to surface the next real wall (per-seq Python loop sync).
+        var = self.model_runner.forward_vars
+        positions = var["positions"].copy_to_gpu(bs)
+        metadata = AttentionMetaData(
             cu_seqlens_k=None,
             max_seqlen_q=1,
             max_seqlen_k=1,
@@ -678,6 +684,10 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             total_kv=bs,
             num_cached_tokens=None,
         )
+        context = Context(
+            positions=positions, is_prefill=False, batch_size=bs, graph_bs=bs
+        )
+        return metadata, context
 
     # ------------------------------------------------------------------ #
     # Helpers.                                                           #
