@@ -1046,6 +1046,21 @@ class ModelRunner:
         i32_kwargs = {"dtype": torch.int32, "device": self.device}
         f32_kwargs = {"dtype": torch.float, "device": self.device}
 
+        # PR4a / Phase 0 (#37): V4 fuses LM head into model.forward (returns
+        # logits, not hidden_states; compute_logits is a no-op). The captured
+        # graph writes the model output into `outputs[:num_tokens]`, so the
+        # buffer's last-dim must match what model.forward returns. For V4 that
+        # is vocab_size; for every other model it stays hidden_size.
+        # Detected via hf_config.architectures rather than importing the V4
+        # class (avoids a circular import; the runner is model-agnostic).
+        archs = getattr(config.hf_config, "architectures", []) or []
+        is_dsv4 = any("DeepseekV4" in a for a in archs)
+        outputs_last_dim = (
+            getattr(config.hf_config, "vocab_size", hidden_size)
+            if is_dsv4
+            else hidden_size
+        )
+
         # TODO: remove it in forward_context
         self.forward_vars = {
             "input_ids": self.tokenID_processor.input_ids,
@@ -1054,8 +1069,9 @@ class ModelRunner:
             "top_ks": CpuGpuBuffer(self.max_bs, **i32_kwargs),
             "top_ps": CpuGpuBuffer(self.max_bs, **f32_kwargs),
             # Keep enough space for MTP decode (max_q_len > 1).
+            # Last dim is vocab_size when the model is V4 (logits-fused).
             "outputs": torch.empty(
-                self.max_num_batched_tokens, hidden_size, dtype=hidden_type
+                self.max_num_batched_tokens, outputs_last_dim, dtype=hidden_type
             ),
         }
         if hasattr(self, "drafter"):
@@ -1844,7 +1860,8 @@ class ModelRunner:
         input_ids = self.forward_vars["input_ids"].gpu
         positions = self.forward_vars["positions"].gpu
         outputs = self.forward_vars["outputs"]
-        self.forward_vars["kv_indptr"].gpu.zero_()
+        if "kv_indptr" in self.forward_vars:
+            self.forward_vars["kv_indptr"].gpu.zero_()
 
         self.graphs: dict[tuple[int, int], torch.cuda.CUDAGraph] = dict()
         self.graph_logits: dict[tuple[int, int], torch.Tensor] = dict()

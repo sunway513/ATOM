@@ -791,6 +791,7 @@ class Compressor(nn.Module):
         slot: int = 0,
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
+        start_pos: Optional[int] = None,
     ) -> Optional[torch.Tensor]:
         """Compress KV for the input tokens. Writes into self.kv_cache when a
         compression block boundary is hit; otherwise just buffers state and returns None.
@@ -817,11 +818,12 @@ class Compressor(nn.Module):
         # warmup the binding hasn't run yet but writes are guarded below by
         # `_v4_is_dummy_run()`, so a None kv_cache is OK in that path.
         assert self.rotary_emb is not None, "compressor.rotary_emb must be set by owner"
-        # Single GPU→CPU sync per call: needed for the prefill/decode branch,
-        # `should_compress` check, and the scatter `ci` index. Tensor-side ops
-        # below use `positions[0]` directly (0-d tensor index) where the value
-        # only feeds slot/RoPE arithmetic — no extra syncs.
-        start_pos = int(positions[0].item())
+        # PR4 Phase 1: prefer caller-provided start_pos (sourced from CPU
+        # mirror in the per-seq dispatcher) to avoid the per-layer GPU→CPU
+        # sync. Falls back to legacy .item() when caller doesn't supply it
+        # (warmup, single-seq legacy path).
+        if start_pos is None:
+            start_pos = int(positions[0].item())
         if x.dim() == 2:
             x = x.unsqueeze(0)  # [num_tokens, dim] → [1, num_tokens, dim]
         bsz, seqlen, _ = x.size()
@@ -1071,6 +1073,7 @@ class Indexer(nn.Module):
         slot: int = 0,
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
+        start_pos: Optional[int] = None,
     ) -> torch.Tensor:
         """Compute sparse top-k indices over the indexer's compressed KV cache.
 
@@ -1092,10 +1095,11 @@ class Indexer(nn.Module):
         assert self.rotary_emb is not None
         assert x.dim() == 2 and qr.dim() == 2
         seqlen = x.size(0)
-        # Single GPU→CPU sync per call for n_committed Python int + the inner
-        # Compressor (which extracts its own from positions). Tensor-side index
-        # math uses `positions` directly.
-        start_pos = int(positions[0].item())
+        # PR4 Phase 1: prefer caller-provided start_pos (CPU mirror in
+        # per-seq dispatch) — eliminates per-layer GPU→CPU sync. Inner
+        # Compressor receives the same start_pos plumbed below.
+        if start_pos is None:
+            start_pos = int(positions[0].item())
         ratio = self.compress_ratio
         rd = self.rope_head_dim
         end_pos = start_pos + seqlen
@@ -1120,6 +1124,7 @@ class Indexer(nn.Module):
             slot=slot,
             block_table=block_table,
             context_lens=context_lens,
+            start_pos=start_pos,
         )
         # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
@@ -1452,9 +1457,15 @@ class DeepseekV4Attention(nn.Module):
             # Dummy context_lens: 1-element tensor sized to seqlen_total
             # (treats warmup as fresh prefill). Compressor.forward requires
             # context_lens; this satisfies the contract during dummy run.
-            context_lens = torch.tensor(
-                [seqlen_total], device=positions.device, dtype=torch.int32
-            )
+            # PR4 Phase 5 (HIP capture): torch.tensor() allocation is
+            # capture-incompatible. Pre-allocate once on first call, then
+            # fill_ in subsequent calls (fill_ is capture-friendly).
+            if getattr(self, "_dummy_context_lens", None) is None:
+                self._dummy_context_lens = torch.empty(
+                    (1,), device=positions.device, dtype=torch.int32
+                )
+            self._dummy_context_lens.fill_(seqlen_total)
+            context_lens = self._dummy_context_lens
         elif cpu_meta is not None and cpu_meta["start_pos_per_seq"] is not None:
             seq_offsets = cpu_meta["cu_seqlens_q"][: num_seqs + 1].tolist()
             slots = cpu_meta["state_slot_mapping"][:num_seqs].tolist()
@@ -1514,6 +1525,7 @@ class DeepseekV4Attention(nn.Module):
                         slot=slot,
                         block_table=block_table,
                         context_lens=seq_context_lens,
+                        start_pos=start_pos,
                     )
                 else:
                     compress_topk_idxs = _get_compress_topk_idxs(
@@ -1563,6 +1575,7 @@ class DeepseekV4Attention(nn.Module):
                         slot=slot,
                         block_table=block_table,
                         context_lens=seq_context_lens,
+                        start_pos=start_pos,
                     )
                     if kv_compress is not None:
                         kv_sa = torch.cat([kv_sa, kv_compress], dim=1)
@@ -1574,6 +1587,7 @@ class DeepseekV4Attention(nn.Module):
                         slot=slot,
                         block_table=block_table,
                         context_lens=seq_context_lens,
+                        start_pos=start_pos,
                     )
                     # sparse_attn input layout: [SWA window || compressed
                     # entries gathered from block-table]. n_committed accounts
