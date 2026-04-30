@@ -114,6 +114,19 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         self._swa_dtype = torch.bfloat16  # SWA window matches KV dtype
         self._classical_dtype = torch.bfloat16  # compressed KV is BF16
 
+        # PR4 Phase 3: pin state_slot_mapping to a stable forward_vars
+        # buffer. Capture records the GPU pointer; replay must update the
+        # SAME address so the captured graph reads fresh values. Previously
+        # _populate_state_slot_mapping created a fresh tensor per call,
+        # leaving the captured graph reading a stale sentinel.
+        from atom.utils import CpuGpuBuffer
+
+        max_bs = model_runner.config.max_num_seqs
+        if "state_slot_mapping" not in model_runner.forward_vars:
+            model_runner.forward_vars["state_slot_mapping"] = CpuGpuBuffer(
+                max_bs, dtype=torch.int32, device=model_runner.device
+            )
+
     # ------------------------------------------------------------------ #
     # AttentionMetadataBuilder hooks (per-request cache abstraction).    #
     # ------------------------------------------------------------------ #
@@ -453,35 +466,90 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         When `return_cpu=True`, returns `(gpu_tensor, cpu_numpy)`. The CPU
         copy is consumed by the V4 forward path to avoid `.tolist()` syncs
         (PR-A Phase 2).
+
+        PR4 Phase 3: writes into the pinned `state_slot_mapping` forward_var
+        (allocated in __init__) so the GPU buffer address is stable across
+        capture and replay.
         """
         import numpy as np
 
         groups_np = np.asarray(
             batch.per_req_cache_groups[:scheduled_bs], dtype=np.int32
         )
-        gpu = torch.from_numpy(groups_np).to(self.model_runner.device)
+        var = self.model_runner.forward_vars
+        n = groups_np.shape[0]
+        if n > 0:
+            var["state_slot_mapping"].np[:n] = groups_np
+        gpu = var["state_slot_mapping"].copy_to_gpu(max(n, 1))[:n]
         if return_cpu:
             return gpu, groups_np
         return gpu
 
     def build_for_cudagraph_capture(self, bs: int):
-        # PR4 scope: full V4 capture pipeline still TODO (Phases 1-5 in
-        # docs/design/dsv4_cudagraph_phaseplan.md). Stub here matches the
-        # (metadata, context) tuple contract used by aiter_mla.py:910 so
-        # ModelRunner.capture_cudagraph can advance past the unpack site
-        # to surface the next real wall (per-seq Python loop sync).
+        # PR4 Phase 4: real metadata builder. Publish full per-seq
+        # sentinel metadata so V4 attention's per-seq dispatch runs the
+        # real DECODE codepath during capture (model_runner.py:1615
+        # routes is_prefill -> eager, so capture only services decode).
+        #
+        # Sentinel values (decode state, minimal valid):
+        #   - positions      : ones(bs * max_q_len) -> start_pos=1 -> decode
+        #                      branches at L1551 (swa_kv decode write) and
+        #                      L1569 (Compressor decode path) are recorded
+        #   - block_tables   : zeros[bs, max_blocks] -> block 0 valid
+        #   - state_slot_map : arange(bs)            -> each seq distinct slot
+        #   - context_lens   : 2 per seq             -> start_pos=1 + 1 token
+        #   - start_pos_cpu  : ones(bs)              -> CPU mirror for Phase 1
+        import numpy as np
+
         var = self.model_runner.forward_vars
-        positions = var["positions"].copy_to_gpu(bs)
+
+        # block_tables: zero out first bs rows (block ID 0 in each slot).
+        block_tables_np = var["block_tables"].np
+        block_tables_np[:bs] = 0
+        block_tables_gpu = var["block_tables"].copy_to_gpu(bs)
+
+        # state_slot_mapping: distinct slot per seq. Pinned forward_vars
+        # buffer (Phase 3) so capture-recorded pointer matches replay.
+        state_slot_np = np.arange(bs, dtype=np.int32)
+        var["state_slot_mapping"].np[:bs] = state_slot_np
+        state_slot_gpu = var["state_slot_mapping"].copy_to_gpu(bs)
+
+        # context_lens: 2 per seq (start_pos=1 + this token).
+        var["context_lens"].np[:bs] = 2
+        context_lens_gpu = var["context_lens"].copy_to_gpu(bs)
+
+        max_q_len = var.get("mtp_k", None)
+        max_q_len = (max_q_len + 1) if max_q_len is not None else 1
+        cu_seqlens_q_np = np.arange(
+            0, (bs + 1) * max_q_len, max_q_len, dtype=np.int32
+        )
+        cu_seqlens_q_gpu = var["cu_seqlens_q"].gpu[: bs + 1]
+
+        # OVERRIDE positions to force decode branch in V4 attention.
+        # ModelRunner pre-fills positions = arange(num_tokens) % max_q_len
+        # which gives positions[seq_start] = 0 (prefill branch). Capture is
+        # only used for decode, so we patch positions to start_pos=1 per seq.
+        var["positions"].np[: bs * max_q_len] = 1
+        positions = var["positions"].copy_to_gpu(bs * max_q_len)
+
         metadata = AttentionMetaData(
+            cu_seqlens_q=cu_seqlens_q_gpu,
             cu_seqlens_k=None,
-            max_seqlen_q=1,
-            max_seqlen_k=1,
+            max_seqlen_q=max_q_len,
+            max_seqlen_k=2,
             min_seqlen_q=0,
             dropout_p=0.0,
             has_cached=False,
-            total_kv=bs,
+            total_kv=bs * 2,
             num_cached_tokens=None,
+            block_tables=block_tables_gpu,
+            context_lens=context_lens_gpu,
         )
+        metadata.state_slot_mapping = state_slot_gpu
+        # CPU mirrors for Phase 1 .item()-skip. start_pos=1 forces decode.
+        metadata.cu_seqlens_q_cpu = cu_seqlens_q_np
+        metadata.state_slot_mapping_cpu = state_slot_np
+        metadata.start_pos_per_seq_cpu = np.ones(bs, dtype=np.int32)
         context = Context(
             positions=positions, is_prefill=False, batch_size=bs, graph_bs=bs
         )

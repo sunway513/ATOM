@@ -44,6 +44,30 @@ import triton
 import triton.language as tl
 
 
+# PR4 Phase 5 (HIP capture): module-level cache for single-seq-fallback
+# scratch tensors in update_compressor_states. Keyed by (str(device), n, slot)
+# so each entry is a CONSTANT tensor — the cache returns pre-built buffers
+# without any post-fetch writes (writes to GPU tensors are also capture-
+# incompatible on ROCm). Cache is populated during eager warmup BEFORE
+# capture runs, so capture-time calls hit the cache and skip allocation.
+_single_seq_cache: dict = {}
+
+
+def _single_seq_cache_get(device, n: int, slot: int):
+    key = (str(device), n, slot)
+    bufs = _single_seq_cache.get(key)
+    if bufs is None:
+        # Allocates only in eager (warmup) mode; capture-time calls hit
+        # the populated cache and do not enter this branch.
+        bufs = (
+            torch.tensor([0, n], device=device, dtype=torch.int32),
+            torch.tensor([slot], device=device, dtype=torch.int32),
+            torch.zeros(n, device=device, dtype=torch.int32),
+        )
+        _single_seq_cache[key] = bufs
+    return bufs
+
+
 @triton.jit
 def _swa_write_kernel(
     kv_ptr,  # [num_tokens, head_dim]
@@ -321,9 +345,14 @@ def update_compressor_states(
     # supplied by caller (no positions-derived shortcut).
     if cu_seqlens_q is None:
         assert slot is not None, "single-seq mode requires slot="
-        cu_seqlens_q = torch.tensor([0, n], device=device, dtype=torch.int32)
-        state_slot_mapping = torch.tensor([slot], device=device, dtype=torch.int32)
-        seq_idx_per_token = torch.zeros(n, device=device, dtype=torch.int32)
+        # PR4 Phase 5 (HIP capture): torch.tensor / torch.zeros allocation
+        # AND scalar GPU-tensor writes both trigger hipErrorStreamCapture-
+        # Unsupported. Cache returns pre-built constant tensors keyed by
+        # (device, n, slot) — populated during eager warmup, hit during
+        # capture. No allocs, no writes, capture-friendly.
+        cu_seqlens_q, state_slot_mapping, seq_idx_per_token = (
+            _single_seq_cache_get(device, n, slot)
+        )
     else:
         assert (
             state_slot_mapping is not None and seq_idx_per_token is not None
