@@ -1053,4 +1053,65 @@ This single line would have caught Sprint 7f's 4-hour misdirection in seconds.
 
 With the install corrected, all prior multi-req silicon data is invalidated and being regenerated. The first sanity check (`v14_sanity_lingpeng.sh`) confirms ATOM-lingpeng's W4 path at conc=1 FORCE_W4. Subsequent debugging will use the per-stage trace bisection methodology from Sprint 7f, but now actually against ATOM-lingpeng.
 
+---
+
+## Sprint 7i — PR #650 (Lingpeng / @valarLip) silicon-validates multi-req
+
+While the W4 path debug effort was stuck, [@valarLip](https://github.com/valarLip) (= Lingpeng Jin) landed a full V4 redesign in upstream [ROCm/ATOM PR #650](https://github.com/ROCm/ATOM/pull/650) (`feat/deepseek-v4-pr1-skeleton`). It is NOT a patch on top of `_forward_w4`; it is a fresh dedicated V4 attention module per paper §3.6.1 with:
+
+- New file: `atom/model_ops/attentions/deepseek_v4_attn.py` (+495)
+- New file: `atom/model_ops/sparse_attn_v4.py` (+270)
+- New file: `atom/model_ops/quant_v4.py` (+309)
+- Standard ATOM `block_table` for KV (vs the W4 path's custom `DSV4KVPool` slot allocator)
+- `pos%(2*ratio)` ring buffer per paper §3.6.1
+- Per-seq Python loop for multi-seq dispatch (commit `aebe2ff` "PR3-main")
+- Bisect harness: `atom/utils/debug_helper/` (`dump.py` + `compare.py` + `ref_patch.py`) + a 32 KB `.claude/skills/dump-bisect-debug.md` methodology written before the model code
+
+### Cross-validation in this branch's silicon environment
+
+Pulled PR #650 into ATOM-feat, switched the docker editable install:
+
+```bash
+sudo docker exec atom_dsv4_feat /opt/venv/bin/pip install -e \
+    /workspace/ATOM-feat --no-deps --no-build-isolation
+sudo docker exec atom_dsv4_feat /opt/venv/bin/python -c \
+    "import atom; print(atom.__file__)"
+# → /workspace/ATOM-feat/atom/__init__.py  ✅
+```
+
+Ran v16 (`v16_pr650_smoke.sh`) at conc=4: `--max-num-seqs 4 --max-num-batched-tokens 4096 --max-model-len 4096 --enforce-eager` TP=8 fp8.
+
+| Test | Result |
+|---|---|
+| Conc=4 smoke (4 distinct math prompts) | **4/4** all answered correctly |
+| Direct gsm8k limit=20 5-shot at conc=4, run 1 | **0.9000 / 0.9000** (latency 297s / 14.9s/req avg) |
+| Direct gsm8k limit=20 5-shot at conc=4, run 2 (reproducibility) | **0.9000 / 0.9000** (latency 281s / 14.1s/req avg) |
+
+Outputs (smoke):
+- `Janet 36+4`: " 36 + 4 = 40. The answer is 40."
+- `train 60/2`: " 60 / 2 = 30. The answer is 30."
+- `Bob 5+7`:    " 5 + 7 = 12. The answer is 12."
+- `17 × 23`:    " 17 * 23 = 391. The answer is 391."
+
+The lm_eval direct harness lives at `tools/dsv4_multireq_debug/v16_gsm8k_direct.py` (not `lm_eval` package because `lm_eval/models/api_models.py:545` has an `UnboundLocalError` on its retry path that loops forever on any 4xx response).
+
+### Verdict
+
+**Multi-req at conc=4 silicon-validated by an independent run on PR #650, accuracy ≈ 0.90.** This exceeds ATOM-lingpeng's prior conc=1 baseline of 0.70–0.75 by ~+15pp at the same task while moving from conc=1 → conc=4. The W4 path on this branch is now superseded; production routing for DSV4-Pro multi-req should follow PR #650 once it lands on `main`.
+
+### What survives from this branch
+
+The Tier-1 commits in [hand-off issue #60](https://github.com/sunway513/ATOM/issues/60) remain valuable as **env-flag-scoped contributions** that can be cherry-picked into PR #650's path or kept independent:
+
+- [`2d0098c`](https://github.com/sunway513/ATOM/commit/2d0098c) Sprint 7b cast fix
+- [`96176c4`](https://github.com/sunway513/ATOM/commit/96176c4) Sprint 7c admit-gate
+- [`a8e3a02`](https://github.com/sunway513/ATOM/commit/a8e3a02) Sprint 6 B0a Indexer FP8 storage opt-in
+
+Tier-2 (`DSV4KVPool` dual-slab work, B0b.1-5) is superseded by PR #650's `block_table` design and should not be carried forward.
+
+### Lessons captured as skills
+
+- [`.claude/skills/ramp-inference-feature.md`](../../../.claude/skills/ramp-inference-feature.md) — generic 8-phase methodology (reference first, infra first, rewrite > patch, standard primitives, phased landings) for bringing a new fundamental feature into ATOM end-to-end.
+- [`.claude/skills/redo-after-peer-success.md`](../../../.claude/skills/redo-after-peer-success.md) — four-move playbook for when a peer/parallel agent ships the working solution: silicon-validate theirs, diff against your dead-end, salvage what survives, write the lesson into a skill before next session. Includes a worked day-by-day re-do plan for DSV4-Pro multi-req.
+
 
