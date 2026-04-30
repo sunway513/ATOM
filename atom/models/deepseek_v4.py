@@ -112,6 +112,13 @@ def _v4_get_seq_metadata():
             "state_slot_mapping": getattr(md, "state_slot_mapping_cpu", None),
             "start_pos_per_seq": getattr(md, "start_pos_per_seq_cpu", None),
         }
+    # PR4 Phase 2 (real refactor): expose seq_idx_per_token for batched
+    # update_compressor_states. Stored on cpu_meta only if CPU mirrors are
+    # already present (i.e. V4 builder is in use). When CPU mirrors are
+    # absent (warmup / non-V4 dispatch), cpu_meta stays None and the
+    # batched path falls back to single-seq.
+    if cpu_meta is not None:
+        cpu_meta["seq_idx_per_token"] = getattr(md, "seq_idx_per_token", None)
     return (
         md.block_tables,
         state_slot_mapping,
@@ -919,18 +926,61 @@ class Compressor(nn.Module):
             "Compressor.forward: context_lens kwarg is required (caller must "
             "pass per-seq slice from attn_metadata.context_lens)"
         )
-        update_compressor_states(
-            kv.squeeze(0),
-            score.squeeze(0),
-            self.ape,
-            self.kv_state,
-            self.score_state,
-            positions=positions,
-            context_lens=context_lens,
-            ratio=ratio,
-            overlap=overlap,
-            slot=slot,
-        )
+        # PR4 Phase 2 (real refactor): when slot_tensor is provided (per-seq
+        # dispatch from V4Attention), route through the kernel's batched
+        # mode using per-instance pre-allocated cu_seqlens_q + seq_idx_per_token
+        # tensors. This is capture-friendly because (a) state_slot_mapping is
+        # a view of forward_vars (pinned address, fresh values at replay) and
+        # (b) cu_seqlens_q / seq_idx_per_token are CONSTANT tensors (n is the
+        # per-seq token count; for decode n=1 always, for prefill n is fixed
+        # before capture even starts). The legacy `slot=` fallback bakes slot
+        # into the captured graph via the (device, n, slot) cache key.
+        kv_2d = kv.squeeze(0)
+        score_2d = score.squeeze(0)
+        n_local = kv_2d.shape[0]
+        if slot_tensor is not None:
+            cache = getattr(self, "_v4_batched_scratch", None)
+            if cache is None:
+                cache = {}
+                self._v4_batched_scratch = cache
+            scratch_key = (str(kv.device), n_local)
+            scratch = cache.get(scratch_key)
+            if scratch is None:
+                cu = torch.tensor([0, n_local], device=kv.device, dtype=torch.int32)
+                seq_idx = torch.zeros(n_local, device=kv.device, dtype=torch.int32)
+                scratch = (cu, seq_idx)
+                cache[scratch_key] = scratch
+            cu_local, seq_idx_local = scratch
+            update_compressor_states(
+                kv_2d,
+                score_2d,
+                self.ape,
+                self.kv_state,
+                self.score_state,
+                positions=positions,
+                context_lens=context_lens,
+                ratio=ratio,
+                overlap=overlap,
+                cu_seqlens_q=cu_local,
+                # Pass slot_tensor as-is (Triton infers dtype from the tensor;
+                # the kernel's slot * stride arithmetic works for int32 or int64).
+                # Avoiding .to() prevents a hot-path alloc inside captured graph.
+                state_slot_mapping=slot_tensor,
+                seq_idx_per_token=seq_idx_local,
+            )
+        else:
+            update_compressor_states(
+                kv_2d,
+                score_2d,
+                self.ape,
+                self.kv_state,
+                self.score_state,
+                positions=positions,
+                context_lens=context_lens,
+                ratio=ratio,
+                overlap=overlap,
+                slot=slot,
+            )
 
         if start_pos == 0:
             # ===== Prefill softmax-pool path =====

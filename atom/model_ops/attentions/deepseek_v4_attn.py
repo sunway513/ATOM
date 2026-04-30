@@ -122,9 +122,20 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         from atom.utils import CpuGpuBuffer
 
         max_bs = model_runner.config.max_num_seqs
+        max_num_batched_tokens = model_runner.config.max_num_batched_tokens
         if "state_slot_mapping" not in model_runner.forward_vars:
             model_runner.forward_vars["state_slot_mapping"] = CpuGpuBuffer(
                 max_bs, dtype=torch.int32, device=model_runner.device
+            )
+        # PR4 Phase 2 (real refactor): per-token seq index for batched
+        # update_compressor_states. One int32 per token mapping
+        # token -> seq_idx within the batch. Pinned in forward_vars so
+        # the GPU pointer is stable across capture and replay.
+        if "v4_seq_idx_per_token" not in model_runner.forward_vars:
+            model_runner.forward_vars["v4_seq_idx_per_token"] = CpuGpuBuffer(
+                max_num_batched_tokens,
+                dtype=torch.int32,
+                device=model_runner.device,
             )
 
     # ------------------------------------------------------------------ #
@@ -369,6 +380,18 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         var["context_lens"].np[:scheduled_bs] = context_lens
         context_lens_gpu = var["context_lens"].copy_to_gpu(scheduled_bs)
 
+        # PR4 Phase 2 (real refactor): populate seq_idx_per_token. Token t
+        # belongs to seq i s.t. cu_seqlens_q[i] <= t < cu_seqlens_q[i+1].
+        # Decode: every seq has max_seqlen_q tokens, so seq_idx is just
+        # arange(scheduled_bs) repeated max_seqlen_q times.
+        seq_idx_np = np.repeat(
+            np.arange(scheduled_bs, dtype=np.int32), max_seqlen_q
+        )
+        var["v4_seq_idx_per_token"].np[:sum_scheduled_tokens] = seq_idx_np
+        seq_idx_gpu = var["v4_seq_idx_per_token"].copy_to_gpu(
+            sum_scheduled_tokens
+        )
+
         block_tables_gpu = self._populate_block_tables(batch, scheduled_bs)
         state_slot_gpu, state_slot_np = self._populate_state_slot_mapping(
             batch, scheduled_bs, return_cpu=True
@@ -390,6 +413,7 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         # AttentionMetaData is a regular class (not slotted), so this works
         # without modifying its schema.
         attn_metadata.state_slot_mapping = state_slot_gpu
+        attn_metadata.seq_idx_per_token = seq_idx_gpu
         # PR-A Phase 2: CPU mirrors so the V4 forward path can read per-seq
         # metadata without `.tolist()` / `.item()` GPU→CPU syncs. Generic
         # naming (no `v4_` prefix) — these are not V4-specific concepts and
@@ -430,6 +454,18 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         sum_scheduled_tokens = batch.total_tokens_num_prefill
         positions_np = np.asarray(var["positions"].np[:sum_scheduled_tokens])
         cu_seqlens_q_np = np.asarray(var["cu_seqlens_q"].np[: scheduled_bs + 1])
+
+        # PR4 Phase 2 (real refactor): build seq_idx_per_token from
+        # cu_seqlens_q deltas. Prefill seqs have variable length so this
+        # is np.repeat over per-seq token counts.
+        seq_lens_np = np.diff(cu_seqlens_q_np)
+        seq_idx_np = np.repeat(
+            np.arange(scheduled_bs, dtype=np.int32), seq_lens_np
+        )
+        var["v4_seq_idx_per_token"].np[:sum_scheduled_tokens] = seq_idx_np
+        attn_metadata.seq_idx_per_token = var[
+            "v4_seq_idx_per_token"
+        ].copy_to_gpu(sum_scheduled_tokens)
         attn_metadata.cu_seqlens_q_cpu = cu_seqlens_q_np
         attn_metadata.state_slot_mapping_cpu = state_slot_np
         attn_metadata.start_pos_per_seq_cpu = positions_np[
@@ -523,7 +559,22 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         cu_seqlens_q_np = np.arange(
             0, (bs + 1) * max_q_len, max_q_len, dtype=np.int32
         )
-        cu_seqlens_q_gpu = var["cu_seqlens_q"].gpu[: bs + 1]
+        # PR4 Phase 2 (real refactor): write into pinned cu_seqlens_q np
+        # buffer so the GPU view holds the actual sentinel values. Previous
+        # code only sliced .gpu[:bs+1] which retained the
+        # CommonAttentionBuilder __init__'s arange(max_bs+1) fill — wrong
+        # whenever max_q_len > 1, and stale across consecutive captures.
+        var["cu_seqlens_q"].np[: bs + 1] = cu_seqlens_q_np
+        cu_seqlens_q_gpu = var["cu_seqlens_q"].copy_to_gpu(bs + 1)
+
+        # PR4 Phase 2 (real refactor): seq_idx_per_token sentinel for capture.
+        # Each seq has max_q_len tokens; token t -> seq t // max_q_len.
+        num_tokens = bs * max_q_len
+        seq_idx_np = np.repeat(
+            np.arange(bs, dtype=np.int32), max_q_len
+        )
+        var["v4_seq_idx_per_token"].np[:num_tokens] = seq_idx_np
+        seq_idx_gpu = var["v4_seq_idx_per_token"].copy_to_gpu(num_tokens)
 
         # OVERRIDE positions to force decode branch in V4 attention.
         # ModelRunner pre-fills positions = arange(num_tokens) % max_q_len
@@ -546,6 +597,7 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             context_lens=context_lens_gpu,
         )
         metadata.state_slot_mapping = state_slot_gpu
+        metadata.seq_idx_per_token = seq_idx_gpu
         # CPU mirrors for Phase 1 .item()-skip. start_pos=1 forces decode.
         metadata.cu_seqlens_q_cpu = cu_seqlens_q_np
         metadata.state_slot_mapping_cpu = state_slot_np
