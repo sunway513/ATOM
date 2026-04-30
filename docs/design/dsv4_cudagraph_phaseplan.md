@@ -118,9 +118,56 @@ Both reverted because shipping them without Phases 0–3 produces no test value 
 - **Phase 4**: capture wall-clock should be < 60s for bs ∈ {1, 2, 4}.
 - **Phase 5**: smoke 4/4 stays correct under capture (proves no aliasing corruption).
 
+## 2026-04-30 Empirical Findings (Phase 0/1 + Walls landed in dev branch)
+
+Following the design above, landed Phase 0 + Wall #1 + Wall #2 + Phase 1
+partial in `dev/dsv4-on-top-of-pr650` (commit `799e90e`) atop Lingpeng's
+PR #650 stack. Companion fix in `aiter-lingpeng/aiter/utility/fp4_utils.py`.
+
+### Walls confirmed by silicon (v19a/v19b iterations)
+
+| # | Original prediction | Empirical result | Resolution |
+|---|---|---|---|
+| 1 | Stub returns dummy `AttentionMetaData` | ✅ Confirmed `TypeError: cannot unpack non-iterable AttentionMetaData object` at `model_runner.py:1895` | Stub now returns `(metadata, context)` matching `aiter_mla.py:910` contract |
+| 2 | `KeyError: 'kv_indptr'` | ✅ Confirmed at `model_runner.py:1863` | 1-line gate `if "kv_indptr" in self.forward_vars` |
+| 3 | Outputs dim mismatch 7168/129280 | ✅ Confirmed | Phase 0: `allocate_forward_vars` detects DSV4 arch, sizes outputs to vocab_size |
+| 4 | Per-seq `.item()` syncs | ✅ Phase 1 partial: 3 sites gated via `start_pos: Optional[int]` plumbed from per-seq dispatcher's CPU mirror | Phase 1 complete in landed commit |
+| 5 (NEW) | (not predicted) HIP boolean-mask in-place write `exponent[round_case] += 1` in `aiter/utility/fp4_utils.py:56` triggers `hipErrorStreamCaptureUnsupported` | ✅ Confirmed during v19b run3 | `torch.where` rewrite in aiter |
+| 6 (NEW) | (not predicted) `torch.tensor()` allocation at `deepseek_v4.py:1460` (warmup `context_lens` dummy) triggers `hipErrorStreamCaptureUnsupported` during capture | ✅ Confirmed during v19b run4 | Pre-allocate `_dummy_context_lens` lazily, `fill_()` on subsequent calls |
+| 7 (NEW, OPEN) | 10+ dynamic alloc sites scattered across V4 hot path: `_v4_gather_compressed` (L152, 173, 174), `_get_window_topk_idxs` (L640+), `_get_compress_topk_idxs` (L676+), `Compressor.forward` (L940-942), `Indexer.forward` (L1148, 1157-1165), per-seq loop `slot_per_token` (L1547) | Each is `torch.tensor/zeros/full/arange` inside hot path | **Genuine Phase 2-4 systematic refactor** — not patchable site-by-site without losing correctness; per-seq Python loop kill (Phase 2) eliminates most call sites; remainder need state-cache pinning (Phase 3) + real metadata builder (Phase 4) |
+
+### Eager regression evidence (Phase 0 + landed patches)
+
+`v19a` (script: `v19a_phase0_eager_regression.sh`):
+- smoke 4/4 (4 prompts: arithmetic + word problems) at conc=4
+- gsm8k 18/20 = **0.9000**, matches v16 baseline (`gsm8k 0.90/0.90`)
+- Verifies Phase 0 + Wall #2 gate + Phase 1 plumbing don't regress eager mode
+
+### What this confirms about Lingpeng's "PR4 scope" sizing
+
+Lingpeng's [`deepseek_v4_attn.py:467`](https://github.com/ROCm/ATOM/pull/650/files) tagged capture as "PR4 scope" with a stub. Empirical Walls #5/#6/#7 above
+**confirm the scope is real and larger than the predicted Walls #1-#5 alone**:
+
+- Walls #1, #2: defensive 1-line gates (this commit) ✅
+- Walls #3, #4 partial: Phase 0/1 (this commit) ✅
+- Wall #5 (HIP mask write): mechanical torch.where (this commit, in aiter) ✅
+- Wall #6 (one alloc site): pre-alloc + fill_ (this commit) ✅ as pattern
+- **Wall #7 (10+ alloc sites): genuine Phase 2 batched dispatch refactor**
+  + Phase 3 state cache pinning + Phase 4 real metadata builder. Each
+  alloc site individually is fixable via the Wall #6 pattern, but doing
+  10+ piecewise patches loses architectural coherence — better as one
+  Phase 2 commit that kills the per-seq Python loop and exposes batched
+  `block_table + cu_seqlens_q + slot_mapping`-driven kernels.
+
+The 6-phase estimate (~6 working days serial) is **validated as conservative**
+— the discovered Walls #5/#6/#7 don't expand the phase count; they're
+absorbed by Phase 5 (#5), and Phases 2-4 (#7). Wall #6 was already
+implicit in Phase 3 (state cache pinning ~ pre-allocation).
+
 ## References
 
 - Sprint 7i one-shot attempt + walls: [`docs/evidence/dsv4_w45/EVIDENCE_M.md`](../evidence/dsv4_w45/EVIDENCE_M.md) Sprint 7i section
+- Empirical walls landed in dev branch commit `799e90e` (`dev/dsv4-on-top-of-pr650`): Phase 0 + Walls 1/2 + Phase 1 partial + Wall #6 pattern
 - Hand-off issue: [sunway513/ATOM#60](https://github.com/sunway513/ATOM/issues/60)
 - Tracking issue: [sunway513/ATOM#37](https://github.com/sunway513/ATOM/issues/37)
 - Methodology skills: [`.claude/skills/ramp-inference-feature.md`](../../.claude/skills/ramp-inference-feature.md), [`.claude/skills/redo-after-peer-success.md`](../../.claude/skills/redo-after-peer-success.md)
