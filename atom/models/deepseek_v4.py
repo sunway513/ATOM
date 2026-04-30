@@ -849,6 +849,7 @@ class Compressor(nn.Module):
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
         start_pos: Optional[int] = None,
+        slot_tensor: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         """Compress KV for the input tokens. Writes into self.kv_cache when a
         compression block boundary is hit; otherwise just buffers state and returns None.
@@ -866,6 +867,14 @@ class Compressor(nn.Module):
             block_table: `[max_blocks]` int — physical block IDs for this seq's
                 classical KV cache. If None (warmup or pre-PR3-main caller),
                 scatter writes are skipped.
+            slot_tensor: PR4 Phase 2 — optional 1-element tensor [1] long that
+                overrides `slot` for capture-friendly tensor-indexed
+                scatter/gather on `self.kv_state` / `self.score_state` /
+                `self.kv_cache`. When provided, Python-int `slot` is ignored
+                for tensor indexing; the legacy `slot` is still used for the
+                update_compressor_states single-seq fallback (cache key).
+                Required for cudagraph capture: Python-int slot bakes the
+                index into the captured graph, breaking replay correctness.
         Returns:
             Compressed KV slice that was just written ([1, S/ratio, head_dim] in
             prefill, or [1, 1, head_dim] in decode), or None if no compression
@@ -963,29 +972,46 @@ class Compressor(nn.Module):
                     else:
                         b_lo, b_hi = 0, ratio
                         a_lo, a_hi = ratio, 2 * ratio
-                    kv_state = torch.cat(
-                        [
-                            self.kv_state[slot : slot + 1, b_lo:b_hi, :d],
-                            self.kv_state[slot : slot + 1, a_lo:a_hi, d:],
-                        ],
-                        dim=1,
-                    )
-                    score_state = torch.cat(
-                        [
-                            self.score_state[slot : slot + 1, b_lo:b_hi, :d],
-                            self.score_state[slot : slot + 1, a_lo:a_hi, d:],
-                        ],
-                        dim=1,
-                    )
+                    # PR4 Phase 2: tensor-indexed gather when slot_tensor is
+                    # supplied (captures as dynamic gather; Python-int slice
+                    # would bake the row into the graph).
+                    if slot_tensor is not None:
+                        ks = self.kv_state.index_select(0, slot_tensor)
+                        ss = self.score_state.index_select(0, slot_tensor)
+                        kv_state = torch.cat(
+                            [ks[:, b_lo:b_hi, :d], ks[:, a_lo:a_hi, d:]], dim=1
+                        )
+                        score_state = torch.cat(
+                            [ss[:, b_lo:b_hi, :d], ss[:, a_lo:a_hi, d:]], dim=1
+                        )
+                    else:
+                        kv_state = torch.cat(
+                            [
+                                self.kv_state[slot : slot + 1, b_lo:b_hi, :d],
+                                self.kv_state[slot : slot + 1, a_lo:a_hi, d:],
+                            ],
+                            dim=1,
+                        )
+                        score_state = torch.cat(
+                            [
+                                self.score_state[slot : slot + 1, b_lo:b_hi, :d],
+                                self.score_state[slot : slot + 1, a_lo:a_hi, d:],
+                            ],
+                            dim=1,
+                        )
                     kv = (kv_state * score_state.softmax(dim=1)).sum(
                         dim=1, keepdim=True
                     )
             else:
                 if should_compress:
-                    kv = (
-                        self.kv_state[slot : slot + 1]
-                        * self.score_state[slot : slot + 1].softmax(dim=1)
-                    ).sum(dim=1, keepdim=True)
+                    # PR4 Phase 2: tensor-indexed gather (see comment above).
+                    if slot_tensor is not None:
+                        ks = self.kv_state.index_select(0, slot_tensor)
+                        ss = self.score_state.index_select(0, slot_tensor)
+                    else:
+                        ks = self.kv_state[slot : slot + 1]
+                        ss = self.score_state[slot : slot + 1]
+                    kv = (ks * ss.softmax(dim=1)).sum(dim=1, keepdim=True)
 
         if not should_compress:
             return None
@@ -1131,6 +1157,7 @@ class Indexer(nn.Module):
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
         start_pos: Optional[int] = None,
+        slot_tensor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute sparse top-k indices over the indexer's compressed KV cache.
 
@@ -1182,6 +1209,7 @@ class Indexer(nn.Module):
             block_table=block_table,
             context_lens=context_lens,
             start_pos=start_pos,
+            slot_tensor=slot_tensor,
         )
         # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
@@ -1533,6 +1561,16 @@ class DeepseekV4Attention(nn.Module):
             slots = state_slot_mapping[:num_seqs].tolist()
             per_seq_bts = [block_tables[i] for i in range(num_seqs)]
 
+        # PR4 Phase 2: build per-seq tensor scalar slot indices once. The
+        # captured graph reads state_slot_mapping at the SAME pinned address
+        # at replay (Phase 3), so per-seq slot_tensor below resolves to the
+        # correct slot for each request even though the Python int `slot`
+        # baked into the trace would be wrong.
+        if state_slot_mapping is not None:
+            state_slot_mapping_long = state_slot_mapping.long()
+        else:
+            state_slot_mapping_long = None
+
         output_chunks = []
         for seq_idx in range(num_seqs):
             seq_start = seq_offsets[seq_idx]
@@ -1541,6 +1579,14 @@ class DeepseekV4Attention(nn.Module):
             if seqlen == 0:
                 continue
             slot = slots[seq_idx]
+            # PR4 Phase 2: 1-element tensor slot for capture-friendly tensor
+            # indexing (passed to Compressor/Indexer slot_tensor= kwarg and
+            # used for swa_kv index_select). Reads from the pinned forward_var
+            # so replay sees fresh per-request slot values.
+            if state_slot_mapping_long is not None:
+                slot_tensor = state_slot_mapping_long[seq_idx : seq_idx + 1]
+            else:
+                slot_tensor = None
             block_table = per_seq_bts[seq_idx]
             seq_positions = positions[seq_start:seq_end]
             seq_x = x[seq_start:seq_end]
@@ -1583,6 +1629,7 @@ class DeepseekV4Attention(nn.Module):
                         block_table=block_table,
                         context_lens=seq_context_lens,
                         start_pos=start_pos,
+                        slot_tensor=slot_tensor,
                     )
                 else:
                     compress_topk_idxs = _get_compress_topk_idxs(
@@ -1618,7 +1665,16 @@ class DeepseekV4Attention(nn.Module):
                         self.swa_kv[slot : slot + 1, :cutoff],
                     ) = seq_kv[:, -win:].split([win - cutoff, cutoff], dim=1)
             else:
-                self.swa_kv[slot : slot + 1, start_pos % win] = seq_kv.squeeze(1)
+                # PR4 Phase 2: tensor-indexed scatter for capture
+                # compatibility. swa_kv[slot, pos % win] = seq_kv (advanced
+                # index assignment) records as a scatter op with tensor
+                # inputs; Python-int indexing would bake slot+pos as
+                # constants in the captured graph.
+                if slot_tensor is not None:
+                    pos_mod_t = (seq_positions[:1] % win).long()
+                    self.swa_kv[slot_tensor, pos_mod_t] = seq_kv.squeeze(1)
+                else:
+                    self.swa_kv[slot : slot + 1, start_pos % win] = seq_kv.squeeze(1)
 
             # Compressor + kv_sa construction. Branches on prefill
             # (start_pos == 0) vs decode. Compressor extracts its own start_pos
@@ -1633,6 +1689,7 @@ class DeepseekV4Attention(nn.Module):
                         block_table=block_table,
                         context_lens=seq_context_lens,
                         start_pos=start_pos,
+                        slot_tensor=slot_tensor,
                     )
                     if kv_compress is not None:
                         kv_sa = torch.cat([kv_sa, kv_compress], dim=1)
@@ -1645,6 +1702,7 @@ class DeepseekV4Attention(nn.Module):
                         block_table=block_table,
                         context_lens=seq_context_lens,
                         start_pos=start_pos,
+                        slot_tensor=slot_tensor,
                     )
                     # sparse_attn input layout: [SWA window || compressed
                     # entries gathered from block-table]. n_committed accounts
@@ -1662,13 +1720,22 @@ class DeepseekV4Attention(nn.Module):
                             n_committed,
                             k_per_block,
                         ).unsqueeze(0)
-                        kv_sa = torch.cat(
-                            [self.swa_kv[slot : slot + 1], gathered], dim=1
-                        )
+                        # PR4 Phase 2: tensor-indexed gather for swa_kv read.
+                        if slot_tensor is not None:
+                            swa_view = self.swa_kv.index_select(0, slot_tensor)
+                        else:
+                            swa_view = self.swa_kv[slot : slot + 1]
+                        kv_sa = torch.cat([swa_view, gathered], dim=1)
+                    else:
+                        if slot_tensor is not None:
+                            kv_sa = self.swa_kv.index_select(0, slot_tensor)
+                        else:
+                            kv_sa = self.swa_kv[slot : slot + 1]
+                else:
+                    if slot_tensor is not None:
+                        kv_sa = self.swa_kv.index_select(0, slot_tensor)
                     else:
                         kv_sa = self.swa_kv[slot : slot + 1]
-                else:
-                    kv_sa = self.swa_kv[slot : slot + 1]
 
             o_seq = sparse_attn(
                 seq_q, kv_sa, self.attn_sink, topk_idxs, self.softmax_scale

@@ -1,0 +1,16 @@
+{
+  "conc": 4,
+  "isl_target": 1024,
+  "osl_target": 1024,
+  "actual_in_tokens": [
+    1028,
+    1028,
+    1028,
+    1028
+  ],
+  "total_in_tokens": 4112,
+  "total_out_tokens_approx": 4094,
+  "wall_time_s": 219.86046195030212,
+  "throughput_decode_tok_per_s_aggregate": 18.629998152764145,
+  "throughput_decode_tok_per_s_per_seq": 4.657499538191036
+}

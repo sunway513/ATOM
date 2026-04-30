@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: MIT
+# Layer 1 unit tests for atom/models/deepseek_v4.py get_kv_cache_spec methods.
+# Per RFC §9.5.2 — CPU only, mocked, ≤ 30s.
+
+import pytest
+import torch
+
+from conftest import MockConfig  # noqa: F401  (forces conftest stubs)
+
+from atom.v1.kv_cache_interface import (
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    physical_pool_key,
+)
+
+
+# ── Compressor.get_kv_cache_spec ───────────────────────────────────────────
+
+
+class TestCompressorSpec:
+    def _make_compressor(self, compress_ratio: int):
+        # Build a minimal Compressor without going through the heavy
+        # DeepseekV4Args path. We need only `head_dim`, `compress_ratio`,
+        # and `overlap` for the spec method.
+        from atom.models.deepseek_v4 import Compressor
+
+        comp = Compressor.__new__(Compressor)
+        comp.head_dim = 512
+        comp.compress_ratio = compress_ratio
+        comp.overlap = compress_ratio == 4
+        return comp
+
+    def test_c4_returns_sliding_window_spec(self):
+        comp = self._make_compressor(compress_ratio=4)
+        spec = comp.get_kv_cache_spec()
+        assert isinstance(spec, SlidingWindowMLASpec)
+        assert spec.compress_ratio == 4
+        # coff = 1 + overlap = 2 for C4 → sliding_window = 8
+        assert spec.sliding_window == 8
+
+    def test_c128_returns_sliding_window_spec(self):
+        comp = self._make_compressor(compress_ratio=128)
+        spec = comp.get_kv_cache_spec()
+        assert isinstance(spec, SlidingWindowMLASpec)
+        assert spec.compress_ratio == 128
+        # overlap=False → coff=1 → sliding_window = 128
+        assert spec.sliding_window == 128
+
+    def test_block_size_default_256(self):
+        comp = self._make_compressor(compress_ratio=4)
+        spec = comp.get_kv_cache_spec()
+        assert spec.block_size == 256
+        assert spec.storage_block_size == 64  # 256 // 4
+
+    def test_dtype_default_bfloat16(self):
+        comp = self._make_compressor(compress_ratio=4)
+        spec = comp.get_kv_cache_spec()
+        assert spec.dtype == torch.bfloat16
+
+    def test_two_compressors_same_ratio_share_pool_key(self):
+        # Two C4 compressors should map to the SAME physical pool.
+        a = self._make_compressor(compress_ratio=4).get_kv_cache_spec()
+        b = self._make_compressor(compress_ratio=4).get_kv_cache_spec()
+        assert physical_pool_key(a) == physical_pool_key(b)
+
+    def test_c4_vs_c128_distinct_pool_keys(self):
+        c4 = self._make_compressor(compress_ratio=4).get_kv_cache_spec()
+        c128 = self._make_compressor(compress_ratio=128).get_kv_cache_spec()
+        assert physical_pool_key(c4) != physical_pool_key(c128)
+
+
+# ── Indexer.get_kv_cache_spec ──────────────────────────────────────────────
+
+
+class TestIndexerSpec:
+    def _make_indexer(self, compress_ratio: int = 4):
+        from atom.models.deepseek_v4 import Indexer
+
+        idx = Indexer.__new__(Indexer)
+        idx.head_dim = 128
+        idx.compress_ratio = compress_ratio
+        return idx
+
+    def test_returns_mla_spec(self):
+        spec = self._make_indexer().get_kv_cache_spec()
+        assert isinstance(spec, MLAAttentionSpec)
+        assert not isinstance(spec, SlidingWindowMLASpec)
+
+    def test_compress_ratio_4_storage_block_64(self):
+        spec = self._make_indexer(compress_ratio=4).get_kv_cache_spec()
+        assert spec.compress_ratio == 4
+        assert spec.storage_block_size == 64  # 256 // 4
+
+    def test_head_size_from_indexer(self):
+        spec = self._make_indexer().get_kv_cache_spec()
+        assert spec.head_size == 128
+        assert spec.num_kv_heads == 1
+
+
+# ── DeepseekV4Attention.get_kv_cache_spec ──────────────────────────────────
+
+
+class TestAttentionSpec:
+    def _make_attn(self, compress_ratio: int):
+        from atom.models.deepseek_v4 import DeepseekV4Attention
+
+        attn = DeepseekV4Attention.__new__(DeepseekV4Attention)
+        attn.head_dim = 512
+        attn.compress_ratio = compress_ratio
+        return attn
+
+    def test_dense_layer_compress_ratio_zero_maps_to_one(self):
+        # Dense layers in DSV4 use compress_ratio=0; the spec MUST map
+        # this to compress_ratio=1 (no compression) so storage_block_size
+        # stays at full block_size.
+        spec = self._make_attn(compress_ratio=0).get_kv_cache_spec()
+        assert isinstance(spec, MLAAttentionSpec)
+        assert spec.compress_ratio == 1
+        assert spec.storage_block_size == 256
+
+    def test_c4_layer(self):
+        spec = self._make_attn(compress_ratio=4).get_kv_cache_spec()
+        assert spec.compress_ratio == 4
+        assert spec.storage_block_size == 64
+
+    def test_c128_layer(self):
+        spec = self._make_attn(compress_ratio=128).get_kv_cache_spec()
+        assert spec.compress_ratio == 128
+        assert spec.storage_block_size == 2  # 256 // 128
+
+
+# ── Cross-layer: distinct subclasses don't accidentally share pool keys ────
+
+
+class TestCrossLayerPoolKeys:
+    def test_compressor_swa_distinct_from_attention_mla(self):
+        # Compressor (SlidingWindowMLASpec, sliding_window=8) and an MLA
+        # attention layer with compress_ratio=4 SHOULD NOT share physical
+        # pool keys — distinct subclasses.
+        from atom.models.deepseek_v4 import Compressor, DeepseekV4Attention
+
+        comp = Compressor.__new__(Compressor)
+        comp.head_dim = 512
+        comp.compress_ratio = 4
+        comp.overlap = True
+        comp_spec = comp.get_kv_cache_spec()
+
+        attn = DeepseekV4Attention.__new__(DeepseekV4Attention)
+        attn.head_dim = 512
+        attn.compress_ratio = 4
+        attn_spec = attn.get_kv_cache_spec()
+
+        assert physical_pool_key(comp_spec) != physical_pool_key(attn_spec)
