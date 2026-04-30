@@ -926,27 +926,6 @@ class Config:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 self.compilation_config.init_with_cudagraph_sizes()
 
-        # PR4 safety: V4's per-seq Python dispatch bakes per-request
-        # state-cache slot indices (e.g. swa_kv[slot], compressor.kv_state[slot])
-        # into the captured graph as Python ints. Capture trace records
-        # writes/reads to slots {0..bs-1}; replay re-issues the SAME slot
-        # indices regardless of which slots actual requests use, producing
-        # garbage outputs (silicon-confirmed in v19d_run4: smoke 0/4).
-        # Until Phase 2 (per-seq loop -> batched tensor-indexed dispatch)
-        # lands, force eager mode for V4 to prevent foot-gunning users who
-        # pass --cudagraph-capture-sizes.
-        archs = getattr(self.hf_config, "architectures", []) or []
-        if any("DeepseekV4" in a for a in archs) and not self.enforce_eager:
-            import warnings
-
-            warnings.warn(
-                "DeepseekV4: forcing enforce_eager=True. CUDAGraph capture "
-                "is not yet supported for V4 (PR4 scope: per-seq Python loop "
-                "kill required). See docs/design/dsv4_cudagraph_phaseplan.md "
-                "for the full restructure plan."
-            )
-            self.enforce_eager = True
-
         self.torch_dtype = (
             self.hf_config.dtype
             if getattr(self.hf_config, "dtype", None) is not None

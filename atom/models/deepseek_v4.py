@@ -178,6 +178,63 @@ def _v4_gather_compressed(
     return kv_cache[physical_blocks, slot_in_block]
 
 
+def _v4_gather_compressed_batched(
+    kv_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    n_committed_per_seq: torch.Tensor,
+    max_n_compressed: int,
+    k_per_block: int,
+    ci_template: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched version of _v4_gather_compressed with padding + valid-mask.
+
+    PR4 Phase 2: replaces per-seq Python loop calls with a single tensor-
+    indexed gather. Capture-friendly because all indexing is via tensors;
+    no `torch.arange` allocation in the hot path (caller passes a pre-
+    allocated `ci_template`).
+
+    Args:
+        kv_cache:            [num_blocks, k_per_block, head_dim]
+        block_tables:        [bs, max_blocks] int — per-seq block IDs
+        n_committed_per_seq: [bs] int — actual entries to gather per seq
+        max_n_compressed:    int — capture-time constant upper bound
+        k_per_block:         int — entries per V4 block (32 for CSA, 1 for HCA)
+        ci_template:         [max_n_compressed] long — pre-allocated arange
+
+    Returns:
+        entries: [bs, max_n_compressed, head_dim] gathered, padded with 0 for
+                 invalid entries.
+        valid:   [bs, max_n_compressed] bool — True for entries that should
+                 contribute (ci < n_committed_per_seq[seq]).
+    """
+    bs = block_tables.size(0)
+    head_dim = kv_cache.size(-1)
+    k_pb = kv_cache.size(1)
+
+    # ci: [bs, max_n] = ci_template broadcast across batch
+    ci = ci_template[:max_n_compressed].unsqueeze(0).expand(bs, max_n_compressed)
+
+    # Validity mask: ci < n_committed_per_seq[seq]
+    valid = ci < n_committed_per_seq.unsqueeze(1).long()
+
+    # block_in_seq, slot_in_block
+    block_in_seq = ci // k_per_block
+    slot_in_block = ci % k_per_block
+
+    # Gather block IDs from per-seq block_tables: [bs, max_n]
+    physical_blocks = torch.gather(block_tables.long(), 1, block_in_seq)
+
+    # Flat gather from kv_cache.view(-1, head_dim)
+    flat_idx = (physical_blocks * k_pb + slot_in_block).view(-1)
+    flat_kv = kv_cache.view(-1, head_dim)
+    entries = flat_kv[flat_idx].view(bs, max_n_compressed, head_dim)
+
+    # Mask invalid entries to zero (they'd be garbage from stale block 0).
+    entries = entries * valid.unsqueeze(-1).to(entries.dtype)
+
+    return entries, valid
+
+
 # ---------------------------------------------------------------------------
 # Config wrapper
 # ---------------------------------------------------------------------------
