@@ -2241,7 +2241,14 @@ class DeepseekV4Attention(nn.Module):
                         # Tensor-scalar n_committed: shape [1] long. Reads from
                         # `seq_positions` which during capture is a sentinel
                         # but at replay is the real per-seq position.
-                        n_committed_t = (seq_positions[:1] + 1) // ratio
+                        # P7-r9 ROOT CAUSE FIX (mirrors F4 in Indexer at line 1510): use n_committed_t WITHOUT
+                        # the "+1" so the gather range [0, start_pos // ratio) is DISJOINT
+                        # from the main Compressor's just-written entry at index start_pos //
+                        # ratio (when boundary). Eliminates same-call write-then-read aliasing
+                        # on V4Attention's main compressor.kv_cache that corrupts conc=4 bs=4-
+                        # captured replay. The just-compressed block is also in swa_kv via the
+                        # window topk_idxs branch below, so information isn't lost.
+                        n_committed_t = seq_positions[:1] // ratio
                         if block_table is not None and not _v4_is_dummy_run():
                             gathered, _gather_valid = (
                                 _v4_gather_compressed_batched_single(
@@ -2314,7 +2321,12 @@ class DeepseekV4Attention(nn.Module):
                     seq_q, kv_sa, self.attn_sink, topk_idxs, self.softmax_scale
                 )
             _v4_attn_dump(10, o_seq)  # sparse_attn output
-            output_chunks.append(o_seq)
+            # P7-r9: defensive .clone() to ensure each per-seq o_seq is its
+            # own buffer in output_chunks (sparse_attn returns a fresh tensor
+            # but cudagraph may alias allocator slabs across iterations of the
+            # same captured per-seq loop, which would let the next iter
+            # overwrite previous iter's o_seq before torch.cat reads it).
+            output_chunks.append(o_seq.clone())
 
         o = (
             torch.cat(output_chunks, dim=1)
