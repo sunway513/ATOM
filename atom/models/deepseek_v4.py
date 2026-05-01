@@ -1559,6 +1559,23 @@ class DeepseekV4Attention(nn.Module):
             )
         self.register_buffer("_v4_topk_short", topk_short, persistent=False)
         self.register_buffer("_v4_topk_ring", topk_ring, persistent=False)
+        # PR4 Phase 2 Round 2: capture-friendly compressed-KV gather inputs.
+        # `_v4_ci_template_main` is a pre-allocated arange buffer used by
+        # `_v4_gather_compressed_batched_single` to index per-seq committed
+        # compressed entries during decode replay. Without this, the gather's
+        # source-shape would be Python-int-driven (n_committed) and bake
+        # `n_committed=0` into the captured graph (ratio*1+1=2; 2//4=0),
+        # making `kv_sa` permanently miss the prefill-accumulated compressed
+        # KV. See `_v4_gather_compressed_batched` for index math.
+        if self.compress_ratio:
+            self._v4_max_n_main = args.max_seq_len // self.compress_ratio
+            self.register_buffer(
+                "_v4_ci_template_main",
+                torch.arange(self._v4_max_n_main, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self._v4_max_n_main = 0
         # Classical KV cache (paper §3.6.1) lives entirely in the global
         # `csa_main_kv` / `hca_main_kv` pool (allocated by the V4 attention
         # builder as `[num_blocks, n_layers, k_per_block, head_dim]`).
@@ -1912,28 +1929,63 @@ class DeepseekV4Attention(nn.Module):
                     # sparse_attn input layout: [SWA window || compressed
                     # entries gathered from block-table]. n_committed accounts
                     # for the entry just written this step (if any).
-                    n_committed = (start_pos + 1) // ratio
-                    if (
-                        block_table is not None
-                        and not _v4_is_dummy_run()
-                        and n_committed > 0
-                    ):
+                    #
+                    # PR4 Phase 2 Round 2: when slot_tensor is provided
+                    # (capture path), ALWAYS gather a constant-shaped
+                    # `[1, max_n_main, head_dim]` slab via the batched helper
+                    # and ALWAYS concat with swa_view. Invalid columns past
+                    # `n_committed_t` are zeroed but never read by sparse_attn
+                    # because `topk_idxs` past the per-seq valid count are
+                    # already -1 sentinels (see Indexer / HCA decode paths).
+                    #
+                    # Eager path (`slot_tensor is None`) keeps the original
+                    # Python-int gate so warmup / non-V4 paths see no change.
+                    if slot_tensor is not None:
                         k_per_block = _V4_BLOCK_SIZE // ratio
-                        gathered = _v4_gather_compressed(
-                            self.compressor.kv_cache,
-                            block_table,
-                            n_committed,
-                            k_per_block,
-                        ).unsqueeze(0)
-                        # PR4 Phase 2: tensor-indexed gather for swa_kv read.
-                        if slot_tensor is not None:
-                            swa_view = self.swa_kv.index_select(0, slot_tensor)
+                        # Tensor-scalar n_committed: shape [1] long. Reads from
+                        # `seq_positions` which during capture is a sentinel
+                        # but at replay is the real per-seq position.
+                        n_committed_t = (seq_positions[:1] + 1) // ratio
+                        if block_table is not None and not _v4_is_dummy_run():
+                            gathered, _gather_valid = (
+                                _v4_gather_compressed_batched_single(
+                                    self.compressor.kv_cache,
+                                    block_table,
+                                    n_committed_t,
+                                    self._v4_max_n_main,
+                                    k_per_block,
+                                    self._v4_ci_template_main,
+                                )
+                            )
+                            # gathered: [1, max_n_main, head_dim]
                         else:
-                            swa_view = self.swa_kv[slot : slot + 1]
-                        kv_sa = torch.cat([swa_view, gathered], dim=1)
+                            gathered = torch.zeros(
+                                1,
+                                self._v4_max_n_main,
+                                self.head_dim,
+                                dtype=seq_kv.dtype,
+                                device=seq_kv.device,
+                            )
+                        swa_view = self.swa_kv.index_select(0, slot_tensor)
+                        kv_sa = torch.cat([swa_view, gathered.to(swa_view.dtype)], dim=1)
                     else:
-                        if slot_tensor is not None:
-                            kv_sa = self.swa_kv.index_select(0, slot_tensor)
+                        # Eager / legacy single-seq path: keep Python-int branch.
+                        n_committed = (start_pos + 1) // ratio
+                        if (
+                            block_table is not None
+                            and not _v4_is_dummy_run()
+                            and n_committed > 0
+                        ):
+                            k_per_block = _V4_BLOCK_SIZE // ratio
+                            gathered = _v4_gather_compressed(
+                                self.compressor.kv_cache,
+                                block_table,
+                                n_committed,
+                                k_per_block,
+                            ).unsqueeze(0)
+                            kv_sa = torch.cat(
+                                [self.swa_kv[slot : slot + 1], gathered], dim=1
+                            )
                         else:
                             kv_sa = self.swa_kv[slot : slot + 1]
                 else:
