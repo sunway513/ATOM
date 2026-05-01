@@ -1290,6 +1290,18 @@ class Indexer(nn.Module):
             ),
             persistent=False,
         )
+        # PR4 Phase 2 Round 2: capture-friendly compressed-KV gather inputs.
+        # See V4Attention __init__ for the same pattern; `_v4_max_n_idx` ==
+        # max_seq_len // compress_ratio == max #compressed positions for the
+        # Indexer's own KV cache. With max_seq_len=4096 ratio=4 this is 1024,
+        # which equals `args.index_topk` — so the post-mask topk picks all
+        # valid slots without dropping any candidate.
+        self._v4_max_n_idx = args.max_seq_len // compress_ratio
+        self.register_buffer(
+            "_v4_ci_template_idx",
+            torch.arange(self._v4_max_n_idx, dtype=torch.long),
+            persistent=False,
+        )
         self.rotary_emb: Optional[_V4RoPE] = None
 
     def forward(
@@ -1364,16 +1376,68 @@ class Indexer(nn.Module):
         # ----- Index score -----
         # PR3-main: gather committed compressed Indexer entries from the
         # per-seq block_table (passed in by the caller). During warmup
-        # block_table is None, so we return a zeros placeholder — the
+        # block_table is None, so we return a zeros placeholder - the
         # resulting topk_idxs are discarded by the warmup forward path anyway.
+        #
+        # PR4 Phase 2 Round 2 (capture path): when slot_tensor is provided,
+        # gather a CONSTANT-SHAPE [1, max_n_idx, head_dim] slab via the
+        # batched helper. Invalid columns are zeroed by the helper, AND we
+        # also mask the score to -inf at those columns so topk never picks
+        # them. After topk, columns whose index >= n_committed_t are remapped
+        # to -1 sentinels (sparse_attn skips them), making the kv_sa
+        # always-concat path in V4Attention safe.
+        if slot_tensor is not None and start_pos > 0:
+            # Decode capture-friendly path: constant-shape gather + masked
+            # topk so capture+replay produces correct per-replay values.
+            k_per_block = _V4_BLOCK_SIZE // ratio
+            n_committed_t = (positions[seqlen - 1 : seqlen] + 1) // ratio
+            if block_table is not None and not _v4_is_dummy_run():
+                gathered, valid = _v4_gather_compressed_batched_single(
+                    self.kv_cache,
+                    block_table,
+                    n_committed_t,
+                    self._v4_max_n_idx,
+                    k_per_block,
+                    self._v4_ci_template_idx,
+                )
+            else:
+                gathered = torch.zeros(
+                    1,
+                    self._v4_max_n_idx,
+                    self.head_dim,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
+                valid = torch.zeros(
+                    1, self._v4_max_n_idx, dtype=torch.bool, device=q.device
+                )
+            gathered = gathered.to(q.dtype)
+            index_score = torch.einsum("bshd,btd->bsht", q, gathered)
+            index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
+            # [1, S=1, max_n_idx]
+            invalid_mask = ~valid.unsqueeze(1)
+            index_score = index_score.masked_fill(invalid_mask, float("-inf"))
+
+            # Capture-const topk size; downstream sparse_attn already handles
+            # -1 sentinels in topk_idxs.
+            topk_size = min(self.index_topk, self._v4_max_n_idx)
+            topk_idxs = index_score.topk(topk_size, dim=-1)[1]
+            # Invalid winners (n_committed < topk_size): map to -1.
+            invalid_pick = topk_idxs >= n_committed_t.view(1, 1, 1).int()
+            topk_idxs = torch.where(
+                invalid_pick,
+                torch.full_like(topk_idxs, -1),
+                topk_idxs + offset,
+            )
+            return topk_idxs
+
+        # Eager / legacy single-seq path: original Python-int driven branch.
         n_committed = end_pos // ratio
         if block_table is not None and not _v4_is_dummy_run() and n_committed > 0:
             k_per_block = _V4_BLOCK_SIZE // ratio
             gathered = _v4_gather_compressed(
                 self.kv_cache, block_table, n_committed, k_per_block
-            ).unsqueeze(
-                0
-            )  # [1, n_committed, head_dim]
+            ).unsqueeze(0)
         else:
             gathered = torch.zeros(
                 1, n_committed, self.head_dim, dtype=q.dtype, device=q.device
@@ -1381,7 +1445,6 @@ class Indexer(nn.Module):
         index_score = torch.einsum("bshd,btd->bsht", q, gathered)
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
 
-        # ----- Top-k selection over compressed positions -----
         if start_pos == 0:
             mask = (
                 torch.arange(seqlen // ratio, device=x.device).repeat(seqlen, 1)
