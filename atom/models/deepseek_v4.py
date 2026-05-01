@@ -2069,12 +2069,25 @@ class DeepseekV4Attention(nn.Module):
                 else:
                     seq_kv_flat = seq_kv.squeeze(0)[-win:].contiguous()
                     seq_pos_flat = seq_positions[-win:]
-                slot_per_token = torch.full(
-                    (seq_kv_flat.size(0),),
-                    slot,
-                    device=seq_kv_flat.device,
-                    dtype=torch.int32,
-                )
+                # P7-r6 (#37 issue #60) ROOT CAUSE FIX: build slot_per_token
+                # via tensor BROADCAST from `slot_tensor` (live forward_var
+                # view) instead of `torch.full(..., slot, ...)` which bakes
+                # the capture-time Python-int slot into aten::full and yields
+                # WRONG slot writes at replay (writes always go to capture
+                # slots [0..bs-1] regardless of real per-request slot). When
+                # slot_tensor is unavailable (warmup / non-capture), fall back
+                # to torch.full — those paths run eagerly so baking is fine.
+                if slot_tensor is not None:
+                    slot_per_token = (
+                        slot_tensor.to(torch.int32).expand(seq_kv_flat.size(0))
+                    )
+                else:
+                    slot_per_token = torch.full(
+                        (seq_kv_flat.size(0),),
+                        slot,
+                        device=seq_kv_flat.device,
+                        dtype=torch.int32,
+                    )
                 _swa_write_dispatch(seq_kv_flat, seq_pos_flat, slot_per_token, self.swa_kv, win)
             elif start_pos == 0:
                 if seqlen <= win:
