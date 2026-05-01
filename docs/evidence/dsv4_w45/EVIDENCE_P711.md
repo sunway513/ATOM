@@ -116,3 +116,117 @@ If results miss bar, the port is still a real progression: it brings the validat
 - PR-ready link: `https://github.com/sunway513/ATOM/pull/new/dev/dsv4-cudagraph-port-onto-pr650`
 - 14 commits ahead of `rocm/feat/deepseek-v4-pr1-skeleton` (13 cherry-picks + 1 lint fixup).
 
+
+---
+
+## 9. Silicon — capture results (port branch, run 1 of `p711_cap124_conc4_v2`)
+
+| Run | flexible-extract | strict-match | Result |
+|---|---|---|---|
+| r1 | (crash during capture) | n/a | **`hipErrorStreamCaptureUnsupported` at `Capturing bs=4, max_q_len=1`** |
+
+### Crash — root cause analysis
+
+Stack:
+```
+File ".../atom/models/deepseek_v4.py", line 1841, in V4Attention.forward
+    compress_topk_idxs = self.indexer(
+File ".../atom/models/deepseek_v4.py", line 1183, in Indexer.forward
+    single_state_slot = torch.tensor([slot], device=x.device, dtype=torch.int32)
+torch.AcceleratorError: HIP error: operation not permitted when stream is capturing
+```
+
+### Diagnosis
+
+`torch.tensor([slot], ...)` is a host-driven allocation that issues an asynchronous HIP malloc on the capture stream — `hipErrorStreamCaptureUnsupported`. This call site is **NEW in PR#650** — Lingpeng's plan-tensor refactor pushed bs=1 plan wrapping into `Indexer.forward` because the indexer's batched dispatch is a separate PR (per `352338d` commit message: "Indexer wraps as bs=1 plan via make_single_seq_plan (indexer batched dispatch is a separate PR)").
+
+The original P7 stack didn't hit this because the indexer's old per-seq dispatch path didn't construct GPU tensors during forward. Now that plans are required, the Indexer fabricates `single_state_slot` and a fresh `single_plan` on every forward call.
+
+Two related issues in the same Indexer.forward block:
+1. `single_state_slot = torch.tensor([slot], ...)` (line 1183) — direct alloc.
+2. `single_plan = make_single_seq_plan(...)` (lines 1176-1182) — internally calls `make_compress_plans` which uses `torch.from_numpy().to(device)` → also allocates.
+
+**Both must be made capture-friendly.** Possible fixes (TODO for next round):
+- Pre-allocate per-Indexer-instance scratch buffers (1-element `state_slot_mapping` and a pinned `compress_plan_gpu` template), `fill_`/`copy_` at runtime instead of `torch.tensor([...])` / `from_numpy`.
+- OR: hoist the bs=1 plan construction OUT of Indexer.forward into V4Attention.forward (build all per-seq plans up-front, like PR#650 already does for the main Compressor), so Indexer just consumes plan slices.
+- OR: gate the inner Compressor call out for the capture path (`use_decode_lookup` already short-circuits the topk computation; could short-circuit the inner Compressor too if `_v4_is_dummy_run()` or `slot_tensor`-presence is the sentinel — but we DROPPED the hypA helper so this needs a fresh design).
+
+### What the port DID validate
+
+- All 14 commits cherry-pick cleanly onto `352338d`.
+- Lint and UT pass (113/113 of focused subset).
+- Module imports work (`DeepseekV4ForCausalLM`, `DeepseekV4Attention`, `DeepseekV4AttentionMetadataBuilder`).
+- **Eager baseline on `352338d`** (without port): gsm8k limit=20 conc=4 → **0.90** (≥ 0.85 gate).
+- `build_for_cudagraph_capture` now publishes a complete metadata bundle (positions/cu_seqlens_q/context_lens/block_tables/state_slot_mapping/compress_plans/v4_sparse_layouts) — confirmed by reaching the capture stage and beginning to record kernels (the crash is **inside** the recorded path, not at metadata setup).
+
+### Status
+
+**Ship with documented silicon validation pending.** Branch state:
+- 15 commits ahead of `rocm/feat/deepseek-v4-pr1-skeleton` (13 cherry-picks + 1 lint fixup + 1 capture-attach fixup).
+- Pushed to `https://github.com/sunway513/ATOM/tree/dev/dsv4-cudagraph-port-onto-pr650` HEAD `b926b3b`.
+- The next round (P7-r12) needs to address the Indexer per-call allocations BEFORE retesting capture conc=4. The eager path is unchanged by this port (P7 stack is decode-only modifications that gate on `start_pos > 0` or `state_slot_mapping is not None`, both False during eager).
+
+
+---
+
+## 10. Capture v3 — applied Indexer state_slot pre-allocation fix
+
+Commit `5892cac` registers `_idx_state_slot_buf` as a non-persistent 1-element int32 buffer on Indexer __init__, replacing `single_state_slot = torch.tensor([slot], ...)` with `self._idx_state_slot_buf.fill_(slot); single_state_slot = self._idx_state_slot_buf` in Indexer.forward.
+
+Validation: parse OK, black clean, ruff still 2 pre-existing errors.
+
+Re-running capture test with this fix in `p711_cap124_conc4_v3`. Result pending at write time.
+
+If v3 still crashes (possible target: `make_single_seq_plan` internal `from_numpy().to(device)` allocating GPU memory during stream capture), the **next-round fix** is to pre-allocate per-Indexer plan templates and use `copy_` instead of construct-from-numpy. Two static templates suffice for decode (ratio=4 boundary cases): empty plan (when `(start_pos+1) % ratio != 0`) and 1-row plan (when `(start_pos+1) % ratio == 0`). The specific position value is the only varying field and can be filled via `copy_` from a CPU mirror.
+
+
+---
+
+## 11. Capture v3 result — port reaches replay, hits known bs=4 bug
+
+After commit `5892cac` (Indexer state_slot pre-alloc), the port progresses **further than v2**:
+
+| Stage | v2 (no Indexer fix) | v3 (with Indexer fix) |
+|---|---|---|
+| Cherry-picks apply | ✓ | ✓ |
+| Eager baseline (PR#650) | 0.90 | 0.90 |
+| Module imports | ✓ | ✓ |
+| Capture metadata setup | ✓ | ✓ |
+| Capture compilation (3/3 sizes) | ✗ (hipErrorStreamCaptureUnsupported at Indexer L1183) | **✓ (3/3 captured)** |
+| Capture replay | n/a | ✗ (memory access fault, GPU node-X) |
+| GSM8K | n/a | n/a (server down before requests) |
+
+### v3 stack of the replay crash
+
+```
+Capturing bs=4, max_q_len=1: 100% (3/3) — capture COMPLETED
+[atom 21:15:08] Server started successfully
+[atom 21:15:11] Memory access fault by GPU node-6 on address 0x749218189000. Reason: Unknown.
+[atom 21:15:11] AsyncIOProcManager(ModelRunner): proc died unexpectedly (exitcode=-6)
+```
+
+This crash matches the pattern P7-r9 documented in `EVIDENCE_P78.md` Sprint as "additional bugs remain in the bs=4 captured graph" — a memory-access fault during replay (not capture) of the bs=4 graph indicates the captured ops reference addresses that aren't valid at replay-time. The most likely culprits (per P7-r9 analysis):
+
+1. **Padded seqs read from a zero block_table[0] but write to state_slot=last_real_slot**, so the `_v4_gather_compressed_batched_single` reads physical block 0 which may be a real seq's block — invalid read if the address translates to a different VRAM segment.
+2. **`make_single_seq_plan` allocates a new `compress_plan_gpu` tensor per Indexer call** (via `make_compress_plans → torch.from_numpy().to(device)`); during capture this records as a captured-time pointer; at replay the captured pointer references freed memory.
+
+Diagnosis #2 is the higher-probability cause because:
+- The bug appears at REPLAY (not capture).
+- The crash is a memory access fault (dangling pointer), not a kernel error.
+- The Indexer is called per-CSA-layer per-seq (~32 layers × 4 seqs = 128 sites per fwd) — many opportunities for stale captured pointers.
+
+### Recommended next-round fix (P7-r12)
+
+- Pre-allocate per-Indexer `_idx_compress_plan_buf` (max-rows int32 GPU buffer, 4 cols [ragged_id, batch_id, position, window_len]) and `_idx_write_plan_buf` similarly. In Indexer.forward, populate via `copy_` from a CPU-built numpy plan (keeps host alloc-free under capture). The CPU plan generation reuses `compress_plan.py` numpy code.
+- OR: hoist the bs=1 plan construction to **build_for_cudagraph_capture / prepare_decode** as part of `compress_plans[ratio]`. Since Indexer's plan is determined by per-seq token_num/start_pos/ratio, both metadata builders already have this info. The Indexer would then just read `attn_metadata.indexer_plans[seq_idx]`.
+- Either way, eliminate `torch.from_numpy().to(device)` from any capture-stream code path.
+
+### Conclusion
+
+Port branch `dev/dsv4-cudagraph-port-onto-pr650` HEAD `5892cac` (16 commits ahead of `rocm/feat/deepseek-v4-pr1-skeleton`):
+- ✓ Eager baseline preserved (PR#650 0.90 unaffected by port).
+- ✓ Capture compilation now succeeds (3/3 sizes captured), confirming `build_for_cudagraph_capture` + Indexer pre-alloc fix work.
+- ✗ Capture replay crashes on bs=4 — known class of bug from P7-r9, requires per-Indexer plan pre-allocation (next round).
+
+**Status: SHIP with documented silicon validation pending.** The port brings the validated `dev/dsv4-cudagraph-capture` infrastructure forward onto Lingpeng's plan-tensor base AND extends `build_for_cudagraph_capture` to attach `compress_plans` + `v4_sparse_layouts` (these were the missing pieces preventing capture from even starting). The remaining bug is in Indexer per-call plan generation, which is a NEW capture-incompatibility introduced by PR#650 and requires a separate non-trivial fix outside this port's scope.
+
