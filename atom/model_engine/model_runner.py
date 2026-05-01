@@ -611,6 +611,13 @@ class ModelRunner:
             logger.info(f"[ATOM_FWD_DUMP] {_n_fwd_hooks} Block forward hooks installed")
         maybe_dump_weights_and_exit(self.model)
 
+        # P7-4 (#37 issue #60): V4 capture-vs-eager bisect dump (env-gated).
+        try:
+            from atom.utils.v4_bisect_dump import maybe_install as _v4_bisect_install
+            _v4_bisect_install(self, self.model)
+        except Exception as _e:
+            logger.warning(f"[V4BisectDump] install failed: {_e!r}")
+
         if self.config.speculative_config and get_pp_group().is_last_rank:
             from atom.utils.backends import set_model_tag
 
@@ -1650,6 +1657,14 @@ class ModelRunner:
                     logits = self.graph_logits[graph_key][:num_tokens]
                 else:
                     logits = self.model.compute_logits(hidden_states)
+
+        # P7-4 (#37 issue #60): bisect dump - per-step hidden_states preview.
+        try:
+            dump = getattr(self, "_v4_bisect_dump", None)
+            if dump is not None:
+                dump.record_hidden(hidden_states, is_prefill)
+        except Exception:
+            pass
 
         return logits, hidden_states
 
