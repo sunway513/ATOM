@@ -1440,6 +1440,35 @@ class DeepseekV4Attention(nn.Module):
             torch.zeros(1, args.window_size, self.head_dim),
             persistent=False,
         )
+        # PR4 Phase 2 (real refactor): pre-computed sliding-window topk_idxs
+        # lookup tables for capture-friendly decode. _get_window_topk_idxs is
+        # Python-int driven and lru_cached; the captured graph would bake in
+        # the topk for capture-time start_pos=1 and re-use it for every
+        # replay (=> wrong attention reads, garbage output). Build two
+        # tables once at __init__ and at runtime gather by start_pos GPU
+        # tensor:
+        #   - "_v4_topk_short[p]" for p in [0, win-1]: padded arange (used
+        #     when start_pos < win-1)
+        #   - "_v4_topk_ring[p]"  for p in [0, win):  rotated indices used
+        #     when start_pos >= win-1, with start_pos % win = p
+        # Both shape [win, win] int32, registered as non-persistent buffers
+        # so they move with .to(device) but do not get checkpointed.
+        win = args.window_size
+        topk_short = torch.full((win, win), -1, dtype=torch.int32)
+        for sp in range(win):  # sp == start_pos for the start_pos < win-1 branch
+            # F.pad(arange(sp+1), (0, win-sp-1), value=-1) — copy in place
+            topk_short[sp, : sp + 1] = torch.arange(sp + 1, dtype=torch.int32)
+        topk_ring = torch.zeros((win, win), dtype=torch.int32)
+        for sp_mod in range(win):
+            # cat([arange(sp_mod+1, win), arange(0, sp_mod+1)]) — ring rotation
+            topk_ring[sp_mod, : win - sp_mod - 1] = torch.arange(
+                sp_mod + 1, win, dtype=torch.int32
+            )
+            topk_ring[sp_mod, win - sp_mod - 1 :] = torch.arange(
+                0, sp_mod + 1, dtype=torch.int32
+            )
+        self.register_buffer("_v4_topk_short", topk_short, persistent=False)
+        self.register_buffer("_v4_topk_ring", topk_ring, persistent=False)
         # Classical KV cache (paper §3.6.1) lives entirely in the global
         # `csa_main_kv` / `hca_main_kv` pool (allocated by the V4 attention
         # builder as `[num_blocks, n_layers, k_per_block, head_dim]`).
@@ -1667,9 +1696,40 @@ class DeepseekV4Attention(nn.Module):
                         self.indexer.compressor.score_state[slot].fill_(float("-inf"))
 
             # topk_idxs (per-seq, since seqlen + start_pos differ).
-            topk_idxs = _get_window_topk_idxs(
-                win, 1, seqlen, start_pos, device=x.device
+            # PR4 Phase 2 (real refactor): for decode (seqlen=1, start_pos>0)
+            # build topk_idxs via tensor gather from the precomputed lookup
+            # tables so that capture+replay produces correct per-replay
+            # values. The original _get_window_topk_idxs is Python-int driven
+            # and lru_cached — capture-time start_pos=1 would bake into the
+            # graph and replay would always see 2 valid slots.
+            # Prefill uses the original path because (a) capture is decode-
+            # only and (b) prefill seqlen is variable so a [win, win] table
+            # doesn't suffice.
+            use_decode_lookup = (
+                slot_tensor is not None
+                and slot_tensor.numel() > 0
+                and seqlen == 1
+                and start_pos > 0
             )
+            if use_decode_lookup:
+                # seq_positions: [1] long. start_pos here equals seq_positions[0].
+                start_pos_t = seq_positions[:1].long()
+                p_mod = start_pos_t % win
+                # branch: start_pos < win-1 → short table (use start_pos
+                # directly, capped at win-1 for safety); else ring table
+                # (indexed by p_mod).
+                short_idx = start_pos_t.clamp(max=win - 1)
+                topk_short_row = self._v4_topk_short.index_select(0, short_idx)
+                topk_ring_row = self._v4_topk_ring.index_select(0, p_mod)
+                is_short = (start_pos_t < (win - 1)).unsqueeze(-1)
+                # [1, win] — pick row per start_pos branch
+                topk_row = torch.where(is_short, topk_short_row, topk_ring_row)
+                # Bring to [bsz=1, seqlen=1, win] expected by sparse_attn.
+                topk_idxs = topk_row.unsqueeze(0)
+            else:
+                topk_idxs = _get_window_topk_idxs(
+                    win, 1, seqlen, start_pos, device=x.device
+                )
             seq_context_lens = context_lens[seq_idx : seq_idx + 1]
             if self.compress_ratio:
                 offset = seq_kv.size(1) if start_pos == 0 else win
