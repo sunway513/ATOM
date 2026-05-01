@@ -938,7 +938,12 @@ class Compressor(nn.Module):
         kv_2d = kv.squeeze(0)
         score_2d = score.squeeze(0)
         n_local = kv_2d.shape[0]
-        if slot_tensor is not None:
+        # PR4 Phase 2 (real refactor): require non-empty slot_tensor to take
+        # the batched path. The warmup dummy batch has no per_req_cache
+        # assignment, so state_slot_mapping (and thus slot_tensor) is a
+        # 0-element tensor — passing it to the kernel as state_slot_mapping
+        # causes an out-of-bounds load (HIP MAF on (nil)).
+        if slot_tensor is not None and slot_tensor.numel() > 0:
             cache = getattr(self, "_v4_batched_scratch", None)
             if cache is None:
                 cache = {}
