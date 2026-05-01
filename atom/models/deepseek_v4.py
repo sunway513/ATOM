@@ -231,10 +231,16 @@ def _v4_gather_compressed_batched(
     # Gather block IDs from per-seq block_tables: [bs, max_n]
     physical_blocks = torch.gather(block_tables.long(), 1, block_in_seq)
 
-    # Flat gather from kv_cache.view(-1, head_dim)
-    flat_idx = (physical_blocks * k_pb + slot_in_block).view(-1)
-    flat_kv = kv_cache.view(-1, head_dim)
-    entries = flat_kv[flat_idx].view(bs, max_n_compressed, head_dim)
+    # Advanced indexing on kv_cache directly. Works on non-contiguous
+    # per-layer pool slices: kv_cache from `pool[:, layer_pos]` has a stride
+    # gap between dims 0 and 1, so `kv_cache.view(-1, head_dim)` raises
+    # "view size is not compatible with input tensor's size and stride".
+    # `.reshape` would force a copy (~67MB per CSA layer × 30 layers per
+    # decode step); advanced indexing produces the [bs * max_n, head_dim]
+    # output via gather without copying the source pool.
+    pb_flat = physical_blocks.reshape(-1)  # [bs * max_n] long
+    sib_flat = slot_in_block.reshape(-1)
+    entries = kv_cache[pb_flat, sib_flat].view(bs, max_n_compressed, head_dim)
 
     # Mask invalid entries to zero (they'd be garbage from stale block 0).
     entries = entries * valid.unsqueeze(-1).to(entries.dtype)
@@ -3057,6 +3063,21 @@ class DeepseekV4ForCausalLM(nn.Module):
         self.atom_config = config
         self.hf_config = config.hf_config
         self.args = DeepseekV4Args.from_hf_config(self.hf_config)
+        # PR4 Phase 2 Round 2 (fix): clamp max_seq_len to runtime max_model_len.
+        # Model architectural max_position_embeddings (V4-Pro = 1M) is the upper
+        # bound for RoPE caches, but runtime per-request capacity is bounded by
+        # config.max_model_len. The new compressed-KV gather buffers
+        # (`_v4_ci_template_main` / `_v4_ci_template_idx` / HCA decode topk
+        # table) and the helper's `block_in_seq = ci // k_per_block` arithmetic
+        # MUST size on max_model_len: max_blocks_per_seq = max_model_len /
+        # V4_block_size; ci must stay within max_blocks_per_seq * k_per_block
+        # = max_model_len / ratio. Without this clamp, ci ranges to
+        # max_seq_len/ratio = 262144 (CSA) for V4-Pro and the gather indexes
+        # block_table (size 32) with positions up to 8191 - HIP MAF on first
+        # decode in eager mode (and silent corruption in capture mode).
+        self.args.max_seq_len = min(
+            self.args.max_seq_len, int(config.max_model_len)
+        )
         # Build the V4-specific QuantizationConfig (FP8 default + FP4 experts +
         # BF16 wo_a/Compressor) so child Linear layers auto-build the right
         # weight + scale params for real-checkpoint loading. When the HF
