@@ -227,6 +227,96 @@ def _v4_gather_compressed_batched(
     return entries, valid
 
 
+def _v4_gather_compressed_batched_single(
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    n_committed_t: torch.Tensor,
+    max_n_compressed: int,
+    k_per_block: int,
+    ci_template: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single-seq convenience wrapper around `_v4_gather_compressed_batched`.
+
+    PR4 Phase 2 Round 2: most V4 callsites (V4Attention.forward, Indexer.forward,
+    Compressor decode boundary scatter) operate per-seq inside the per-seq
+    dispatch loop. This wrapper takes 1D `block_table [max_blocks]` and 0-D-or-
+    [1] `n_committed_t`, returns
+        entries: [1, max_n_compressed, head_dim]
+        valid:   [1, max_n_compressed] bool
+    so the caller can `entries.squeeze(0)` for cat or einsum without re-shape
+    boilerplate.
+
+    Capture-friendly: no Python-int dependence, no allocation in hot path
+    (caller pre-allocates `ci_template` once at __init__).
+    """
+    bt = block_table.unsqueeze(0)  # [1, max_blocks]
+    if n_committed_t.dim() == 0:
+        n_committed_t = n_committed_t.unsqueeze(0)
+    return _v4_gather_compressed_batched(
+        kv_cache, bt, n_committed_t.long(), max_n_compressed, k_per_block, ci_template
+    )
+
+
+def _v4_scatter_compressed_conditional(
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    kv: torch.Tensor,
+    ci_t: torch.Tensor,
+    write_mask: torch.Tensor,
+    k_per_block: int,
+) -> None:
+    """Capture-friendly conditional scatter of a single compressed entry.
+
+    PR4 Phase 2 Round 2: replaces Python-int `_v4_scatter_compressed` for the
+    decode boundary path in `Compressor.forward`. Always traces a tensor
+    gather + where + scatter, so capture+replay sees fresh `ci_t` /
+    `write_mask` values from forward_vars.
+
+    Args:
+        kv_cache:    [num_blocks, k_per_block, head_dim] per-layer pool view.
+        block_table: [max_blocks] physical block IDs for this seq.
+        kv:          [1, head_dim] entry candidate (only written if mask True).
+        ci_t:        [1] long - compressed index destination.
+        write_mask:  [1] bool - write iff True; else preserve existing value.
+        k_per_block: int - entries per V4 block.
+    """
+    block = (ci_t // k_per_block).long()
+    slot_in_block = (ci_t % k_per_block).long()
+    physical = block_table[block].long()
+    cur = kv_cache[physical, slot_in_block]
+    new = torch.where(write_mask.unsqueeze(-1), kv, cur)
+    kv_cache[physical, slot_in_block] = new
+
+
+def _v4_build_hca_decode_topk_table(
+    max_seq_len: int,
+    ratio: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Pre-build HCA decode-time compress topk lookup table (capture-friendly).
+
+    `_get_compress_topk_idxs(ratio, bsz=1, seqlen=1, start_pos>0, offset=0)`
+    legacy path returns `torch.arange(0, (start_pos + 1) // ratio)` whose SHAPE
+    is `(start_pos+1) // ratio`. Under cudagraph capture this baked the
+    capture-time start_pos value (=1) into the graph - every replay then
+    received an empty (or wrong-sized) tensor, starving HCA layers of compressed
+    KV positions.
+
+    Build a 2D table indexed by `n_committed = (start_pos+1) // ratio`:
+        table[n, :] = [0, 1, ..., n-1, -1, ..., -1]      (length max_n)
+    where `max_n = max_seq_len // ratio`. Caller adds the per-call `offset`
+    AFTER masking (offset must NOT be added to -1 sentinels).
+
+    Returned shape: `[max_n + 1, max_n]` int32 (one extra row for n=0 - all -1).
+    """
+    max_n = max_seq_len // ratio
+    table = torch.full((max_n + 1, max_n), -1, dtype=torch.int32, device=device)
+    arange = torch.arange(max_n, dtype=torch.int32, device=device)
+    for n in range(1, max_n + 1):
+        table[n, :n] = arange[:n]
+    return table
+
+
 # ---------------------------------------------------------------------------
 # Config wrapper
 # ---------------------------------------------------------------------------
