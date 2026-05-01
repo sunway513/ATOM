@@ -1808,6 +1808,22 @@ class DeepseekV4Attention(nn.Module):
         assert (
             x.dim() == 2
         ), f"DeepseekV4Attention expects 2D [num_tokens, dim], got {x.shape}"
+        # P7-r5 (#37 issue #60): capture-friendly per-stage dump helper.
+        # Sub-stages 6..11 inside V4Attention. NoOp when env not set.
+        _dump_buf = getattr(self, "_v4_dump_inline_buf", None)
+        _dump_norm = getattr(self, "_v4_dump_inline_norm", None) if _dump_buf is not None else None
+        _dump_hs = getattr(self, "_v4_dump_inline_head_size", 16) if _dump_buf is not None else 16
+        _dump_lid = getattr(self, "layer_id", 0)
+
+        def _v4_attn_dump(stage_id, t):
+            if _dump_buf is None:
+                return
+            with torch.no_grad():
+                flat = t.detach().reshape(-1)[:_dump_hs]
+                _dump_buf[_dump_lid, stage_id].copy_(flat.to(_dump_buf.dtype))
+                n = torch.linalg.vector_norm(t.detach()).to(torch.float32)
+                _dump_norm[_dump_lid, stage_id].copy_(n)
+
         seqlen_total = x.size(0)
         win = self.window_size
         ratio = self.compress_ratio
@@ -1835,11 +1851,14 @@ class DeepseekV4Attention(nn.Module):
             _v4_aqi(qr, 128, "ue8m0")
         q = self.wq_b(qr).view(seqlen_total, self.n_local_heads, self.head_dim)
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.eps)
+        _v4_attn_dump(6, q)  # after Q norm
         q = q.unsqueeze(0)  # [1, S_total, H, D]
 
         kv = self.wkv(x)  # [S_total, head_dim]
         kv = self.kv_norm(kv).unsqueeze(0)  # [1, S_total, head_dim]
+        _v4_attn_dump(7, kv)  # after kv_norm (pre-rope)
         self.rotary_emb(positions, q[..., -rd:], kv[..., -rd:])
+        _v4_attn_dump(8, q)  # after rotary on Q (kv rotated too in same call)
         act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
         # ----- Per-seq dispatch -----
         # PR-A Phase 2: prefer CPU-mirror metadata published by the V4
@@ -2074,6 +2093,25 @@ class DeepseekV4Attention(nn.Module):
                         start_pos=start_pos,
                         slot_tensor=slot_tensor,
                     )
+                    # P7-r5 (#37 issue #60): explicit data-dep barriers after
+                    # Triton-kernel state writes inside Compressor.forward.
+                    # The Compressor's update_compressor_states (Triton) writes to
+                    # self.compressor.kv_state / score_state, and
+                    # _v4_scatter_compressed_conditional (Triton) writes to
+                    # self.compressor.kv_cache. These tensors are read again
+                    # below by `_v4_gather_compressed_batched_single`. Without an
+                    # explicit dependency edge in the captured graph, the read
+                    # may execute concurrently with the write on a different
+                    # stream during replay, yielding stale data.
+                    # Gated by ATOM_V4_CAPTURE_FIX so we can A/B test.
+                    if os.environ.get("ATOM_V4_CAPTURE_FIX", "0") == "1":
+                        # FULL-TENSOR read that forces a strong dependency
+                        # edge. Empirically the dump ops (vector_norm over
+                        # whole tensor) help the most.
+                        if self.compressor.kv_cache is not None:
+                            _ = torch.linalg.vector_norm(self.compressor.kv_cache.flatten().float())
+                        _ = torch.linalg.vector_norm(self.compressor.kv_state.flatten().float())
+                        _ = torch.linalg.vector_norm(self.swa_kv.flatten().float())
                     # sparse_attn input layout: [SWA window || compressed
                     # entries gathered from block-table]. n_committed accounts
                     # for the entry just written this step (if any).
@@ -2142,9 +2180,30 @@ class DeepseekV4Attention(nn.Module):
                     else:
                         kv_sa = self.swa_kv[slot : slot + 1]
 
-            o_seq = sparse_attn(
-                seq_q, kv_sa, self.attn_sink, topk_idxs, self.softmax_scale
-            )
+            _v4_attn_dump(9, kv_sa)  # kv_sa input to sparse_attn
+            # P7-r5: dump topk_idxs preview (first TOPK_PREV ints)
+            _topk_buf = getattr(self, "_v4_dump_topk_buf", None)
+            if _topk_buf is not None:
+                _tpsz = self._v4_dump_topk_prev_size
+                with torch.no_grad():
+                    flat_idxs = topk_idxs.detach().reshape(-1)[:_tpsz].long()
+                    _n = flat_idxs.numel()
+                    _topk_buf[_dump_lid, :_n].copy_(flat_idxs)
+            # P7-r5 EXPERIMENT: optionally clone inputs/output to break any
+            # memory aliasing introduced by cudagraph capture re-use of pool
+            # memory. Env-gated by ATOM_V4_SPARSE_CLONE.
+            if os.environ.get("ATOM_V4_SPARSE_CLONE", "0") == "1":
+                _sq = seq_q.clone()
+                _ks = kv_sa.clone()
+                _tk = topk_idxs.clone()
+                o_seq = sparse_attn(
+                    _sq, _ks, self.attn_sink, _tk, self.softmax_scale
+                ).clone()
+            else:
+                o_seq = sparse_attn(
+                    seq_q, kv_sa, self.attn_sink, topk_idxs, self.softmax_scale
+                )
+            _v4_attn_dump(10, o_seq)  # sparse_attn output
             output_chunks.append(o_seq)
 
         o = (
@@ -2164,6 +2223,7 @@ class DeepseekV4Attention(nn.Module):
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
         o = torch.einsum("sgd,grd->sgr", o, wo_a)
         x = self.wo_b(o.flatten(1))
+        _v4_attn_dump(11, x)  # final attn output (= Block stage 2 input)
         return x
 
 
@@ -2730,6 +2790,26 @@ class Block(nn.Module):
         positions: torch.Tensor,
         input_ids: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        # P7-r5 (#37 issue #60): capture-friendly per-stage dump.
+        # 6 stages: 0=in, 1=after_attn_hc_pre, 2=after_attn,
+        # 3=after_attn_hc_post, 4=after_ffn, 5=after_ffn_hc_post (block out).
+        # Branch evaluated at TRACE time during capture warmup; in-place writes
+        # to baked-address scratch tensors are replayed on every cudagraph replay.
+        buf = getattr(self, "_v4_dump_inline_buf", None)
+        norm_buf = getattr(self, "_v4_dump_inline_norm", None) if buf is not None else None
+        hs = getattr(self, "_v4_dump_inline_head_size", 16) if buf is not None else 16
+        lid = self.layer_id
+
+        def _v4_dump_stage(stage_id, t):
+            if buf is None:
+                return
+            with torch.no_grad():
+                flat = t.detach().reshape(-1)[:hs]
+                buf[lid, stage_id].copy_(flat.to(buf.dtype))
+                n = torch.linalg.vector_norm(t.detach()).to(torch.float32)
+                norm_buf[lid, stage_id].copy_(n)
+
+        _v4_dump_stage(0, x)  # input
 
         # ----- Attention sub-layer with mHC mixing -----
         residual = x
@@ -2737,8 +2817,12 @@ class Block(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x = self.attn_norm(x)
+        _v4_dump_stage(1, x)  # after attn-side hc_pre + attn_norm
         x = self.attn(x, positions)
+        _v4_dump_stage(2, x)  # after attention
         x = self.hc_post(x, residual, post, comb)
+        _v4_dump_stage(3, x)  # after attn-side hc_post
+
         # ----- FFN sub-layer with mHC mixing -----
         residual = x
         x, post, comb = self.hc_pre(
@@ -2746,7 +2830,9 @@ class Block(nn.Module):
         )
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
+        _v4_dump_stage(4, x)  # after FFN
         x = self.hc_post(x, residual, post, comb)
+        _v4_dump_stage(5, x)  # block output
         return x
 
 
