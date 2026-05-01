@@ -42,7 +42,39 @@ from atom.model_ops.quant_v4 import (
 from atom.model_ops.sparse_attn_v4 import hc_split_sinkhorn, sparse_attn  # noqa: F401
 from atom.model_ops.utils import atom_parameter
 from atom.model_ops.v4_backend_gate import use_new_v4_backend  # noqa: F401
-from atom.model_ops.v4_kernels import update_compressor_states, swa_write  # noqa: F401
+from atom.model_ops.v4_kernels import (  # noqa: F401
+    swa_write,
+    swa_write_pytorch,
+    update_compressor_states,
+    update_compressor_states_pytorch,
+)
+
+
+def _v4_use_pytorch_state_writes() -> bool:
+    """P7-r6 (#37 issue #60): env-gated dispatcher for state-mutation kernels.
+
+    When ``ATOM_V4_PYTORCH_STATE_WRITE=1``, the Triton kernels
+    ``update_compressor_states`` / ``swa_write`` are replaced by their
+    pure-PyTorch advanced-indexing equivalents. Used to validate the
+    cudagraph capture variance hypothesis (Triton state-mutation kernels
+    racing with downstream PyTorch reads of the mutated buffers).
+    Default off until silicon validation lands.
+    """
+    return os.environ.get("ATOM_V4_PYTORCH_STATE_WRITE", "0") == "1"
+
+
+def _update_compressor_states_dispatch(*args, **kwargs):
+    """Triton vs PyTorch dispatcher (env-gated)."""
+    if _v4_use_pytorch_state_writes():
+        return update_compressor_states_pytorch(*args, **kwargs)
+    return update_compressor_states(*args, **kwargs)
+
+
+def _swa_write_dispatch(*args, **kwargs):
+    """Triton vs PyTorch dispatcher (env-gated)."""
+    if _v4_use_pytorch_state_writes():
+        return swa_write_pytorch(*args, **kwargs)
+    return swa_write(*args, **kwargs)
 from atom.utils.forward_context import get_forward_context
 
 # ---------------------------------------------------------------------------
@@ -1053,7 +1085,7 @@ class Compressor(nn.Module):
                 scratch = (cu, seq_idx)
                 cache[scratch_key] = scratch
             cu_local, seq_idx_local = scratch
-            update_compressor_states(
+            _update_compressor_states_dispatch(
                 kv_2d,
                 score_2d,
                 self.ape,
@@ -1071,7 +1103,7 @@ class Compressor(nn.Module):
                 seq_idx_per_token=seq_idx_local,
             )
         else:
-            update_compressor_states(
+            _update_compressor_states_dispatch(
                 kv_2d,
                 score_2d,
                 self.ape,
@@ -2043,7 +2075,7 @@ class DeepseekV4Attention(nn.Module):
                     device=seq_kv_flat.device,
                     dtype=torch.int32,
                 )
-                swa_write(seq_kv_flat, seq_pos_flat, slot_per_token, self.swa_kv, win)
+                _swa_write_dispatch(seq_kv_flat, seq_pos_flat, slot_per_token, self.swa_kv, win)
             elif start_pos == 0:
                 if seqlen <= win:
                     self.swa_kv[slot : slot + 1, :seqlen] = seq_kv

@@ -422,3 +422,146 @@ def update_compressor_states_reference(
             dst = p % state_size
             kv_state[slot, dst] = kv[i]
             score_state[slot, dst] = score[i] + ape[p % ratio]
+
+
+# === Pure-PyTorch capture-friendly variant ============================
+# P7-r6 (#37 issue #60): replaces the Triton `update_compressor_states`
+# kernel with a pure-PyTorch advanced-indexing equivalent. Used to validate
+# the hypothesis that Triton state-mutation kernels race with downstream
+# PyTorch reads under cudagraph capture. PyTorch advanced-index assignment
+# routes through aten::index_put_ which is part of the captured PyTorch
+# dataflow graph — no separate Triton stream, no async write hazard.
+#
+# Semantics MUST match the Triton kernel exactly:
+#   * dst = pos % STATE_SIZE                     (uniform across phases)
+#   * Fresh prefill: write iff pos >= max(0, cutoff - RATIO) (overlap)
+#                              or pos >= cutoff              (HCA)
+#     where cutoff = (seqlen_q // RATIO) * RATIO   (per-seq)
+#   * Decode / prefix-cache: write iff pos >= start_pos
+#     (always true — every token in this fwd writes)
+#
+# Per-token derivations are tensor-driven (no .item()), keyed off
+# cu_seqlens_q + context_lens + state_slot_mapping + seq_idx_per_token, so
+# the helper is safe inside cudagraph capture.
+
+
+def update_compressor_states_pytorch(
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
+    kv_state: torch.Tensor,
+    score_state: torch.Tensor,
+    *,
+    positions: torch.Tensor,
+    context_lens: torch.Tensor,
+    ratio: int,
+    overlap: bool,
+    cu_seqlens_q: torch.Tensor | None = None,
+    state_slot_mapping: torch.Tensor | None = None,
+    seq_idx_per_token: torch.Tensor | None = None,
+    slot: int | None = None,
+) -> None:
+    """Capture-friendly pure-PyTorch equivalent of ``update_compressor_states``.
+
+    Same call contract as the Triton wrapper. All per-token decisions
+    (write mask, dst index) are computed from tensors using
+    ``torch.where`` + advanced indexing — no ``.item()`` syncs, no Python-
+    int branches, no separate Triton stream.
+
+    See module-level header for semantic equivalence proof.
+    """
+    assert kv.dim() == 2 and score.dim() == 2
+    assert kv.shape == score.shape
+    assert ape.dim() == 2 and ape.shape[0] == ratio
+    assert context_lens is not None
+    state_size = (2 if overlap else 1) * ratio
+    assert kv_state.shape[1] == state_size
+    n = kv.shape[0]
+    if n == 0:
+        return
+    device = kv.device
+
+    # Single-seq fallback: build trivial 1-seq metadata. Mirror the Triton
+    # wrapper's _single_seq_cache pattern so capture-time calls hit cached
+    # constant tensors rather than allocating.
+    if cu_seqlens_q is None:
+        assert slot is not None, "single-seq mode requires slot="
+        cu_seqlens_q, _slot_buf, seq_idx_per_token = _single_seq_cache_get(
+            device, n, slot
+        )
+        # Build a 1-element state_slot_mapping (slot per seq). Cached here
+        # alongside the other single-seq scratches so we never allocate
+        # at replay time.
+        key = (str(device), n, slot, "ssm")
+        ssm = _single_seq_cache.get(key)
+        if ssm is None:
+            ssm = torch.tensor([slot], device=device, dtype=torch.int32)
+            _single_seq_cache[key] = ssm
+        state_slot_mapping = ssm
+    else:
+        assert state_slot_mapping is not None and seq_idx_per_token is not None
+
+    # ----- Per-token write-mask derivation (tensor-driven) -----
+    # seq_idx_per_token: [N] int. For each token, which seq it belongs to.
+    seq_idx_long = seq_idx_per_token.long()
+    cu_long = cu_seqlens_q.long()
+    seqlen_q_per_seq = cu_long[1:] - cu_long[:-1]            # [num_seqs]
+    seqlen_q_per_token = seqlen_q_per_seq[seq_idx_long]       # [N]
+    context_n_per_token = context_lens[seq_idx_long].long()   # [N]
+    start_pos_per_token = context_n_per_token - seqlen_q_per_token  # [N]
+    is_fresh_prefill = start_pos_per_token == 0                # [N] bool
+
+    pos_long = positions.long()
+    cutoff = (seqlen_q_per_token // ratio) * ratio            # [N]
+    if overlap:
+        prefill_write_start = torch.clamp(cutoff - ratio, min=0)
+    else:
+        prefill_write_start = cutoff
+    write_start = torch.where(
+        is_fresh_prefill, prefill_write_start, start_pos_per_token
+    )
+    do_write = pos_long >= write_start                         # [N] bool
+
+    # ----- Per-token destination + slot -----
+    dst = (pos_long % state_size).long()                       # [N]
+    slot_per_token = state_slot_mapping[seq_idx_long].long()   # [N]
+    ape_idx = (pos_long % ratio).long()                        # [N]
+
+    # ----- Build new values + masked write -----
+    # Cast to fp32 for the score+ape add (matches Triton kernel which
+    # accumulates in fp32 then casts on store).
+    new_kv = kv.to(kv_state.dtype)
+    new_score = (score.to(torch.float32) + ape[ape_idx].to(torch.float32)).to(
+        score_state.dtype
+    )
+
+    # Read current values at destinations, then where-mask the write.
+    # advanced indexing gather → torch.where → advanced index_put_.
+    cur_kv = kv_state[slot_per_token, dst]                     # [N, dim]
+    cur_score = score_state[slot_per_token, dst]
+    mask = do_write.unsqueeze(-1)
+    written_kv = torch.where(mask, new_kv, cur_kv)
+    written_score = torch.where(mask, new_score, cur_score)
+    kv_state[slot_per_token, dst] = written_kv
+    score_state[slot_per_token, dst] = written_score
+
+
+def swa_write_pytorch(
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    slot_per_token: torch.Tensor,
+    swa_kv: torch.Tensor,
+    win: int,
+) -> None:
+    """Capture-friendly pure-PyTorch equivalent of ``swa_write``.
+
+    Identical to ``swa_write_reference`` but kept as a separate symbol so
+    the dispatcher in deepseek_v4.py reads as parallel to
+    ``update_compressor_states_pytorch``. ``swa_kv[slot, pos%win] = kv``
+    in advanced-indexed assignment is recorded by aten::index_put_ which
+    is captured in PyTorch's dataflow — no Triton stream involved.
+    """
+    if kv.shape[0] == 0:
+        return
+    ring_idx = (positions.long() % win)
+    swa_kv[slot_per_token.long(), ring_idx] = kv
