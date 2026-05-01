@@ -1083,113 +1083,163 @@ class Compressor(nn.Module):
             remainder = seqlen % ratio
             cutoff = seqlen - remainder
 
-            # Truncate kv/score to the part the downstream softmax-pool
-            # consumes (the `[:cutoff]` rows). Legacy did this implicitly via
-            # `kv, kv_state[...] = kv.split(...)` tuple unpack at the same
-            # time as the partial-state save.
             if remainder > 0:
                 kv = kv[:, :cutoff]
                 score = score[:, :cutoff]
-            # Reshape to [B, num_blocks, ratio, coff*d] and softmax-pool.
             kv = kv.unflatten(1, (-1, ratio))
             score = score.unflatten(1, (-1, ratio)) + self.ape
             if overlap:
                 kv = self.overlap_transform(kv, 0.0)
                 score = self.overlap_transform(score, float("-inf"))
             kv = (kv * score.softmax(dim=2)).sum(dim=2)
-        else:
-            # ===== Decode boundary-compression path =====
-            # (state write itself is done by update_compressor_states above)
-            should_compress = (start_pos + 1) % self.compress_ratio == 0
-            if overlap:
-                if should_compress:
-                    # State cache is a pos-%-(2*ratio) ring buffer (no roll).
-                    # The just-completed block id `comp_id = start_pos //
-                    # ratio` determines which half is A-side (current) vs
-                    # B-side (previous):
-                    #   comp_id even: A at slot[0:ratio], B at slot[ratio:2*ratio]
-                    #   comp_id odd:  A at slot[ratio:2*ratio], B at slot[0:ratio]
-                    # Concat order matches old layout: [B-side; A-side].
-                    comp_id = start_pos // ratio
-                    if comp_id % 2 == 0:
-                        b_lo, b_hi = ratio, 2 * ratio
-                        a_lo, a_hi = 0, ratio
-                    else:
-                        b_lo, b_hi = 0, ratio
-                        a_lo, a_hi = ratio, 2 * ratio
-                    # PR4 Phase 2: tensor-indexed gather when slot_tensor is
-                    # supplied (captures as dynamic gather; Python-int slice
-                    # would bake the row into the graph).
-                    if slot_tensor is not None:
-                        ks = self.kv_state.index_select(0, slot_tensor)
-                        ss = self.score_state.index_select(0, slot_tensor)
-                        kv_state = torch.cat(
-                            [ks[:, b_lo:b_hi, :d], ks[:, a_lo:a_hi, d:]], dim=1
-                        )
-                        score_state = torch.cat(
-                            [ss[:, b_lo:b_hi, :d], ss[:, a_lo:a_hi, d:]], dim=1
-                        )
-                    else:
-                        kv_state = torch.cat(
-                            [
-                                self.kv_state[slot : slot + 1, b_lo:b_hi, :d],
-                                self.kv_state[slot : slot + 1, a_lo:a_hi, d:],
-                            ],
-                            dim=1,
-                        )
-                        score_state = torch.cat(
-                            [
-                                self.score_state[slot : slot + 1, b_lo:b_hi, :d],
-                                self.score_state[slot : slot + 1, a_lo:a_hi, d:],
-                            ],
-                            dim=1,
-                        )
-                    kv = (kv_state * score_state.softmax(dim=1)).sum(
-                        dim=1, keepdim=True
-                    )
+
+            if not should_compress:
+                return None
+
+            kv = self.norm(kv.to(dtype))
+            comp_pos = torch.arange(0, cutoff, ratio, device=x.device, dtype=torch.long)
+            self.rotary_emb(comp_pos, kv[..., -rd:])
+            if self.rotate:
+                kv = rotate_activation(kv)
+                fp4_act_quant_inplace(kv, _FP4_BLOCK_SIZE)
             else:
-                if should_compress:
-                    # PR4 Phase 2: tensor-indexed gather (see comment above).
-                    if slot_tensor is not None:
-                        ks = self.kv_state.index_select(0, slot_tensor)
-                        ss = self.score_state.index_select(0, slot_tensor)
-                    else:
-                        ks = self.kv_state[slot : slot + 1]
-                        ss = self.score_state[slot : slot + 1]
-                    kv = (ks * ss.softmax(dim=1)).sum(dim=1, keepdim=True)
+                act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
+
+            # PR3-pre2c-B prefill scatter (Python-int driven, fine because
+            # capture is decode-only).
+            if block_table is not None and not _v4_is_dummy_run():
+                assert self.kv_cache is not None and self.kv_cache.dim() == 3
+                k_per_block = _V4_BLOCK_SIZE // ratio
+                _v4_scatter_compressed(
+                    self.kv_cache,
+                    block_table,
+                    kv.squeeze(0),
+                    ci_start=0,
+                    n_compressed=seqlen // ratio,
+                    k_per_block=k_per_block,
+                )
+            return kv
+
+        # ===== Decode boundary-compression path =====
+        # (state write itself is done by update_compressor_states above)
+        if slot_tensor is not None:
+            # PR4 Phase 2 Round 2: capture-friendly. should_compress and
+            # comp_id parity are tensor-driven so capture+replay produces
+            # correct per-replay values. The softmax-pool runs UNCONDITIONALLY
+            # (its inputs are zero/neg-inf padded outside compression
+            # boundaries, so the masked write at the end is the only thing
+            # that matters for kv_cache correctness).
+            #
+            # Capture-time bake sites this fixes:
+            #   1. should_compress = (start_pos+1)%ratio == 0  (Python bool)
+            #   2. comp_id % 2     parity branch              (Python int)
+            #   3. ci = start_pos // ratio                    (Python int)
+            #   4. _v4_scatter_compressed unconditional write (would write
+            #      garbage every replay)
+            start_pos_t = positions[:1].long()
+            ratio_t = ratio  # capture-time const
+            should_compress_t = (start_pos_t + 1) % ratio_t == 0  # [1] bool
+            comp_id_t = start_pos_t // ratio_t  # [1] long
+
+            ks = self.kv_state.index_select(0, slot_tensor)
+            ss = self.score_state.index_select(0, slot_tensor)
+
+            if overlap:
+                # Build BOTH parity layouts then where() — capture-friendly.
+                # even: B at [ratio:2*ratio]+:d, A at [0:ratio]+d:
+                # odd:  B at [0:ratio]+:d,       A at [ratio:2*ratio]+d:
+                ks_even = torch.cat([ks[:, ratio:2 * ratio, :d], ks[:, 0:ratio, d:]], dim=1)
+                ss_even = torch.cat([ss[:, ratio:2 * ratio, :d], ss[:, 0:ratio, d:]], dim=1)
+                ks_odd = torch.cat([ks[:, 0:ratio, :d], ks[:, ratio:2 * ratio, d:]], dim=1)
+                ss_odd = torch.cat([ss[:, 0:ratio, :d], ss[:, ratio:2 * ratio, d:]], dim=1)
+                parity_even = (comp_id_t % 2 == 0).view(1, 1, 1)
+                kv_state_t = torch.where(parity_even, ks_even, ks_odd)
+                score_state_t = torch.where(parity_even, ss_even, ss_odd)
+                kv = (kv_state_t * score_state_t.softmax(dim=1)).sum(dim=1, keepdim=True)
+            else:
+                kv = (ks * ss.softmax(dim=1)).sum(dim=1, keepdim=True)
+
+            kv = self.norm(kv.to(dtype))
+            # comp_pos for RoPE: tensor scalar = start_pos + 1 - ratio
+            comp_pos_t = (start_pos_t + 1 - ratio_t).clamp(min=0)  # [1] long; clamped (negative when sentinel start_pos < ratio-1; result discarded by conditional scatter when should_compress_t False)
+            self.rotary_emb(comp_pos_t, kv[..., -rd:])
+
+            if self.rotate:
+                kv = rotate_activation(kv)
+                fp4_act_quant_inplace(kv, _FP4_BLOCK_SIZE)
+            else:
+                act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
+
+            # Conditional scatter: only write when should_compress_t is True;
+            # otherwise preserve the existing kv_cache slot. ci_t is the
+            # destination compressed index (tensor scalar).
+            if block_table is not None and not _v4_is_dummy_run():
+                assert self.kv_cache is not None and self.kv_cache.dim() == 3
+                k_per_block = _V4_BLOCK_SIZE // ratio
+                ci_t = comp_id_t  # = start_pos // ratio, [1] long
+                _v4_scatter_compressed_conditional(
+                    self.kv_cache,
+                    block_table,
+                    kv.squeeze(0),  # [1, head_dim]
+                    ci_t,
+                    should_compress_t,
+                    k_per_block,
+                )
+            # Return kv unconditionally; caller in V4Attention decode
+            # ignores the return value (uses block-table gather instead).
+            return kv
+
+        # ===== Eager / legacy single-seq decode path (Python-int driven) =====
+        should_compress = (start_pos + 1) % self.compress_ratio == 0
+        if overlap:
+            if should_compress:
+                comp_id = start_pos // ratio
+                if comp_id % 2 == 0:
+                    b_lo, b_hi = ratio, 2 * ratio
+                    a_lo, a_hi = 0, ratio
+                else:
+                    b_lo, b_hi = 0, ratio
+                    a_lo, a_hi = ratio, 2 * ratio
+                kv_state = torch.cat(
+                    [
+                        self.kv_state[slot : slot + 1, b_lo:b_hi, :d],
+                        self.kv_state[slot : slot + 1, a_lo:a_hi, d:],
+                    ],
+                    dim=1,
+                )
+                score_state = torch.cat(
+                    [
+                        self.score_state[slot : slot + 1, b_lo:b_hi, :d],
+                        self.score_state[slot : slot + 1, a_lo:a_hi, d:],
+                    ],
+                    dim=1,
+                )
+                kv = (kv_state * score_state.softmax(dim=1)).sum(
+                    dim=1, keepdim=True
+                )
+        else:
+            if should_compress:
+                ks = self.kv_state[slot : slot + 1]
+                ss = self.score_state[slot : slot + 1]
+                kv = (ks * ss.softmax(dim=1)).sum(dim=1, keepdim=True)
 
         if not should_compress:
             return None
 
         kv = self.norm(kv.to(dtype))
-
-        # Apply RoPE to the rope-head-dim tail of compressed entries.
-        if start_pos == 0:
-            comp_pos = torch.arange(0, cutoff, ratio, device=x.device, dtype=torch.long)
-        else:
-            comp_pos = torch.tensor(
-                [start_pos + 1 - self.compress_ratio],
-                device=x.device,
-                dtype=torch.long,
-            )
+        comp_pos = torch.tensor(
+            [start_pos + 1 - self.compress_ratio],
+            device=x.device,
+            dtype=torch.long,
+        )
         self.rotary_emb(comp_pos, kv[..., -rd:])
 
-        # QAT round-trip: rotated branch (Indexer) uses Hadamard + FP4 sim;
-        # plain branch uses FP8 sim on non-rope dims only.
         if self.rotate:
             kv = rotate_activation(kv)
             fp4_act_quant_inplace(kv, _FP4_BLOCK_SIZE)
         else:
             act_quant_inplace(kv[..., :-rd], 64, self.scale_fmt)
 
-        # PR3-pre2c-B: scatter compressed entries into the block-table-indexed
-        # classical KV pool. self.kv_cache here is the per-layer pool view of
-        # shape `[num_blocks, k_per_block, head_dim]` (bound by
-        # DeepseekV4AttentionMetadataBuilder.build_kv_cache_tensor). During
-        # warmup the builder binding has not yet run, so we skip writes —
-        # warmup forward never reads kv_cache (decode path is not exercised).
-        # PR3-main: `block_table` is now passed by the caller (Attention.forward
-        # iterates over seqs and routes per-seq block_table here).
         if block_table is not None and not _v4_is_dummy_run():
             assert self.kv_cache is not None and self.kv_cache.dim() == 3, (
                 f"compressor.kv_cache must be a [num_blocks, k, head_dim] "
@@ -1197,29 +1247,15 @@ class Compressor(nn.Module):
                 f"{None if self.kv_cache is None else self.kv_cache.shape}"
             )
             k_per_block = _V4_BLOCK_SIZE // ratio
-            if start_pos == 0:
-                # Prefill: write all `seqlen // ratio` compressed entries
-                # at compressed indices [0, seqlen // ratio).
-                _v4_scatter_compressed(
-                    self.kv_cache,
-                    block_table,
-                    kv.squeeze(0),  # [n_compressed, head_dim]
-                    ci_start=0,
-                    n_compressed=seqlen // ratio,
-                    k_per_block=k_per_block,
-                )
-            else:
-                # Decode: write the single just-compressed entry at
-                # compressed index `start_pos // ratio`.
-                ci = start_pos // ratio
-                _v4_scatter_compressed(
-                    self.kv_cache,
-                    block_table,
-                    kv.squeeze(0),  # [1, head_dim]
-                    ci_start=ci,
-                    n_compressed=1,
-                    k_per_block=k_per_block,
-                )
+            ci = start_pos // ratio
+            _v4_scatter_compressed(
+                self.kv_cache,
+                block_table,
+                kv.squeeze(0),
+                ci_start=ci,
+                n_compressed=1,
+                k_per_block=k_per_block,
+            )
         return kv
 
 
