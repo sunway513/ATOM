@@ -63,6 +63,25 @@ def _v4_use_pytorch_state_writes() -> bool:
     return os.environ.get("ATOM_V4_PYTORCH_STATE_WRITE", "0") == "1"
 
 
+def _v4_disable_indexer_inner_compressor() -> bool:
+    """P7-r8 hypothesis A: env-gated skip of Indexer's inner Compressor call.
+
+    When ``ATOM_V4_DISABLE_INDEXER_INNER_COMPRESSOR=1``, ``Indexer.forward``
+    skips the inner ``self.compressor(...)`` invocation (no writes to
+    ``self.compressor.kv_state`` / ``score_state`` / ``kv_cache``) and
+    short-circuits ``topk_idxs`` to all -1 sentinels, causing
+    ``sparse_attn`` to skip the compressed slice entirely (degrading CSA
+    layers to HCA-style window-only attention).
+
+    Used to validate the hypothesis that the Indexer's per-CSA-layer
+    Compressor sub-state pool is the conc=4 capture-mode variance source.
+    Expected accuracy loss vs full Indexer; we just need conc=4 capture
+    variance (mean ≥ 0.85, std ≤ 0.05) to confirm/falsify the hypothesis.
+    Default OFF.
+    """
+    return os.environ.get("ATOM_V4_DISABLE_INDEXER_INNER_COMPRESSOR", "0") == "1"
+
+
 def _update_compressor_states_dispatch(*args, **kwargs):
     """Triton vs PyTorch dispatcher (env-gated)."""
     if _v4_use_pytorch_state_writes():
@@ -1434,15 +1453,38 @@ class Indexer(nn.Module):
         fp4_act_quant_inplace(q, _FP4_BLOCK_SIZE)
 
         # ----- Indexer KV (Compressor takes 2D, mutates kv_cache) -----
-        self.compressor(
-            x,
-            positions,
-            slot=slot,
-            block_table=block_table,
-            context_lens=context_lens,
-            start_pos=start_pos,
-            slot_tensor=slot_tensor,
-        )
+        # P7-r8 hypothesis A (env-gated): skip the inner Compressor call.
+        # No writes to indexer.compressor.{kv_state,score_state,kv_cache}.
+        # Short-circuits topk_idxs to all -1 below so sparse_attn falls back
+        # to HCA-style window-only attention. Used to attribute conc=4
+        # capture-mode variance to the Indexer's stateful sub-pool.
+        _disable_inner = _v4_disable_indexer_inner_compressor()
+        if not _disable_inner:
+            self.compressor(
+                x,
+                positions,
+                slot=slot,
+                block_table=block_table,
+                context_lens=context_lens,
+                start_pos=start_pos,
+                slot_tensor=slot_tensor,
+            )
+        if _disable_inner:
+            # Early return with all -1 sentinels (sparse_attn skips them).
+            # Shape must match the live decode path: [1, seqlen, K] long.
+            # K matches whichever branch the non-disabled path would take.
+            if slot_tensor is not None and start_pos > 0:
+                topk_size = min(self.index_topk, self._v4_max_n_idx)
+            elif start_pos > 0:
+                topk_size = min(self.index_topk, max(end_pos // ratio, 1))
+            else:
+                topk_size = min(self.index_topk, max(seqlen // ratio, 1))
+            return torch.full(
+                (1, seqlen, topk_size),
+                -1,
+                dtype=torch.long,
+                device=x.device,
+            )
         # weights_proj is ATOM Linear → 2D input; restore B=1 dim for einsum.
         weights = (
             self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
@@ -1464,8 +1506,31 @@ class Indexer(nn.Module):
         if slot_tensor is not None and start_pos > 0:
             # Decode capture-friendly path: constant-shape gather + masked
             # topk so capture+replay produces correct per-replay values.
+            #
+            # P7-r8 ROOT CAUSE FIX: use n_committed_t WITHOUT the "+1" so
+            # the gather range [0, start_pos // ratio) is DISJOINT from the
+            # inner-Compressor's just-written entry at index start_pos // ratio
+            # (when (start_pos+1) % ratio == 0 = boundary). At non-boundary
+            # steps the write doesn't fire (conditional scatter) so no
+            # aliasing exists either way; the formula is invariant for
+            # non-boundary because (start_pos+1)//ratio == start_pos//ratio
+            # when (start_pos+1) % ratio != 0.
+            #
+            # Effect: at boundary steps, Indexer's topk sees a 1-block-
+            # delayed view of compressed kv (the just-compressed block is
+            # excluded). This is a tiny accuracy delta (the just-compressed
+            # block is also represented in swa_kv via the window topk_idxs
+            # branch in V4Attention.forward, so the information isn't lost
+            # for sparse_attn). Eliminates the captured-graph write-then-
+            # read aliasing on Indexer.kv_cache (= csa_idx_kv slice) that
+            # corrupted conc=4 capture (one of several aliasing sites
+            # P7-r8 enumerated; not on its own sufficient to fix variance —
+            # the bs=4 captured graph as a whole is the localized bug per
+            # docs/evidence/dsv4_w45/EVIDENCE_P78.md). This change is a
+            # correctness improvement with zero eager regression
+            # (silicon-validated 0.95).
             k_per_block = _V4_BLOCK_SIZE // ratio
-            n_committed_t = (positions[seqlen - 1 : seqlen] + 1) // ratio
+            n_committed_t = positions[seqlen - 1 : seqlen] // ratio
             if block_table is not None and not _v4_is_dummy_run():
                 gathered, valid = _v4_gather_compressed_batched_single(
                     self.kv_cache,
