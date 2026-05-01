@@ -392,10 +392,73 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             sum_scheduled_tokens
         )
 
+        # P7-r9 ROOT CAUSE FIX: when bs (graph_bs) > scheduled_bs the
+        # captured graph for size=bs unconditionally executes per-seq ops for
+        # all bs unrolled iterations. Padding seqs (indices [scheduled_bs:bs])
+        # would otherwise read STALE forward_vars from previous step,
+        # corrupting some random pool slot. Pad metadata so padding seqs are
+        # exact duplicates of the LAST REAL seq -> all kernel writes become
+        # idempotent (same slot, same pos, same value -> identical write).
+        # All V4 state-write kernels are per-token assignments (not
+        # accumulative): _swa_write, _update_compressor_states,
+        # _v4_scatter_compressed_conditional, indexer variants -> all idempotent.
+        if bs > scheduled_bs:
+            # Last real seq's index = scheduled_bs - 1 (when scheduled_bs >= 1).
+            # Edge case scheduled_bs == 0 (no real decode seqs): impossible
+            # for prepare_decode caller (only called when total_tokens_num_decode > 0).
+            assert scheduled_bs >= 1,                 "prepare_decode invoked with scheduled_bs=0 but bs>0 padding"
+            last = scheduled_bs - 1
+            # Replicate positions for padding seqs.
+            real_pos_block = positions_np[last * max_seqlen_q : (last + 1) * max_seqlen_q]
+            for i in range(scheduled_bs, bs):
+                var["positions"].np[i * max_seqlen_q : (i + 1) * max_seqlen_q] = real_pos_block
+            # Replicate cu_seqlens_q stride: each padding seq has max_seqlen_q tokens
+            # (same as real seqs) so cu_seqlens_q is a clean arange. The
+            # model_runner.prepare_inputs sets cu_seqlens_q[scheduled_bs+1:bs+1] =
+            # cu_seqlens_q[scheduled_bs] (zero-length padding seqs); we OVERRIDE
+            # to per-seq strides so loop body executes with real-seq seqlen.
+            cu_pad = np.arange(
+                scheduled_bs * max_seqlen_q,
+                (bs + 1) * max_seqlen_q,
+                max_seqlen_q,
+                dtype=np.int32,
+            )
+            var["cu_seqlens_q"].np[scheduled_bs : bs + 1] = cu_pad
+            # Replicate context_lens for padding seqs (same as last real).
+            var["context_lens"].np[scheduled_bs : bs] = context_lens[last]
+            # Replicate seq_idx_per_token: each padding token belongs to its
+            # padding seq index (i, not last) so per-seq loop slicing aligns.
+            for i in range(scheduled_bs, bs):
+                var["v4_seq_idx_per_token"].np[i * max_seqlen_q : (i + 1) * max_seqlen_q] = i
+            # Re-copy to GPU (overrides the earlier copy_to_gpu(scheduled_bs+1) call
+            # for cu_seqlens_q + scheduled_bs for context_lens).
+            positions = var["positions"].copy_to_gpu(bs * max_seqlen_q)
+            cu_seqlens_q_gpu = var["cu_seqlens_q"].copy_to_gpu(bs + 1)
+            context_lens_gpu = var["context_lens"].copy_to_gpu(bs)
+            seq_idx_gpu = var["v4_seq_idx_per_token"].copy_to_gpu(bs * max_seqlen_q)
+            # Update numpy mirrors that get attached to attn_metadata below.
+            cu_seqlens_q_np = var["cu_seqlens_q"].np[: bs + 1].copy()
+            sum_padded_tokens = bs * max_seqlen_q
+        else:
+            sum_padded_tokens = sum_scheduled_tokens
+
         block_tables_gpu = self._populate_block_tables(batch, scheduled_bs)
+        # P7-r9: also pad block_tables for padding seqs (duplicate of last real).
+        if bs > scheduled_bs:
+            block_tables_np_buf = self.model_runner.forward_vars["block_tables"].np
+            for i in range(scheduled_bs, bs):
+                block_tables_np_buf[i] = block_tables_np_buf[scheduled_bs - 1]
+            block_tables_gpu = self.model_runner.forward_vars["block_tables"].copy_to_gpu(bs)
         state_slot_gpu, state_slot_np = self._populate_state_slot_mapping(
             batch, scheduled_bs, return_cpu=True
         )
+        # P7-r9: also pad state_slot_mapping for padding seqs.
+        if bs > scheduled_bs:
+            slot_buf = self.model_runner.forward_vars["state_slot_mapping"].np
+            for i in range(scheduled_bs, bs):
+                slot_buf[i] = slot_buf[scheduled_bs - 1]
+            state_slot_gpu = self.model_runner.forward_vars["state_slot_mapping"].copy_to_gpu(bs)
+            state_slot_np = slot_buf[:bs].copy()
         attn_metadata = AttentionMetaData(
             cu_seqlens_q=cu_seqlens_q_gpu,
             cu_seqlens_k=None,
