@@ -306,7 +306,7 @@ def _v4_scatter_compressed_conditional(
 def _v4_build_hca_decode_topk_table(
     max_seq_len: int,
     ratio: int,
-    device: torch.device,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """Pre-build HCA decode-time compress topk lookup table (capture-friendly).
 
@@ -325,8 +325,9 @@ def _v4_build_hca_decode_topk_table(
     Returned shape: `[max_n + 1, max_n]` int32 (one extra row for n=0 - all -1).
     """
     max_n = max_seq_len // ratio
-    table = torch.full((max_n + 1, max_n), -1, dtype=torch.int32, device=device)
-    arange = torch.arange(max_n, dtype=torch.int32, device=device)
+    kw = dict(device=device) if device is not None else {}
+    table = torch.full((max_n + 1, max_n), -1, dtype=torch.int32, **kw)
+    arange = torch.arange(max_n, dtype=torch.int32, **kw)
     for n in range(1, max_n + 1):
         table[n, :n] = arange[:n]
     return table
@@ -1675,6 +1676,32 @@ class DeepseekV4Attention(nn.Module):
             )
         else:
             self._v4_max_n_main = 0
+
+        # PR4 Phase 2 Round 2: HCA decode-time compress topk lookup table.
+        # HCA layers (compress_ratio >= 8) do not use Indexer — they call
+        # `_get_compress_topk_idxs(ratio, 1, seqlen=1, start_pos>0, offset, ...)`
+        # whose legacy implementation is `lru_cache(2)` over Python ints
+        # AND returns a tensor whose SHAPE depends on `(start_pos+1)//ratio`.
+        # Under cudagraph capture this baked the capture-time start_pos=1
+        # value, returning an empty (start_pos=1: (1+1)//128=0) tensor that
+        # was reused at every replay → HCA layers attended to ZERO compressed
+        # positions. Pre-build a [max_n+1, max_n] table of valid + -1 padded
+        # rows; runtime gathers row by `n_committed = (start_pos+1)//ratio`.
+        if self.compress_ratio and self.indexer is None:
+            self._v4_hca_max_n = args.max_seq_len // self.compress_ratio
+            # Build on default device (ATOM sets torch.set_default_device(GPU)
+            # during model construction, so this materializes on GPU and
+            # register_buffer stores the GPU tensor directly — same pattern as
+            # _v4_topk_short / _v4_topk_ring above).
+            self.register_buffer(
+                "_v4_hca_decode_topk_table",
+                _v4_build_hca_decode_topk_table(
+                    args.max_seq_len, self.compress_ratio, None
+                ),
+                persistent=False,
+            )
+        else:
+            self._v4_hca_max_n = 0
         # Classical KV cache (paper §3.6.1) lives entirely in the global
         # `csa_main_kv` / `hca_main_kv` pool (allocated by the V4 attention
         # builder as `[num_blocks, n_layers, k_per_block, head_dim]`).
@@ -1952,6 +1979,22 @@ class DeepseekV4Attention(nn.Module):
                         start_pos=start_pos,
                         slot_tensor=slot_tensor,
                     )
+                elif slot_tensor is not None and start_pos > 0:
+                    # PR4 Phase 2 Round 2: HCA decode capture-friendly path.
+                    # Shape and contents both depend on start_pos at runtime;
+                    # use the precomputed lookup table to avoid baking the
+                    # capture-time empty result. -1 sentinels stay -1 (offset
+                    # is added only on valid entries).
+                    n_committed_t = ((seq_positions[:1] + 1) // ratio).clamp(
+                        min=0, max=self._v4_hca_max_n
+                    )
+                    row = self._v4_hca_decode_topk_table.index_select(
+                        0, n_committed_t.long()
+                    )  # [1, max_n] int32
+                    valid = row >= 0
+                    compress_topk_idxs = torch.where(
+                        valid, row + offset, torch.full_like(row, -1)
+                    ).unsqueeze(0)  # [1, 1, max_n]
                 else:
                     compress_topk_idxs = _get_compress_topk_idxs(
                         ratio, 1, seqlen, start_pos, offset, device=x.device
