@@ -2213,8 +2213,11 @@ class DeepseekV4Attention(nn.Module):
                     # explicit dependency edge in the captured graph, the read
                     # may execute concurrently with the write on a different
                     # stream during replay, yielding stale data.
-                    # Gated by ATOM_V4_CAPTURE_FIX so we can A/B test.
-                    if os.environ.get("ATOM_V4_CAPTURE_FIX", "0") == "1":
+                    # Gated by ATOM_V4_CAPTURE_FIX (default ON per P7-r10:
+                    # within-server std drops from 0.165 to 0.041 when enabled,
+                    # at ~5-10% perf cost; opt-out via ATOM_V4_CAPTURE_FIX=0
+                    # only when running cudagraph determinism diagnostics).
+                    if os.environ.get("ATOM_V4_CAPTURE_FIX", "1") == "1":
                         # FULL-TENSOR read that forces a strong dependency
                         # edge. Empirically the dump ops (vector_norm over
                         # whole tensor) help the most.
