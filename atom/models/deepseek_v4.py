@@ -17,6 +17,7 @@ spec decode, torch.compile, server) land in PR2-PR6.
 import math
 import os
 from dataclasses import dataclass, field
+import numpy as np
 from functools import lru_cache
 from typing import Any, Iterable, Literal, Optional, Tuple
 
@@ -1098,6 +1099,137 @@ class Indexer(nn.Module):
         )
         self.rotary_emb: Optional[_V4RoPE] = None
 
+        # ---------- P7-r17 TD-2: pre-allocated bs=1 plan + state_slot buffers ----------
+        # `Indexer.forward` is called from `V4Attention.forward`'s per-seq dispatch
+        # which is recorded into the cudagraph. The original code had three
+        # capture-stream allocations on lines 1158-1167:
+        #   (a) make_single_seq_plan(...) -> torch.from_numpy(plan).to(device)
+        #   (b) torch.tensor([slot], device=x.device, dtype=torch.int32)
+        # Both raise hipErrorStreamCaptureUnsupported during graph capture. The
+        # fix is to pre-allocate worst-case GPU buffers here and then `copy_`
+        # numpy-staged plan rows into them — copy_ is a memcpy node and IS
+        # capture-safe.
+        #
+        # Note (TD-3 still pending): Python-int `slot` is baked into the
+        # captured `_idx_state_slot_buf.copy_(...)` source bytes at capture
+        # time. Replay therefore reads the captured-time slot value (from the
+        # sentinel arange(bs) in build_for_cudagraph_capture). This produces
+        # silent-incorrect output until TD-3 threads `slot` and `start_pos` as
+        # GPU tensor views (`state_slot_mapping[i:i+1]`) — at which point the
+        # captured op reads the ACTUAL replay-time slot from a stable buffer.
+        # TD-2 alone unblocks capture compilation; TD-3 unblocks correctness.
+        K_max = compress_ratio * 2  # is_overlap=True for ratio=4
+        max_compress_rows = (args.max_seq_len // max(compress_ratio, 1)) + 4
+        max_write_rows = K_max + 4
+        # Pinned CPU staging tensors (re-used across forwards; sized to worst
+        # case so single-shot allocation is enough). Pinned host memory is
+        # required for `gpu_buf.copy_(cpu_buf)` to be a legal H2D memcpy node
+        # under cudagraph stream capture (HIP/ROCm raises
+        # hipErrorStreamCaptureUnsupported when the source is pageable).
+        # `.numpy()` on a CPU tensor returns a zero-copy numpy view, so the
+        # plan-row math below still operates on numpy.
+        self._idx_compress_plan_pin = torch.empty(
+            max_compress_rows, 4, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        self._idx_write_plan_pin = torch.empty(
+            max_write_rows, 4, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        self._idx_compress_plan_np = self._idx_compress_plan_pin.numpy()
+        self._idx_write_plan_np = self._idx_write_plan_pin.numpy()
+        # cu_compress_cpu is a tiny 2-elem array consumed downstream as numpy;
+        # not part of any captured op so plain numpy is fine.
+        self._idx_cu_compress_np = np.zeros(2, dtype=np.int32)
+        # GPU register_buffers (pinned, stable address across capture+replay).
+        self.register_buffer(
+            "_idx_compress_plan_buf",
+            torch.zeros(max_compress_rows, 4, dtype=torch.int32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_idx_write_plan_buf",
+            torch.zeros(max_write_rows, 4, dtype=torch.int32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_idx_state_slot_buf",
+            torch.zeros(1, dtype=torch.int32),
+            persistent=False,
+        )
+        # Cache the (ratio, is_overlap) used by the inner Compressor — read at
+        # forward time for the bs=1 plan builder (Compressor.__init__ runs
+        # AFTER this assignment, so we capture from local args here).
+        self._idx_compress_ratio = compress_ratio
+        self._idx_is_overlap = compress_ratio == 4
+
+    def _build_bs1_compress_plan(
+        self,
+        token_num: int,
+        start_pos: int,
+    ):
+        """P7-r17 TD-2: bs=1 specialization of make_compress_plans that writes
+        plan rows into pre-allocated GPU register_buffers (no fresh GPU alloc).
+
+        Returns a CompressPlan whose `compress_plan_gpu` and `write_plan_gpu`
+        are SLICES of `_idx_compress_plan_buf` / `_idx_write_plan_buf` (stable
+        pointer == base + 0). Drop-in for `make_single_seq_plan(...)` at the
+        Indexer call site.
+
+        Math mirrors atom/model_ops/v4_kernels/compress_plan.py exactly for
+        bs=1: plan_rows[i] = [ragged_id=i, batch_id=0, position=start_pos+i,
+        window_len=max(0, K - min(i+1, K))]; compress_mask = (position+1) %
+        ratio == 0; write_mask = position >= max(0, seq_len - K). Identical
+        outputs to make_single_seq_plan when `slot==0` is acceptable as a
+        sentinel — TD-3 will thread the real slot via tensor view.
+        """
+        ratio = self._idx_compress_ratio
+        is_overlap = self._idx_is_overlap
+        K = ratio * (2 if is_overlap else 1)
+        seq_len = start_pos + token_num
+        # Build plan rows on the cached numpy buffer (CPU, no capture stream).
+        ragged_ids = np.arange(token_num, dtype=np.int32)
+        positions_np = (start_pos + ragged_ids).astype(np.int32)
+        window_lens = np.maximum(0, K - np.minimum(ragged_ids + 1, K)).astype(np.int32)
+        # batch_id is always 0 for bs=1.
+        # compress_plan: rows where (position+1) % ratio == 0
+        compress_mask = (positions_np + 1) % ratio == 0
+        n_compress = int(compress_mask.sum())
+        if n_compress > 0:
+            self._idx_compress_plan_np[:n_compress, 0] = ragged_ids[compress_mask]
+            self._idx_compress_plan_np[:n_compress, 1] = 0  # batch_id
+            self._idx_compress_plan_np[:n_compress, 2] = positions_np[compress_mask]
+            self._idx_compress_plan_np[:n_compress, 3] = window_lens[compress_mask]
+        # write_plan: rows where position >= max(0, seq_len - K)
+        write_start = max(0, seq_len - K)
+        write_mask = positions_np >= write_start
+        n_write = int(write_mask.sum())
+        if n_write > 0:
+            self._idx_write_plan_np[:n_write, 0] = ragged_ids[write_mask]
+            self._idx_write_plan_np[:n_write, 1] = 0  # batch_id
+            self._idx_write_plan_np[:n_write, 2] = positions_np[write_mask]
+            self._idx_write_plan_np[:n_write, 3] = window_lens[write_mask]
+        # H2D copy_ into pinned GPU buffers (capture-safe memcpy node).
+        # Source is the pinned CPU tensor (NOT a fresh torch.from_numpy view of
+        # pageable memory) — the numpy view written above shares the same
+        # storage so the in-place assignments are visible.
+        if n_compress > 0:
+            self._idx_compress_plan_buf[:n_compress].copy_(
+                self._idx_compress_plan_pin[:n_compress], non_blocking=True
+            )
+        if n_write > 0:
+            self._idx_write_plan_buf[:n_write].copy_(
+                self._idx_write_plan_pin[:n_write], non_blocking=True
+            )
+        self._idx_cu_compress_np[1] = n_compress
+        from atom.model_ops.v4_kernels.compress_plan import CompressPlan
+
+        return CompressPlan(
+            compress_plan_gpu=self._idx_compress_plan_buf[:n_compress],
+            write_plan_gpu=self._idx_write_plan_buf[:n_write],
+            num_compress=n_compress,
+            num_write=n_write,
+            cu_compress_cpu=self._idx_cu_compress_np.copy(),
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1155,14 +1287,19 @@ class Indexer(nn.Module):
         # Wrap as a bs=1 plan for the batched Compressor interface. The
         # block_table arg is per-seq [max_blocks]; convert to [1, max_blocks]
         # for the batched API. State slot also wrapped as [1].
-        single_plan = make_single_seq_plan(
-            token_num=token_num,
-            start_pos=start_pos,
-            ratio=ratio,
-            is_overlap=self.compressor.overlap,
-            device=x.device,
+        # P7-r17 TD-2: was `make_single_seq_plan(...)` + `torch.tensor([slot])`.
+        # Both did fresh GPU allocs that crashed under cudagraph stream capture
+        # (hipErrorStreamCaptureUnsupported). Replaced with the pinned-buffer
+        # bs=1 plan builder (`_build_bs1_compress_plan`) and an in-place
+        # state_slot register_buffer fill (`_idx_state_slot_buf.fill_`). The
+        # `.fill_` records as a fill op with the captured-time `slot` int —
+        # TD-3 (still pending) will replace this with a tensor-view copy_ so
+        # replay reads the per-replay slot from `state_slot_mapping[i:i+1]`.
+        single_plan = self._build_bs1_compress_plan(
+            token_num=token_num, start_pos=start_pos
         )
-        single_state_slot = torch.tensor([slot], device=x.device, dtype=torch.int32)
+        self._idx_state_slot_buf.fill_(slot)
+        single_state_slot = self._idx_state_slot_buf
         single_block_tables = (
             block_table.unsqueeze(0) if block_table is not None else None
         )
