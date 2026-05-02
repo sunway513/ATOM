@@ -22,26 +22,64 @@ Two plan tensors are produced per `compress_ratio`:
 
 Caller (per-seq loop) gets `cu_compress_cpu` for slicing the kernel's flat
 output `[num_compress, head_dim]` back to per-seq chunks.
+
+P7-r20a — capture-stable worst-case grids
+-----------------------------------------
+Under HIP cudagraph capture, the kernel launch grid `(num_compress,)` /
+`(num_write,)` is BAKED at warmup-time into the captured graph. Warmup
+sees `extend_lens=1, start_pos=1` → `num_compress=0` for ratio=4/128
+→ grid=(0,) baked → at replay every captured kernel launches with grid 0
+regardless of the live token count. The Indexer's compressor never writes
+at replay → silent-incorrect topk → gibberish completion.
+
+Fix shape (this module's contribution): the plan tensor itself is sized to
+`compress_capacity` / `write_capacity` (worst-case per (ratio, max_seqlen)),
+caller passes that capacity as the kernel grid, and excess plan rows are
+filled with `position=-1` sentinel rows. Both kernels early-return on
+`position < 0` so the over-launched programs no-op cleanly.
+
+`compress_capacity` / `write_capacity` are OPTIONAL fields (default None);
+when None, the kernel falls back to `num_compress` / `num_write` (legacy
+non-capture behaviour, preserved for unit tests + eager paths that don't
+need capture stability).
 """
 
 from dataclasses import dataclass
-from typing import Iterable, Tuple
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 import torch
+
+# P7-r20a: per-row "invalid" sentinel for capture-stable worst-case grids.
+# Excess plan rows past the live `num_compress`/`num_write` get this sentinel
+# so the kernel can `if position < 0: return` early. Other fields are 0 to
+# avoid undefined-behaviour pre-loads before the early-return.
+_INVALID_POSITION_SENTINEL: int = -1
 
 
 @dataclass
 class CompressPlan:
     """Packed metadata for one (compress_ratio, overlap) variant of one fwd."""
 
-    compress_plan_gpu: torch.Tensor  # [num_compress, 4] int32
-    write_plan_gpu: torch.Tensor  # [num_write, 4]    int32
-    num_compress: int  # CPU scalar — fused_compress kernel grid
-    num_write: int  # CPU scalar — update_compressor_states kernel grid
+    compress_plan_gpu: (
+        torch.Tensor
+    )  # [num_compress, 4] int32 (or [capacity, 4] when capture-stable)
+    write_plan_gpu: (
+        torch.Tensor
+    )  # [num_write, 4]    int32 (or [capacity, 4] when capture-stable)
+    num_compress: int  # CPU scalar — fused_compress kernel grid (legacy path)
+    num_write: int  # CPU scalar — update_compressor_states kernel grid (legacy path)
     cu_compress_cpu: (
         np.ndarray
     )  # [bs+1] int32 — per-seq slice into out[num_compress, D]
+    # P7-r20a capture-stable additions. When set, kernel callers use these
+    # as the launch grid (instead of num_compress / num_write), giving a
+    # constant grid that bakes safely under cudagraph capture. Tail rows of
+    # the plan tensor MUST be filled with `position=-1` sentinels so the
+    # kernel early-returns cleanly. Both default to None for backward compat
+    # with eager / unit-test paths that build plans on-the-fly.
+    compress_capacity: Optional[int] = None
+    write_capacity: Optional[int] = None
 
 
 def make_compress_plans(
@@ -62,6 +100,12 @@ def make_compress_plans(
 
     Returns:
       dict[ratio] -> CompressPlan. Empty dict if `extend_lens_cpu.sum() == 0`.
+
+    NOTE: This builder produces TIGHT plan tensors (`shape = (num_compress, 4)`),
+    NOT capture-stable worst-case plans. It's used by the eager + non-capture
+    paths. Capture-stable construction lives in
+    `atom/model_ops/attentions/deepseek_v4_attn.py:_build_compress_plans_into_buffers`
+    and `Indexer._build_bs1_compress_plan` (P7-r20a).
     """
     bs = len(extend_lens_cpu)
     extend_lens_cpu = np.ascontiguousarray(extend_lens_cpu, dtype=np.int32)
@@ -153,3 +197,59 @@ def make_single_seq_plan(
             cu_compress_cpu=np.array([0, 0], dtype=np.int32),
         )
     return plans[ratio]
+
+
+# === P7-r20a: capture-stable plan helpers ================================
+#
+# These helpers build worst-case-shape plans into CALLER-PROVIDED stable
+# pinned/gpu buffers, so the kernel launch sees a constant grid + a stable
+# input pointer across capture+replay. Excess rows past the live count are
+# filled with `position = _INVALID_POSITION_SENTINEL` so the kernel
+# early-returns cleanly (see fused_compress.py / state_writes.py top-of-
+# kernel checks).
+#
+# Caller pattern (Indexer):
+#   * compress_plan_pin / write_plan_pin: pinned-CPU [capacity, 4] int32 staging
+#   * compress_plan_buf / write_plan_buf: GPU [capacity, 4] int32 destination
+#   * call `fill_invalid_plan_rows_inplace_np(compress_plan_pin_np, ...)`
+#     once at __init__ to set the sentinel for ALL rows.
+#   * each forward writes valid rows into the front of the pinned buffer,
+#     then `compress_plan_buf.copy_(compress_plan_pin, non_blocking=True)`
+#     to publish to GPU.
+#
+# Shared invariants asserted by the kernel:
+#   * Plan dtype is int32 — required for the `tl.load(plan_base + i)` 4xi32
+#     loads in fused_compress.py.
+#   * Position sentinel is signed (= -1), so int32 plans naturally encode it.
+
+
+def fill_invalid_plan_rows_inplace_np(
+    plan_np: np.ndarray, start: int, end: int
+) -> None:
+    """Fill `plan_np[start:end, :]` with the invalid-row sentinel.
+
+    Each tail row becomes (ragged_id=0, batch_id=0, position=-1, window_len=0).
+    The kernel only inspects `position` for the early-return; the other
+    columns are zeroed for safety against any speculative pre-load.
+
+    Args:
+      plan_np: [capacity, 4] int32 — pinned-CPU view of the plan staging buffer.
+      start:   first invalid row index (= live num_compress / num_write).
+      end:     one-past-last invalid row index (= capacity).
+    """
+    if end <= start:
+        return
+    plan_np[start:end, 0] = 0
+    plan_np[start:end, 1] = 0
+    plan_np[start:end, 2] = _INVALID_POSITION_SENTINEL
+    plan_np[start:end, 3] = 0
+
+
+def fill_all_invalid_plan_rows_inplace_np(plan_np: np.ndarray) -> None:
+    """Convenience: fill the ENTIRE plan_np with invalid-row sentinels.
+
+    Used at __init__ time so a pre-allocated capture-stable plan buffer
+    starts in a "no-op everywhere" state. Subsequent forwards overwrite
+    the front rows with live data and leave the tail at sentinel.
+    """
+    fill_invalid_plan_rows_inplace_np(plan_np, 0, plan_np.shape[0])

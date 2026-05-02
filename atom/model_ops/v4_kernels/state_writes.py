@@ -186,12 +186,26 @@ def _update_compressor_states_kernel(
       slot = state_slot_mapping[batch_id]
 
     Score write fuses ape lookup: `score + ape[position % RATIO]`.
+
+    Capture-stable mode (P7-r20a): when the host launches with grid =
+    (write_capacity,) instead of (num_write,) (so the captured grid is a
+    constant, replay-safe value), excess plan rows are filled with
+    `position = -1` sentinels by the host plan builder. This kernel checks
+    `position < 0` immediately after the position load and returns; no state
+    cache writes happen for sentinel rows. Legacy callers that launch with
+    grid = (num_write,) and tight plans see no behavioural change.
     """
     pid = tl.program_id(0)
     plan_base = write_plan_ptr + pid * 4
+    # P7-r20a: load position FIRST so the sentinel early-return fires before
+    # we touch ragged_id/batch_id (those are zero on sentinel rows but the
+    # state_slot_mapping[batch_id] load still needs valid memory).
+    position = tl.load(plan_base + 2)
+    if position < 0:
+        # Sentinel: invalid row in a worst-case-grid plan; no-op cleanly.
+        return
     ragged_id = tl.load(plan_base + 0)
     batch_id = tl.load(plan_base + 1)
-    position = tl.load(plan_base + 2)
 
     slot = tl.load(state_slot_mapping_ptr + batch_id)
     dst = position % STATE_SIZE
@@ -226,11 +240,12 @@ def update_compressor_states(
     kv_state: torch.Tensor,
     score_state: torch.Tensor,
     *,
-    write_plan: torch.Tensor,  # [num_write, 4] int32
+    write_plan: torch.Tensor,  # [num_write or write_capacity, 4] int32
     num_write: int,
     state_slot_mapping: torch.Tensor,  # [bs] int32 — per-seq state slot
     ratio: int,
     overlap: bool,
+    write_capacity: "int | None" = None,
 ) -> None:
     """In-place update of Compressor's per-request `kv_state`/`score_state`
     ring buffer (size `2*ratio` for overlap CSA, `ratio` for HCA), driven by
@@ -248,12 +263,21 @@ def update_compressor_states(
       kv_state:     [num_slots, S, dim] in-place ring buffer.
                     S = 2*ratio if overlap else ratio.
       score_state:  same shape as kv_state.
-      write_plan:   [num_write, 4] int32 — packed (ragged_id, batch_id,
-                    position, _); each row = one token to write.
-      num_write:    grid size (CPU scalar, == write_plan.shape[0] but kept
-                    explicit to avoid GPU sync).
+      write_plan:   [num_write, 4] int32 (legacy) or [write_capacity, 4]
+                    int32 (P7-r20a capture-stable). Excess rows past
+                    num_write MUST be filled with `position=-1` sentinels.
+      num_write:    Live row count. In legacy mode this is also the grid
+                    size; in capture-stable mode this is informational only
+                    (used for shape assertion when capacity is None) and the
+                    grid comes from `write_capacity`.
       state_slot_mapping: [bs] int32 — per-seq state cache slot.
       ratio, overlap: compress geometry.
+      write_capacity: P7-r20a — when set, kernel grid = (write_capacity,)
+                    INSTEAD of (num_write,). The captured grid is a constant
+                    (== capacity) so replay-time `num_write` variation
+                    doesn't affect the captured launch parameters. Excess
+                    program slots no-op via `position=-1` sentinel
+                    early-return inside the kernel.
     """
     assert kv.dim() == 2 and score.dim() == 2
     assert kv.shape == score.shape, f"{kv.shape} vs {score.shape}"
@@ -262,15 +286,26 @@ def update_compressor_states(
     assert (
         kv_state.shape[1] == state_size
     ), f"kv_state.shape[1]={kv_state.shape[1]}, expected {state_size}"
-    if num_write == 0:
-        return
+    # Capture-stable: grid is constant capacity; legacy: grid is live count
+    # and we short-circuit when there's nothing to do.
+    if write_capacity is not None:
+        grid_size = int(write_capacity)
+        if grid_size == 0:
+            return
+    else:
+        if num_write == 0:
+            return
+        grid_size = int(num_write)
     dim = kv.shape[1]
     assert write_plan.dim() == 2 and write_plan.shape[1] == 4
     assert write_plan.dtype == torch.int32
+    assert (
+        write_plan.shape[0] == grid_size
+    ), f"write_plan rows {write_plan.shape[0]} != grid_size {grid_size}"
     assert state_slot_mapping.dim() == 1 and state_slot_mapping.dtype == torch.int32
 
     BLOCK_D = triton.next_power_of_2(dim)
-    _update_compressor_states_kernel[(num_write,)](
+    _update_compressor_states_kernel[(grid_size,)](
         kv if kv.is_contiguous() else kv.contiguous(),
         score if score.is_contiguous() else score.contiguous(),
         ape,

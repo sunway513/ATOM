@@ -101,12 +101,38 @@ def _fused_compress_attn_kernel(
     K: tl.constexpr,  # = STATE_SIZE (softmax-pool reduce dim)
     HAS_BLOCK_TABLE: tl.constexpr,
 ):
-    """One program per boundary in the plan. Grid = num_compress (no early-exit)."""
+    """One program per row in the plan.
+
+    Grid sizing
+    -----------
+    Legacy (eager) caller: grid = (num_compress,) — every program corresponds
+    to a real compression boundary; no early-return needed.
+
+    Capture-stable (P7-r20a) caller: grid = (compress_capacity,) where
+    `compress_capacity` is a fixed worst-case bound (e.g. `max_seq_len // ratio
+    + safety`). Excess plan rows past the live `num_compress` are filled with
+    `position = -1` sentinels by the host plan builder. The kernel checks
+    `position < 0` immediately after the position load and returns; no state
+    cache reads, no input reads, no output writes happen for sentinel rows.
+
+    The early-return is unconditional with respect to the (constexpr)
+    `OVERLAP` / `HAS_BLOCK_TABLE` paths and produces no divergent memory
+    side-effects, so HIP cudagraph capture is happy with the constant grid.
+    """
     pid = tl.program_id(0)
     plan_base = plan_ptr + pid * 4
+    # NOTE on load order: `position` is loaded FIRST (separately from the rest)
+    # so the early-return for invalid sentinel rows fires before any other plan
+    # field is touched. This avoids the (currently theoretical) hazard of an
+    # out-of-bounds `state_slot_mapping[batch_id]` load when batch_id is left
+    # uninitialised in the sentinel; we still set `batch_id = 0` host-side as
+    # belt-and-suspenders.
+    position = tl.load(plan_base + 2)
+    if position < 0:
+        # P7-r20a sentinel: invalid row in a worst-case-grid plan; no-op cleanly.
+        return
     ragged_id = tl.load(plan_base + 0)
     batch_id = tl.load(plan_base + 1)
-    position = tl.load(plan_base + 2)
     window_len = tl.load(plan_base + 3)
 
     slot = tl.load(state_slot_mapping_ptr + batch_id)
@@ -280,16 +306,36 @@ def fused_compress_attn(
     ascending = per-seq grouped). Caller uses `plan.cu_compress_cpu[i:i+2]` to
     slice per-seq chunks.
 
-    Returns None if `plan.num_compress == 0`.
+    Returns None when ALL of the plan rows would no-op:
+      * Legacy: `plan.num_compress == 0` AND `plan.compress_capacity is None`.
+      * Capture-stable (P7-r20a): `plan.compress_capacity == 0` (extremely
+        rare — would require zero worst-case capacity, i.e. ratio > max_seq_len).
+
+    When `plan.compress_capacity` is set, the kernel launches with grid =
+    (compress_capacity,) — a CONSTANT independent of how many real boundaries
+    `num_compress` represents this fwd. Excess programs (pid >= num_compress)
+    read `position == -1` sentinel and early-return. This is what makes the
+    captured launch pointer-safe across replays where `num_compress` varies.
 
     Caller MUST invoke BEFORE `update_compressor_states` (state cache reads
     must see previous-fwd data).
     """
-    if plan.num_compress == 0:
-        return None
+    # P7-r20a: capture-stable path uses worst-case capacity as the launch grid
+    # so the captured grid value is independent of the per-fwd `num_compress`.
+    # `out` shape MUST also use capacity (not num_compress) so the captured
+    # output pointer is stable across replays — caller slices with
+    # `plan.cu_compress_cpu` which is built consistently with the live row count.
+    capture_grid = plan.compress_capacity
+    if capture_grid is not None:
+        grid_size = int(capture_grid)
+        out_rows = grid_size
+    else:
+        if plan.num_compress == 0:
+            return None
+        grid_size = int(plan.num_compress)
+        out_rows = grid_size
 
     device = kv_in.device
-    num_compress = plan.num_compress
 
     # Validate shapes
     dim_full = (2 if overlap else 1) * head_dim
@@ -302,10 +348,11 @@ def fused_compress_attn(
     assert score_state.shape == kv_state.shape
     assert ape.shape == (ratio, dim_full)
     assert rms_weight.shape == (head_dim,)
+    # Plan tensor MUST match grid_size (legacy: num_compress; capture: capacity).
     assert plan.compress_plan_gpu.shape == (
-        num_compress,
+        grid_size,
         4,
-    ), f"plan {plan.compress_plan_gpu.shape}, expected ({num_compress}, 4)"
+    ), f"plan {plan.compress_plan_gpu.shape}, expected ({grid_size}, 4)"
     assert plan.compress_plan_gpu.dtype == torch.int32
     assert state_slot_mapping.dim() == 1 and state_slot_mapping.dtype == torch.int32
     assert cos_cache.shape[-1] == rope_head_dim // 2
@@ -324,13 +371,13 @@ def fused_compress_attn(
     else:
         bt_seq_stride = 0
 
-    out = torch.empty(num_compress, head_dim, dtype=out_dtype, device=device)
+    out = torch.empty(out_rows, head_dim, dtype=out_dtype, device=device)
 
     BLOCK_D = triton.next_power_of_2(head_dim)
     HALF_ROPE = rope_head_dim // 2
     K = state_size
 
-    grid = (num_compress,)
+    grid = (grid_size,)
     _fused_compress_attn_kernel[grid](
         kv_in,
         score_in,

@@ -490,3 +490,271 @@ class TestR19bKvSaIndexSelect:
             v_int32 = int(slots_t[i].item())
             v_long = int(slots_t[i : i + 1].long().item())
             assert v_int32 == v_long
+
+
+# ── r20a unit tests ────────────────────────────────────────────────────────
+
+
+class TestR20aSentinelHelpers:
+    """r20a: capture-stable plan format uses `position = -1` sentinel rows
+    for tail (over-launched) kernel programs. Verify the helper that fills
+    these sentinels into pinned-CPU plan staging buffers."""
+
+    @staticmethod
+    def _load_compress_plan_module():
+        """Minimal-import load of compress_plan.py (avoids the heavy aiter
+        chain pulled in by `import atom.model_ops.v4_kernels`)."""
+        import importlib.util
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        path = repo / "atom" / "model_ops" / "v4_kernels" / "compress_plan.py"
+        spec = importlib.util.spec_from_file_location("_test_compress_plan", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_sentinel_constant_is_negative(self):
+        """Sentinel value MUST be < 0 so the kernel `position < 0` early-
+        return fires correctly. Anything >= 0 would be interpreted as a real
+        absolute token position."""
+        mod = self._load_compress_plan_module()
+        assert mod._INVALID_POSITION_SENTINEL < 0
+
+    def test_fill_invalid_rows_writes_sentinel_into_position_column(self):
+        """`fill_invalid_plan_rows_inplace_np(plan_np, start, end)` MUST set
+        plan_np[start:end, 2] = -1 and zero the other columns (belt + braces
+        for any speculative pre-load before the kernel's early-return)."""
+        mod = self._load_compress_plan_module()
+        plan_np = np.full((6, 4), 7, dtype=np.int32)  # poison initial state
+        mod.fill_invalid_plan_rows_inplace_np(plan_np, 2, 5)
+        # Rows [2..5) zeroed except col 2 = -1.
+        for r in range(2, 5):
+            assert plan_np[r, 0] == 0
+            assert plan_np[r, 1] == 0
+            assert plan_np[r, 2] == -1
+            assert plan_np[r, 3] == 0
+        # Rows outside the [start, end) range untouched.
+        for r in (0, 1, 5):
+            for c in range(4):
+                assert plan_np[r, c] == 7
+
+    def test_fill_invalid_rows_handles_empty_range(self):
+        """end <= start: noop (plan_np unchanged)."""
+        mod = self._load_compress_plan_module()
+        plan_np = np.full((4, 4), 9, dtype=np.int32)
+        snapshot = plan_np.copy()
+        mod.fill_invalid_plan_rows_inplace_np(plan_np, 3, 3)  # empty
+        mod.fill_invalid_plan_rows_inplace_np(plan_np, 4, 1)  # inverted
+        assert np.array_equal(plan_np, snapshot)
+
+    def test_fill_all_invalid_rows_marks_full_buffer(self):
+        """Convenience helper for __init__-time setup."""
+        mod = self._load_compress_plan_module()
+        plan_np = np.full((5, 4), 3, dtype=np.int32)
+        mod.fill_all_invalid_plan_rows_inplace_np(plan_np)
+        assert (plan_np[:, 2] == -1).all()
+        assert (plan_np[:, 0] == 0).all()
+        assert (plan_np[:, 1] == 0).all()
+        assert (plan_np[:, 3] == 0).all()
+
+
+class TestR20aCompressPlanCapacity:
+    """r20a: CompressPlan grew two optional fields:
+    `compress_capacity` and `write_capacity`. When set, the kernel wrappers
+    must use them as the launch grid (instead of num_compress / num_write).
+    """
+
+    @staticmethod
+    def _load_compress_plan_module():
+        """See TestR20aSentinelHelpers._load_compress_plan_module."""
+        import importlib.util
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        path = repo / "atom" / "model_ops" / "v4_kernels" / "compress_plan.py"
+        spec = importlib.util.spec_from_file_location("_test_compress_plan_cap", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_compress_plan_default_capacity_is_none(self):
+        """Backward compat: legacy CompressPlan constructions MUST keep
+        compress_capacity / write_capacity as None (signalling: use the
+        live `num_compress` / `num_write` as the kernel grid)."""
+        mod = self._load_compress_plan_module()
+        # Mock plan tensor (CPU, since we don't need a GPU for the field check).
+        empty = torch.empty((0, 4), dtype=torch.int32)
+        cu = np.zeros(2, dtype=np.int32)
+        plan = mod.CompressPlan(
+            compress_plan_gpu=empty,
+            write_plan_gpu=empty,
+            num_compress=0,
+            num_write=0,
+            cu_compress_cpu=cu,
+        )
+        assert plan.compress_capacity is None
+        assert plan.write_capacity is None
+
+    def test_compress_plan_accepts_explicit_capacities(self):
+        """Capture-stable construction: capacities passed as kwargs survive."""
+        mod = self._load_compress_plan_module()
+        empty = torch.empty((0, 4), dtype=torch.int32)
+        cu = np.zeros(2, dtype=np.int32)
+        plan = mod.CompressPlan(
+            compress_plan_gpu=empty,
+            write_plan_gpu=empty,
+            num_compress=0,
+            num_write=0,
+            cu_compress_cpu=cu,
+            compress_capacity=257,
+            write_capacity=8,
+        )
+        assert plan.compress_capacity == 257
+        assert plan.write_capacity == 8
+
+
+class TestR20aPlanBuilderTailSentinel:
+    """r20a: simulate Indexer's `_build_bs1_compress_plan` body — the live
+    rows must be in front, the tail must be sentinel, and the live count
+    derived from the per-fwd start_pos + token_num is invariant to the
+    capacity (= a previous fwd's larger n_compress can NOT leak into the
+    new fwd's tail)."""
+
+    @staticmethod
+    def _load_compress_plan_module():
+        import importlib.util
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        path = repo / "atom" / "model_ops" / "v4_kernels" / "compress_plan.py"
+        spec = importlib.util.spec_from_file_location("_test_compress_plan_tail", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _build_plan(self, plan_np, start_pos, token_num, ratio, is_overlap, cap, mod):
+        """Mirror of `Indexer._build_bs1_compress_plan` body for the
+        compress_plan tensor (write_plan is identical pattern; this UT
+        focuses on the compress path)."""
+        K = ratio * (2 if is_overlap else 1)
+        ragged_ids = np.arange(token_num, dtype=np.int32)
+        positions_np = (start_pos + ragged_ids).astype(np.int32)
+        window_lens = np.maximum(0, K - np.minimum(ragged_ids + 1, K)).astype(np.int32)
+        compress_mask = (positions_np + 1) % ratio == 0
+        n_compress = int(compress_mask.sum())
+        if n_compress > 0:
+            plan_np[:n_compress, 0] = ragged_ids[compress_mask]
+            plan_np[:n_compress, 1] = 0
+            plan_np[:n_compress, 2] = positions_np[compress_mask]
+            plan_np[:n_compress, 3] = window_lens[compress_mask]
+        mod.fill_invalid_plan_rows_inplace_np(plan_np, n_compress, cap)
+        return n_compress
+
+    def test_tail_sentinel_after_first_fwd(self):
+        """Single forward (start_pos large, token_num=1, decode-style):
+        tail rows MUST be sentinel; live row carries real position."""
+        mod = self._load_compress_plan_module()
+        cap = 32
+        plan_np = np.zeros((cap, 4), dtype=np.int32)
+        mod.fill_all_invalid_plan_rows_inplace_np(plan_np)
+        # A decode at start_pos=11, ratio=4 → position=11; (11+1)%4 == 0 → boundary.
+        n_c = self._build_plan(plan_np, 11, 1, 4, True, cap, mod)
+        assert n_c == 1
+        # Front row is live.
+        assert plan_np[0, 2] == 11
+        # All tail rows are sentinel.
+        assert (plan_np[1:, 2] == -1).all()
+
+    def test_tail_sentinel_after_shrinking_fwd(self):
+        """Capture-replay simulation: a previous forward wrote n_compress=8
+        live rows; the next forward only needs n_compress=2. The tail rows
+        [2:capacity) MUST be re-stamped to sentinel (no leakage of the
+        previous forward's live data into the new forward's tail kernel
+        programs)."""
+        mod = self._load_compress_plan_module()
+        cap = 16
+        plan_np = np.zeros((cap, 4), dtype=np.int32)
+        mod.fill_all_invalid_plan_rows_inplace_np(plan_np)
+        # Forward A: start_pos=0, token_num=32 with ratio=4 → boundaries at
+        # positions 3, 7, 11, ..., 31 → n_compress = 8.
+        n_a = self._build_plan(plan_np, 0, 32, 4, True, cap, mod)
+        assert n_a == 8
+        for r in range(8):
+            assert plan_np[r, 2] != -1  # live
+        for r in range(8, cap):
+            assert plan_np[r, 2] == -1  # tail sentinel
+        # Forward B: start_pos=200, token_num=8 with ratio=4 → positions
+        # 200..207; (pos+1)%4==0 at positions 203, 207 → n_compress = 2.
+        n_b = self._build_plan(plan_np, 200, 8, 4, True, cap, mod)
+        assert n_b == 2
+        # First 2 rows are live (new positions 203, 207).
+        assert plan_np[0, 2] == 203
+        assert plan_np[1, 2] == 207
+        # CRITICAL: rows 2..7 (which Forward A had populated as live) MUST
+        # now be sentinel, not the stale forward-A values.
+        for r in range(2, cap):
+            assert (
+                plan_np[r, 2] == -1
+            ), f"row {r} leaked stale forward-A data: {plan_np[r].tolist()}"
+
+    def test_tail_sentinel_after_zero_compress_fwd(self):
+        """Forward with n_compress=0 (sentinel decode at non-boundary
+        position): all rows must be sentinel; nothing is live."""
+        mod = self._load_compress_plan_module()
+        cap = 8
+        plan_np = np.zeros((cap, 4), dtype=np.int32)
+        mod.fill_all_invalid_plan_rows_inplace_np(plan_np)
+        # A previous forward populated rows 0..3 with live data.
+        plan_np[:4] = np.array([[1, 0, 100, 0]] * 4, dtype=np.int32)
+        # New forward: position=1, ratio=4 → (1+1)%4 != 0 → no boundary.
+        n = self._build_plan(plan_np, 1, 1, 4, True, cap, mod)
+        assert n == 0
+        # All rows MUST now be sentinel — including the rows that were live
+        # before this forward. This is the "shrink to zero" subcase.
+        assert (plan_np[:, 2] == -1).all()
+
+
+class TestR20aKernelGridConstancy:
+    """r20a: the kernel wrapper signatures change to use `compress_capacity`
+    / `write_capacity` as the launch grid when set (capture-stable). Verify
+    the grid-selection helper produces a CONSTANT grid across forwards with
+    differing live counts (= the property cudagraph capture requires)."""
+
+    @staticmethod
+    def _grid_for_compress(plan_num_compress, plan_capacity):
+        """Mirrors fused_compress.py's `capture_grid = plan.compress_capacity`
+        branch."""
+        if plan_capacity is not None:
+            return int(plan_capacity)
+        return int(plan_num_compress)
+
+    @staticmethod
+    def _grid_for_write(num_write, write_capacity):
+        """Mirrors state_writes.py's `if write_capacity is not None:` branch."""
+        if write_capacity is not None:
+            return int(write_capacity)
+        return int(num_write)
+
+    def test_compress_grid_constant_when_capacity_set(self):
+        """Across 3 forwards with n_compress = 0 / 1 / 5, the grid must be
+        equal to `compress_capacity` (e.g. 32) for ALL of them. THIS IS THE
+        POINT — the captured graph bakes the constant grid value, which
+        does not vary by replay."""
+        cap = 32
+        for n_compress in (0, 1, 5, cap - 1, cap):
+            assert self._grid_for_compress(n_compress, cap) == cap
+
+    def test_compress_grid_falls_back_to_num_compress_when_no_capacity(self):
+        """Backward compat: legacy plans (capacity=None) get grid = num_compress."""
+        for n_compress in (1, 7, 23):
+            assert self._grid_for_compress(n_compress, None) == n_compress
+
+    def test_write_grid_constant_when_capacity_set(self):
+        cap = 8
+        for n_write in (0, 1, 4, cap):
+            assert self._grid_for_write(n_write, cap) == cap
+
+    def test_write_grid_falls_back_when_no_capacity(self):
+        for n_write in (1, 5, 17):
+            assert self._grid_for_write(n_write, None) == n_write

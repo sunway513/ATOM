@@ -1015,6 +1015,11 @@ class Compressor(nn.Module):
             rope_head_dim=rd,
             out_dtype=out_dtype,
         )
+        # P7-r20a: pass `write_capacity` so the kernel grid is the worst-case
+        # constant when the plan is capture-stable (plan.write_capacity set by
+        # the Indexer's `_build_bs1_compress_plan` or by the future
+        # capture-stable batched builder in deepseek_v4_attn.py). When None,
+        # the wrapper falls back to grid=(num_write,) (legacy behaviour).
         update_compressor_states(
             kv,
             score,
@@ -1026,6 +1031,7 @@ class Compressor(nn.Module):
             state_slot_mapping=state_slot_mapping,
             ratio=ratio,
             overlap=overlap,
+            write_capacity=plan.write_capacity,
         )
         return out
 
@@ -1136,18 +1142,42 @@ class Indexer(nn.Module):
         )
         self._idx_compress_plan_np = self._idx_compress_plan_pin.numpy()
         self._idx_write_plan_np = self._idx_write_plan_pin.numpy()
+        # P7-r20a: pre-fill ALL rows with the invalid-row sentinel so any
+        # tail row past the live `n_compress`/`n_write` no-ops cleanly under
+        # the capture-stable worst-case grid launch (plan rows with
+        # `position == -1` early-return inside the kernel). Subsequent
+        # forwards overwrite the FRONT n_compress / n_write rows with live
+        # data; the tail stays at sentinel.
+        from atom.model_ops.v4_kernels.compress_plan import (
+            fill_all_invalid_plan_rows_inplace_np,
+            fill_invalid_plan_rows_inplace_np,
+        )
+
+        fill_all_invalid_plan_rows_inplace_np(self._idx_compress_plan_np)
+        fill_all_invalid_plan_rows_inplace_np(self._idx_write_plan_np)
+        # Cache the helper for the per-fwd path so we don't reimport every call.
+        self._idx_fill_invalid_rows_np = fill_invalid_plan_rows_inplace_np
         # cu_compress_cpu is a tiny 2-elem array consumed downstream as numpy;
         # not part of any captured op so plain numpy is fine.
         self._idx_cu_compress_np = np.zeros(2, dtype=np.int32)
         # GPU register_buffers (pinned, stable address across capture+replay).
+        # P7-r20a: must initialise to the SAME sentinel as the pinned mirror
+        # so the very first forward (before any copy_to_gpu has fired) launches
+        # the worst-case grid with all-invalid rows = clean no-op everywhere.
+        # `register_buffer` zero-fills, so we then write `position=-1` into
+        # column 2. Subsequent forwards overwrite via `copy_` of the pinned mirror.
+        _compress_init = torch.zeros(max_compress_rows, 4, dtype=torch.int32)
+        _compress_init[:, 2] = -1
         self.register_buffer(
             "_idx_compress_plan_buf",
-            torch.zeros(max_compress_rows, 4, dtype=torch.int32),
+            _compress_init,
             persistent=False,
         )
+        _write_init = torch.zeros(max_write_rows, 4, dtype=torch.int32)
+        _write_init[:, 2] = -1
         self.register_buffer(
             "_idx_write_plan_buf",
-            torch.zeros(max_write_rows, 4, dtype=torch.int32),
+            _write_init,
             persistent=False,
         )
         self.register_buffer(
@@ -1160,26 +1190,36 @@ class Indexer(nn.Module):
         # AFTER this assignment, so we capture from local args here).
         self._idx_compress_ratio = compress_ratio
         self._idx_is_overlap = compress_ratio == 4
+        # P7-r20a: capture-stable plan capacities (worst-case bounds).
+        self._idx_compress_capacity = max_compress_rows
+        self._idx_write_capacity = max_write_rows
 
     def _build_bs1_compress_plan(
         self,
         token_num: int,
         start_pos: int,
     ):
-        """P7-r17 TD-2: bs=1 specialization of make_compress_plans that writes
-        plan rows into pre-allocated GPU register_buffers (no fresh GPU alloc).
+        """P7-r17 TD-2 + P7-r20a: bs=1 specialization of make_compress_plans
+        that writes plan rows into pre-allocated GPU register_buffers (no
+        fresh GPU alloc) AND emits a capture-stable worst-case-grid plan
+        (excess rows carry `position=-1` sentinel).
 
         Returns a CompressPlan whose `compress_plan_gpu` and `write_plan_gpu`
-        are SLICES of `_idx_compress_plan_buf` / `_idx_write_plan_buf` (stable
-        pointer == base + 0). Drop-in for `make_single_seq_plan(...)` at the
-        Indexer call site.
+        are FULL slices of `_idx_compress_plan_buf` / `_idx_write_plan_buf`
+        (shape = capacity, NOT n_compress). The plan also sets
+        `compress_capacity` / `write_capacity` so the kernel wrappers launch
+        with a constant grid = capacity. Excess program slots no-op via
+        the in-kernel `position < 0` early-return.
 
         Math mirrors atom/model_ops/v4_kernels/compress_plan.py exactly for
         bs=1: plan_rows[i] = [ragged_id=i, batch_id=0, position=start_pos+i,
         window_len=max(0, K - min(i+1, K))]; compress_mask = (position+1) %
-        ratio == 0; write_mask = position >= max(0, seq_len - K). Identical
-        outputs to make_single_seq_plan when `slot==0` is acceptable as a
-        sentinel — TD-3 will thread the real slot via tensor view.
+        ratio == 0; write_mask = position >= max(0, seq_len - K).
+
+        Capture-correctness path (P7-r20a): the FULL pinned buffer (front
+        n_compress live rows + tail sentinel rows) is copied to the GPU
+        register_buffer EVERY forward. Pinned-CPU source satisfies SOP-6
+        (capture stream H2D requires pinned host memory).
         """
         ratio = self._idx_compress_ratio
         is_overlap = self._idx_is_overlap
@@ -1193,41 +1233,50 @@ class Indexer(nn.Module):
         # compress_plan: rows where (position+1) % ratio == 0
         compress_mask = (positions_np + 1) % ratio == 0
         n_compress = int(compress_mask.sum())
+        compress_cap = self._idx_compress_capacity
         if n_compress > 0:
             self._idx_compress_plan_np[:n_compress, 0] = ragged_ids[compress_mask]
             self._idx_compress_plan_np[:n_compress, 1] = 0  # batch_id
             self._idx_compress_plan_np[:n_compress, 2] = positions_np[compress_mask]
             self._idx_compress_plan_np[:n_compress, 3] = window_lens[compress_mask]
+        # P7-r20a: re-stamp the tail (rows [n_compress:capacity]) with the
+        # invalid-row sentinel. The tail was sentinel after __init__, but a
+        # PREVIOUS forward with a LARGER n_compress could have left live data
+        # in rows we now consider invalid — the re-stamp guarantees no
+        # live-data leakage into the over-launched tail programs.
+        self._idx_fill_invalid_rows_np(
+            self._idx_compress_plan_np, n_compress, compress_cap
+        )
         # write_plan: rows where position >= max(0, seq_len - K)
         write_start = max(0, seq_len - K)
         write_mask = positions_np >= write_start
         n_write = int(write_mask.sum())
+        write_cap = self._idx_write_capacity
         if n_write > 0:
             self._idx_write_plan_np[:n_write, 0] = ragged_ids[write_mask]
             self._idx_write_plan_np[:n_write, 1] = 0  # batch_id
             self._idx_write_plan_np[:n_write, 2] = positions_np[write_mask]
             self._idx_write_plan_np[:n_write, 3] = window_lens[write_mask]
-        # H2D copy_ into pinned GPU buffers (capture-safe memcpy node).
-        # Source is the pinned CPU tensor (NOT a fresh torch.from_numpy view of
-        # pageable memory) — the numpy view written above shares the same
-        # storage so the in-place assignments are visible.
-        if n_compress > 0:
-            self._idx_compress_plan_buf[:n_compress].copy_(
-                self._idx_compress_plan_pin[:n_compress], non_blocking=True
-            )
-        if n_write > 0:
-            self._idx_write_plan_buf[:n_write].copy_(
-                self._idx_write_plan_pin[:n_write], non_blocking=True
-            )
+        self._idx_fill_invalid_rows_np(self._idx_write_plan_np, n_write, write_cap)
+        # H2D copy_ of the FULL pinned buffer (front-live + tail-sentinel)
+        # into the stable GPU register_buffers (capture-safe memcpy node).
+        # Pinned-CPU source satisfies the SOP-6 capture-stream H2D rule.
+        # Copy the FULL capacity (not just front) so kernel sees the sentinels.
+        self._idx_compress_plan_buf.copy_(
+            self._idx_compress_plan_pin, non_blocking=True
+        )
+        self._idx_write_plan_buf.copy_(self._idx_write_plan_pin, non_blocking=True)
         self._idx_cu_compress_np[1] = n_compress
         from atom.model_ops.v4_kernels.compress_plan import CompressPlan
 
         return CompressPlan(
-            compress_plan_gpu=self._idx_compress_plan_buf[:n_compress],
-            write_plan_gpu=self._idx_write_plan_buf[:n_write],
+            compress_plan_gpu=self._idx_compress_plan_buf,  # full [capacity, 4]
+            write_plan_gpu=self._idx_write_plan_buf,  # full [capacity, 4]
             num_compress=n_compress,
             num_write=n_write,
             cu_compress_cpu=self._idx_cu_compress_np.copy(),
+            compress_capacity=compress_cap,
+            write_capacity=write_cap,
         )
 
     def forward(
