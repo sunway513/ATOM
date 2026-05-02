@@ -217,10 +217,14 @@ def _v4_gather_compressed_batched(
     # Gather block IDs from per-seq block_tables: [bs, max_n]
     physical_blocks = torch.gather(block_tables.long(), 1, block_in_seq)
 
-    # Flat gather from kv_cache.view(-1, head_dim)
-    flat_idx = (physical_blocks * k_pb + slot_in_block).view(-1)
-    flat_kv = kv_cache.view(-1, head_dim)
-    entries = flat_kv[flat_idx].view(bs, max_n_compressed, head_dim)
+    # 2-D advanced indexing avoids any view/reshape coupling to the
+    # potentially-non-contiguous strided slice of the per-layer pool
+    # (e.g. runner.v4_csa_idx_kv[:, layer_pos]). Same pattern as the
+    # scalar-arity _v4_gather_compressed (line 154+), generalized to bs.
+    # `physical_blocks` and `slot_in_block` are both [bs, max_n_compressed]
+    # long; advanced indexing gathers entries of shape
+    # [bs, max_n_compressed, head_dim].
+    entries = kv_cache[physical_blocks, slot_in_block]
 
     # Mask invalid entries to zero (they'd be garbage from stale block 0).
     entries = entries * valid.unsqueeze(-1).to(entries.dtype)
