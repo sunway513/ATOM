@@ -758,3 +758,210 @@ class TestR20aKernelGridConstancy:
     def test_write_grid_falls_back_when_no_capacity(self):
         for n_write in (1, 5, 17):
             assert self._grid_for_write(n_write, None) == n_write
+
+
+# ── r20b unit tests ────────────────────────────────────────────────────────
+
+
+class TestR20bBatchedPlanIntoBuffers:
+    """r20b: capture-stable batched plan builder
+    `make_compress_plans_into_buffers` writes plan rows into caller-provided
+    pinned-CPU + GPU buffers and returns CompressPlans with capacity set.
+
+    Validates the same shrink-without-leak invariant as the bs=1 builder,
+    plus multi-ratio dispatch (CSA + HCA in one batch)."""
+
+    @staticmethod
+    def _load_compress_plan_module():
+        """Minimal-import load of compress_plan.py (same pattern as r20a tests)."""
+        import importlib.util
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        path = repo / "atom" / "model_ops" / "v4_kernels" / "compress_plan.py"
+        spec = importlib.util.spec_from_file_location("_test_compress_plan_r20b", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _make_buffers(self, mod, ratio, cap_c, cap_w):
+        """Build the (pin_np, pin, buf, capacity) buffers for one ratio in
+        the format `make_compress_plans_into_buffers` expects."""
+        pin_c = torch.empty(cap_c, 4, dtype=torch.int32)
+        pin_w = torch.empty(cap_w, 4, dtype=torch.int32)
+        pin_c_np = pin_c.numpy()
+        pin_w_np = pin_w.numpy()
+        mod.fill_all_invalid_plan_rows_inplace_np(pin_c_np)
+        mod.fill_all_invalid_plan_rows_inplace_np(pin_w_np)
+        buf_c = torch.zeros(cap_c, 4, dtype=torch.int32)
+        buf_c[:, 2] = -1
+        buf_w = torch.zeros(cap_w, 4, dtype=torch.int32)
+        buf_w[:, 2] = -1
+        return {
+            "pin_np": {ratio: pin_c_np},
+            "pin_np_w": {ratio: pin_w_np},
+            "pin": {ratio: pin_c},
+            "pin_w": {ratio: pin_w},
+            "buf": {ratio: buf_c},
+            "buf_w": {ratio: buf_w},
+            "cap_c": {ratio: cap_c},
+            "cap_w": {ratio: cap_w},
+        }
+
+    def test_returns_capacity_set_plans(self):
+        """Plans returned by the batched builder MUST carry both
+        `compress_capacity` and `write_capacity` (legacy `make_compress_plans`
+        leaves them None)."""
+        mod = self._load_compress_plan_module()
+        b = self._make_buffers(mod, ratio=4, cap_c=64, cap_w=64)
+        extend = np.array([1, 1], dtype=np.int32)  # 2 decode tokens
+        seq = np.array([12, 16], dtype=np.int32)  # past + current
+        plans = mod.make_compress_plans_into_buffers(
+            extend,
+            seq,
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        assert 4 in plans
+        plan = plans[4]
+        assert plan.compress_capacity == 64
+        assert plan.write_capacity == 64
+        # Returned plan tensors are the EXACT GPU buffers (stable address).
+        assert plan.compress_plan_gpu.data_ptr() == b["buf"][4].data_ptr()
+        assert plan.write_plan_gpu.data_ptr() == b["buf_w"][4].data_ptr()
+
+    def test_buffer_address_stable_across_calls(self):
+        """The whole point of r20b: buffer addresses MUST be stable across
+        multiple builder invocations (= captured graph's pointer args remain
+        valid across replays)."""
+        mod = self._load_compress_plan_module()
+        b = self._make_buffers(mod, ratio=4, cap_c=32, cap_w=32)
+        # Call 1.
+        plans1 = mod.make_compress_plans_into_buffers(
+            np.array([1], dtype=np.int32),
+            np.array([8], dtype=np.int32),
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        addr_c = plans1[4].compress_plan_gpu.data_ptr()
+        addr_w = plans1[4].write_plan_gpu.data_ptr()
+        # Call 2 with different inputs.
+        plans2 = mod.make_compress_plans_into_buffers(
+            np.array([4], dtype=np.int32),
+            np.array([200], dtype=np.int32),
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        assert plans2[4].compress_plan_gpu.data_ptr() == addr_c
+        assert plans2[4].write_plan_gpu.data_ptr() == addr_w
+
+    def test_tail_sentinel_after_shrinking_call(self):
+        """Same shrink-without-leak invariant as the bs=1 path: a previous
+        call with large n_compress must not leave live data in the new
+        call's tail rows."""
+        mod = self._load_compress_plan_module()
+        b = self._make_buffers(mod, ratio=4, cap_c=32, cap_w=32)
+        # Call A: token_num=32 fresh prefill, ratio=4 → boundaries at
+        # positions 3, 7, ..., 31 → n_compress = 8.
+        mod.make_compress_plans_into_buffers(
+            np.array([32], dtype=np.int32),
+            np.array([32], dtype=np.int32),
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        # Confirm front rows live, tail sentinel.
+        pin_np = b["pin_np"][4]
+        assert pin_np[0, 2] == 3
+        assert pin_np[7, 2] == 31
+        for r in range(8, 32):
+            assert pin_np[r, 2] == -1
+        # Call B (shrink): 1 decode token at position=11 → n_compress = 1.
+        mod.make_compress_plans_into_buffers(
+            np.array([1], dtype=np.int32),
+            np.array([12], dtype=np.int32),
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        # Front row is the new boundary; rows 1..31 MUST be sentinel
+        # (rows 1..7 were previously live in call A).
+        assert pin_np[0, 2] == 11
+        for r in range(1, 32):
+            assert (
+                pin_np[r, 2] == -1
+            ), f"row {r} leaked stale call-A data: {pin_np[r].tolist()}"
+
+    def test_zero_total_emits_all_sentinel_capacity_plans(self):
+        """When extend_lens.sum() == 0 (e.g. dummy batch), the builder must
+        STILL emit capacity-set plans whose buffers are all-sentinel — so
+        downstream callers always launch the worst-case grid (kernel
+        no-ops everywhere)."""
+        mod = self._load_compress_plan_module()
+        b = self._make_buffers(mod, ratio=4, cap_c=8, cap_w=8)
+        # Pre-poison the front of pin_np to detect re-stamp.
+        b["pin_np"][4][0, 2] = 999
+        plans = mod.make_compress_plans_into_buffers(
+            np.array([0, 0], dtype=np.int32),
+            np.array([10, 20], dtype=np.int32),
+            [(4, True)],
+            compress_pin_per_ratio=b["pin_np"],
+            write_pin_per_ratio=b["pin_np_w"],
+            compress_buf_per_ratio=b["buf"],
+            write_buf_per_ratio=b["buf_w"],
+            compress_capacity_per_ratio=b["cap_c"],
+            write_capacity_per_ratio=b["cap_w"],
+        )
+        plan = plans[4]
+        assert plan.num_compress == 0
+        assert plan.num_write == 0
+        assert plan.compress_capacity == 8
+        # All rows of the underlying pinned buffer MUST be sentinel.
+        assert (b["pin_np"][4][:, 2] == -1).all()
+
+    def test_capacity_overflow_raises(self):
+        """Defensive: if the live row count exceeds capacity (caller sized
+        capacity wrong), raise a clear error rather than silently truncating
+        and producing wrong attention output."""
+        mod = self._load_compress_plan_module()
+        b = self._make_buffers(mod, ratio=4, cap_c=2, cap_w=64)  # cap too small
+        # 32 fresh-prefill tokens → 8 compress boundaries > capacity 2.
+        try:
+            mod.make_compress_plans_into_buffers(
+                np.array([32], dtype=np.int32),
+                np.array([32], dtype=np.int32),
+                [(4, True)],
+                compress_pin_per_ratio=b["pin_np"],
+                write_pin_per_ratio=b["pin_np_w"],
+                compress_buf_per_ratio=b["buf"],
+                write_buf_per_ratio=b["buf_w"],
+                compress_capacity_per_ratio=b["cap_c"],
+                write_capacity_per_ratio=b["cap_w"],
+            )
+            assert False, "expected RuntimeError on capacity overflow"
+        except RuntimeError as e:
+            assert "compress plan overflow" in str(e)
+            assert "capacity=2" in str(e)

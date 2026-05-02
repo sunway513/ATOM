@@ -164,6 +164,74 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
                 max_bs, dtype=torch.int32, device=model_runner.device
             )
 
+        # P7-r20b: capture-stable per-ratio compress + write plan buffers.
+        # The legacy `make_compress_plans` allocates fresh GPU tensors
+        # (`torch.from_numpy(...).to(device)`) per forward — captured kernels
+        # bake the warmup-time tensor pointer + grid (which for warmup
+        # sentinel decode is `num_compress=0` so `grid=(0,)` -> no kernel
+        # programs at replay even when live token boundaries demand many).
+        #
+        # Worst-case capacity per ratio:
+        #   compress: max boundaries across the whole batch
+        #             = ceil(max_num_batched_tokens / ratio) + safety
+        #   write:    max state-cache write rows across the whole batch
+        #             = bs_max * (1+overlap)*ratio (last K positions per seq)
+        #             with a small safety pad.
+        max_btokens = model_runner.config.max_num_batched_tokens
+        # Pinned-CPU staging + GPU dest, both shape [capacity, 4] int32.
+        # Pre-fill ALL rows with sentinel so the first warmup forward
+        # (before _build_compress_plans has fired) launches all-no-op
+        # kernel programs.
+        from atom.model_ops.v4_kernels.compress_plan import (
+            fill_all_invalid_plan_rows_inplace_np,
+        )
+
+        self._v4_compress_plan_pin: dict[int, torch.Tensor] = {}
+        self._v4_write_plan_pin: dict[int, torch.Tensor] = {}
+        self._v4_compress_plan_pin_np: dict[int, np.ndarray] = {}
+        self._v4_write_plan_pin_np: dict[int, np.ndarray] = {}
+        self._v4_compress_plan_buf: dict[int, torch.Tensor] = {}
+        self._v4_write_plan_buf: dict[int, torch.Tensor] = {}
+        self._v4_compress_capacity: dict[int, int] = {}
+        self._v4_write_capacity: dict[int, int] = {}
+        for _ratio, _is_overlap in self._unique_compress_ratios_overlap:
+            _K = _ratio * (2 if _is_overlap else 1)
+            # Per-fwd worst case: every token is a boundary if ratio == 1
+            # (impossible but defensive); realistic ratio>=4 gives much less.
+            # Add a small safety pad (+bs) to cover off-by-one rounding.
+            _cap_c = (max_btokens + _ratio - 1) // _ratio + max_bs + 4
+            # write_plan: per-seq up to K positions ; total <= bs*K + safety.
+            _cap_w = max_bs * _K + max_bs + 4
+            _comp_pin = torch.empty(
+                _cap_c, 4, dtype=torch.int32, device="cpu", pin_memory=True
+            )
+            _wr_pin = torch.empty(
+                _cap_w, 4, dtype=torch.int32, device="cpu", pin_memory=True
+            )
+            _comp_pin_np = _comp_pin.numpy()
+            _wr_pin_np = _wr_pin.numpy()
+            fill_all_invalid_plan_rows_inplace_np(_comp_pin_np)
+            fill_all_invalid_plan_rows_inplace_np(_wr_pin_np)
+            # GPU buffers: must initialise to the SAME sentinel so the very
+            # first kernel launch (e.g. capture warmup before any copy_to_gpu
+            # has fired with live data) sees no-op rows everywhere.
+            _comp_gpu = torch.zeros(
+                _cap_c, 4, dtype=torch.int32, device=model_runner.device
+            )
+            _comp_gpu[:, 2] = -1
+            _wr_gpu = torch.zeros(
+                _cap_w, 4, dtype=torch.int32, device=model_runner.device
+            )
+            _wr_gpu[:, 2] = -1
+            self._v4_compress_plan_pin[_ratio] = _comp_pin
+            self._v4_write_plan_pin[_ratio] = _wr_pin
+            self._v4_compress_plan_pin_np[_ratio] = _comp_pin_np
+            self._v4_write_plan_pin_np[_ratio] = _wr_pin_np
+            self._v4_compress_plan_buf[_ratio] = _comp_gpu
+            self._v4_write_plan_buf[_ratio] = _wr_gpu
+            self._v4_compress_capacity[_ratio] = _cap_c
+            self._v4_write_capacity[_ratio] = _cap_w
+
     # ------------------------------------------------------------------ #
     # AttentionMetadataBuilder hooks (per-request cache abstraction).    #
     # ------------------------------------------------------------------ #
@@ -652,10 +720,20 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
     def _build_compress_plans(self, extend_lens_np, seq_lens_np, device):
         """Build per-ratio CompressPlan dict consumed by batched compressor.
 
-        Reuse this from both prepare_decode and prepare_prefill — caller
-        supplies extend_lens / seq_lens (np int32) and target device.
+        Reuse this from both prepare_decode, prepare_prefill, and
+        build_for_cudagraph_capture — caller supplies extend_lens / seq_lens
+        (np int32) and target device.
+
+        P7-r20b: writes plan rows into the stable per-ratio pinned-CPU +
+        GPU buffers allocated in __init__, and returns CompressPlans whose
+        `compress_capacity` / `write_capacity` are set so the kernel
+        wrappers launch with a constant worst-case grid (capture-safe).
+        Excess rows past the live count carry the position=-1 sentinel
+        and the kernel early-returns on them.
         """
-        from atom.model_ops.v4_kernels import make_compress_plans
+        from atom.model_ops.v4_kernels.compress_plan import (
+            make_compress_plans_into_buffers,
+        )
 
         if not self._unique_compress_ratios_overlap:
             return {}
@@ -664,11 +742,21 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             extend_lens_np = extend_lens_np.cpu().numpy().astype(np.int32)
         if isinstance(seq_lens_np, torch.Tensor):
             seq_lens_np = seq_lens_np.cpu().numpy().astype(np.int32)
-        return make_compress_plans(
+        # `device` arg is ignored — buffers were pre-allocated on
+        # `model_runner.device` at __init__. Asserts here would tip over in
+        # the V4-prefill capture flow which we don't currently exercise; if
+        # multi-device deployments emerge a future refactor can per-device
+        # the buffer dict.
+        return make_compress_plans_into_buffers(
             np.ascontiguousarray(extend_lens_np, dtype=np.int32),
             np.ascontiguousarray(seq_lens_np, dtype=np.int32),
             self._unique_compress_ratios_overlap,
-            device,
+            compress_pin_per_ratio=self._v4_compress_plan_pin_np,
+            write_pin_per_ratio=self._v4_write_plan_pin_np,
+            compress_buf_per_ratio=self._v4_compress_plan_buf,
+            write_buf_per_ratio=self._v4_write_plan_buf,
+            compress_capacity_per_ratio=self._v4_compress_capacity,
+            write_capacity_per_ratio=self._v4_write_capacity,
         )
 
     def _populate_block_tables(

@@ -253,3 +253,179 @@ def fill_all_invalid_plan_rows_inplace_np(plan_np: np.ndarray) -> None:
     the front rows with live data and leave the tail at sentinel.
     """
     fill_invalid_plan_rows_inplace_np(plan_np, 0, plan_np.shape[0])
+
+
+# === P7-r20b: capture-stable batched plan builder ========================
+
+
+def make_compress_plans_into_buffers(
+    extend_lens_cpu: np.ndarray,
+    seq_lens_cpu: np.ndarray,
+    unique_ratios_overlap: Iterable[Tuple[int, bool]],
+    *,
+    compress_pin_per_ratio: "dict[int, np.ndarray]",
+    write_pin_per_ratio: "dict[int, np.ndarray]",
+    compress_buf_per_ratio: "dict[int, torch.Tensor]",
+    write_buf_per_ratio: "dict[int, torch.Tensor]",
+    compress_capacity_per_ratio: "dict[int, int]",
+    write_capacity_per_ratio: "dict[int, int]",
+) -> dict[int, CompressPlan]:
+    """Capture-stable batched build: writes plan rows into CALLER-PROVIDED
+    pinned-CPU + GPU buffers, then publishes to GPU via `.copy_()` (a
+    capture-safe memcpy node). Returns CompressPlans that wrap the FULL
+    capacity slice so the kernel wrapper launches with the worst-case grid
+    (`grid = (capacity,)`) — invariant across forwards / replays.
+
+    Rationale: legacy `make_compress_plans` does
+    `torch.from_numpy(plan_np).to(device, non_blocking=True)` which allocates
+    a FRESH GPU tensor every forward. Under HIP cudagraph capture the kernel
+    launch records the warmup-time tensor pointer, and replay launches with
+    that stale pointer (or, if the warmup plan had num_compress=0, with grid
+    0 even when the live plan has many rows). This builder side-steps both
+    issues: stable buffer addresses + worst-case grid.
+
+    Args:
+      extend_lens_cpu, seq_lens_cpu: same as `make_compress_plans` (np int32).
+      unique_ratios_overlap: same.
+      compress_pin_per_ratio:    {ratio: np.ndarray} — pinned-CPU staging,
+                                 each shape [compress_capacity, 4] int32.
+                                 Tail rows are pre-filled with sentinel by
+                                 the caller (typically once at __init__).
+      write_pin_per_ratio:       {ratio: np.ndarray} — pinned-CPU staging
+                                 for write plans.
+      compress_buf_per_ratio:    {ratio: torch.Tensor} — GPU dest, same
+                                 shape as the corresponding pin buffer.
+      write_buf_per_ratio:       {ratio: torch.Tensor} — GPU dest for writes.
+      compress_capacity_per_ratio:  {ratio: int} — worst-case row counts.
+      write_capacity_per_ratio:     {ratio: int} — worst-case row counts.
+
+    Returns:
+      dict[ratio] -> CompressPlan with `compress_capacity` / `write_capacity`
+      set; `compress_plan_gpu` / `write_plan_gpu` are FULL slices of the
+      caller's GPU buffers (same data_ptr across calls).
+
+    Empty dict when `extend_lens_cpu.sum() == 0` — caller should fall back
+    to the warmup-sentinel state of the buffers (or skip the kernel call).
+    """
+    bs = len(extend_lens_cpu)
+    extend_lens_cpu = np.ascontiguousarray(extend_lens_cpu, dtype=np.int32)
+    seq_lens_cpu = np.ascontiguousarray(seq_lens_cpu, dtype=np.int32)
+    total = int(extend_lens_cpu.sum())
+    out: dict[int, CompressPlan] = {}
+    if bs == 0 or total == 0:
+        # Even with no live tokens, emit capture-stable plans whose buffers
+        # are all-sentinel (kernel will no-op) so downstream callers get
+        # the right grid + pointer. This matches the warmup invariant.
+        for ratio, _is_overlap in unique_ratios_overlap:
+            cap_c = compress_capacity_per_ratio[ratio]
+            cap_w = write_capacity_per_ratio[ratio]
+            # Re-stamp every row with sentinel (defensive against earlier
+            # forwards leaving live data in front rows).
+            fill_invalid_plan_rows_inplace_np(compress_pin_per_ratio[ratio], 0, cap_c)
+            fill_invalid_plan_rows_inplace_np(write_pin_per_ratio[ratio], 0, cap_w)
+            compress_buf_per_ratio[ratio].copy_(
+                torch.from_numpy(compress_pin_per_ratio[ratio]),
+                non_blocking=True,
+            )
+            write_buf_per_ratio[ratio].copy_(
+                torch.from_numpy(write_pin_per_ratio[ratio]),
+                non_blocking=True,
+            )
+            out[ratio] = CompressPlan(
+                compress_plan_gpu=compress_buf_per_ratio[ratio],
+                write_plan_gpu=write_buf_per_ratio[ratio],
+                num_compress=0,
+                num_write=0,
+                cu_compress_cpu=np.zeros(max(bs + 1, 2), dtype=np.int32),
+                compress_capacity=cap_c,
+                write_capacity=cap_w,
+            )
+        return out
+
+    # Per-token columns shared across ratios (mirrors the legacy builder).
+    batch_ids = np.repeat(np.arange(bs, dtype=np.int32), extend_lens_cpu)
+    ragged_ids = np.arange(total, dtype=np.int32)
+    cu_extend = np.empty(bs + 1, dtype=np.int32)
+    cu_extend[0] = 0
+    np.cumsum(extend_lens_cpu, out=cu_extend[1:])
+    j_in_seq = ragged_ids - cu_extend[batch_ids]
+    prefix_lens = seq_lens_cpu - extend_lens_cpu
+    positions = prefix_lens[batch_ids] + j_in_seq
+
+    for ratio, is_overlap in unique_ratios_overlap:
+        K = ratio * (2 if is_overlap else 1)
+        compress_pin = compress_pin_per_ratio[ratio]
+        write_pin = write_pin_per_ratio[ratio]
+        compress_buf = compress_buf_per_ratio[ratio]
+        write_buf = write_buf_per_ratio[ratio]
+        cap_c = compress_capacity_per_ratio[ratio]
+        cap_w = write_capacity_per_ratio[ratio]
+
+        window_lens = np.maximum(0, K - np.minimum(j_in_seq + 1, K)).astype(np.int32)
+
+        # compress: token at a compression boundary
+        compress_mask = (positions + 1) % ratio == 0
+        compress_idx = np.where(compress_mask)[0]
+        n_compress = compress_idx.size
+        # Capacity overflow guards (defensive — caller should size capacity
+        # to true worst-case but throw a clear error if it underflows).
+        if n_compress > cap_c:
+            raise RuntimeError(
+                f"compress plan overflow for ratio={ratio}: "
+                f"n_compress={n_compress} > capacity={cap_c}"
+            )
+        if n_compress > 0:
+            compress_pin[:n_compress, 0] = ragged_ids[compress_idx]
+            compress_pin[:n_compress, 1] = batch_ids[compress_idx]
+            compress_pin[:n_compress, 2] = positions[compress_idx]
+            compress_pin[:n_compress, 3] = window_lens[compress_idx]
+        # P7-r20b: re-stamp the tail (rows [n_compress:capacity]) with
+        # sentinel — guards against shrink: a previous forward's larger
+        # n_compress could have left live data in rows we now consider
+        # invalid (replay would launch them as real boundaries -> double
+        # write into kv_cache). Same invariant as the bs=1 Indexer path.
+        fill_invalid_plan_rows_inplace_np(compress_pin, n_compress, cap_c)
+
+        # cu_compress: per-seq prefix-sum of boundary counts (unchanged).
+        compress_counts = np.bincount(batch_ids[compress_idx], minlength=bs).astype(
+            np.int32
+        )
+        cu_compress = np.empty(bs + 1, dtype=np.int32)
+        cu_compress[0] = 0
+        np.cumsum(compress_counts, out=cu_compress[1:])
+
+        # write_plan: rows where positions >= max(0, seq_len - K)
+        write_starts = np.maximum(0, seq_lens_cpu - K).astype(np.int32)
+        write_mask = positions >= write_starts[batch_ids]
+        write_idx = np.where(write_mask)[0]
+        n_write = write_idx.size
+        if n_write > cap_w:
+            raise RuntimeError(
+                f"write plan overflow for ratio={ratio}: "
+                f"n_write={n_write} > capacity={cap_w}"
+            )
+        if n_write > 0:
+            write_pin[:n_write, 0] = ragged_ids[write_idx]
+            write_pin[:n_write, 1] = batch_ids[write_idx]
+            write_pin[:n_write, 2] = positions[write_idx]
+            write_pin[:n_write, 3] = window_lens[write_idx]
+        fill_invalid_plan_rows_inplace_np(write_pin, n_write, cap_w)
+
+        # H2D copy_ of FULL capacity (front-live + tail-sentinel) into the
+        # stable GPU buffers (capture-safe memcpy node; pinned source).
+        # `torch.from_numpy(pin)` on a pinned-memory numpy view returns a
+        # tensor that shares the pinned storage — the H2D copy stays
+        # capture-stream-legal per SOP-6.
+        compress_buf.copy_(torch.from_numpy(compress_pin), non_blocking=True)
+        write_buf.copy_(torch.from_numpy(write_pin), non_blocking=True)
+
+        out[ratio] = CompressPlan(
+            compress_plan_gpu=compress_buf,
+            write_plan_gpu=write_buf,
+            num_compress=int(n_compress),
+            num_write=int(n_write),
+            cu_compress_cpu=cu_compress,
+            compress_capacity=cap_c,
+            write_capacity=cap_w,
+        )
+    return out
