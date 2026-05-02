@@ -965,3 +965,212 @@ class TestR20bBatchedPlanIntoBuffers:
         except RuntimeError as e:
             assert "compress plan overflow" in str(e)
             assert "capacity=2" in str(e)
+
+
+# ── P7-r21 site #5e: sparse-attn layout K_MAX constexpr stability UTs ──────
+
+
+class TestR21SparseLayoutFixedDecodeK:
+    """P7-r21 site #5e: validate that the decode branch of
+    `_attach_sparse_layout_metadata` emits the SAME `topk_lens` /
+    `kv_offsets` strides regardless of per-seq start_pos, for both ratio=4
+    (Indexer-driven) and ratio=128 (HCA-table-driven) layers.
+
+    This stability is what makes the captured `topk_flat` shape and
+    `kv_sa` cat shape constant across cudagraph replays. Per EVIDENCE_P720
+    §4 5b<->5d co-dependency: if the layout drifts (variable K), the
+    captured topk_flat slice strides become wrong and sparse_attn reads
+    garbage.
+
+    CPU-only via a minimal builder stand-in that exposes only the surface
+    `_attach_sparse_layout_metadata` consumes: window_size, index_topk,
+    `_max_n_committed_per_ratio`, and a `model_runner.forward_vars` dict
+    of CpuGpuBuffer-shaped objects.
+    """
+
+    @staticmethod
+    def _make_stub_builder(
+        window_size: int, index_topk: int, max_n_csa: int, max_n_hca: int, n_tokens: int
+    ):
+        """Builds the minimal duck-typed object with the attribute surface
+        consumed by `_attach_sparse_layout_metadata` so we can call it
+        without importing the heavy `atom.model_ops.attentions.deepseek_v4_attn`
+        module (which pulls torch.cuda + transformers).
+        """
+        # Bring in the actual function source to drive the test against the
+        # production layout code (no copy-paste — guarantees future drifts
+        # break this test).
+        atom_root = Path(__file__).resolve().parent.parent
+        attn_mod_src = (
+            atom_root / "atom" / "model_ops" / "attentions" / "deepseek_v4_attn.py"
+        ).read_text()
+        # Locate the def line and the next def/class at column 0 to slice
+        # the function body (resilient to small surrounding edits).
+        marker = "    def _attach_sparse_layout_metadata("
+        i = attn_mod_src.find(marker)
+        assert i != -1, "marker not found"
+        # Find the next top-of-block sibling method (prefix '    def ').
+        j = attn_mod_src.find("\n    def ", i + len(marker))
+        assert j != -1
+        body = attn_mod_src[i:j]
+        # Strip leading 4-space class indent so we can exec at module scope.
+        body = "\n".join(
+            ln[4:] if ln.startswith("    ") else ln for ln in body.splitlines()
+        )
+        # Compose: attach a wrapper function that takes self explicitly.
+        # Stub the type symbols the function annotates (no runtime use).
+        ns = {"np": np, "torch": torch, "AttentionMetaData": object}
+        exec(body, ns)
+        fn = ns["_attach_sparse_layout_metadata"]
+
+        # Stub forward_vars + builder.
+        class _CpuGpuStub:
+            def __init__(self, n, dtype):
+                self.np = np.zeros(n, dtype=dtype)
+                self._dtype = dtype
+
+            def copy_to_gpu(self, n):
+                return torch.from_numpy(self.np[:n].copy())
+
+        forward_vars = {}
+        for kind in ("dense", "csa", "hca"):
+            forward_vars[f"v4_{kind}_sparse_topk_starts"] = _CpuGpuStub(
+                n_tokens, np.int64
+            )
+            forward_vars[f"v4_{kind}_sparse_topk_lens"] = _CpuGpuStub(
+                n_tokens, np.int32
+            )
+            forward_vars[f"v4_{kind}_sparse_kv_offsets"] = _CpuGpuStub(
+                n_tokens, np.int32
+            )
+
+        class _RunnerStub:
+            pass
+
+        runner = _RunnerStub()
+        runner.forward_vars = forward_vars
+
+        class _BuilderStub:
+            pass
+
+        b = _BuilderStub()
+        b.window_size = window_size
+        b.index_topk = index_topk
+        b.model_runner = runner
+        b._max_n_committed_per_ratio = {4: max_n_csa, 128: max_n_hca}
+        # Bind the function as a method.
+        b._attach_sparse_layout_metadata = fn.__get__(b, _BuilderStub)
+        return b
+
+    @staticmethod
+    def _make_metadata_stub():
+        class _MD:
+            pass
+
+        md = _MD()
+        md.compress_plans = None  # forces n_compress fallback
+        return md
+
+    def test_decode_csa_topk_lens_fixed_at_window_plus_index_topk(self):
+        """For ratio==4 decode (start_pos>0), every per-token topk_len MUST
+        equal window_size + index_topk regardless of per-seq start_pos."""
+        window_size, index_topk, max_n_csa, max_n_hca = 128, 1024, 1024, 32
+        bs = 3
+        n_tokens = bs  # decode = 1 token per seq
+        b = self._make_stub_builder(
+            window_size, index_topk, max_n_csa, max_n_hca, n_tokens
+        )
+        md = self._make_metadata_stub()
+        cu_seqlens_q_np = np.array([0, 1, 2, 3], dtype=np.int32)
+        # Mix start_pos values to detect Python-int leaks; all > 0 (decode).
+        start_pos_per_seq = np.array([5, 200, 4095], dtype=np.int32)
+        b._attach_sparse_layout_metadata(
+            md, cu_seqlens_q_np, start_pos_per_seq, bs, n_tokens
+        )
+        layouts = md.v4_sparse_layouts
+        csa = layouts[4]
+        # All per-token topk_lens equal window_size + index_topk.
+        lens_cpu = csa["topk_lens"].cpu().numpy()
+        expected = window_size + index_topk
+        assert (lens_cpu[:n_tokens] == expected).all(), (
+            f"CSA decode topk_lens not invariant: got {lens_cpu[:n_tokens].tolist()}"
+            f" expected all == {expected}"
+        )
+        # max_topk per layout dict reflects the same.
+        assert csa["max_topk"] == expected, csa["max_topk"]
+
+    def test_decode_csa_kv_offsets_strides_fixed_at_window_plus_max_n(self):
+        """For ratio==4 decode, kv_offsets[i+1] - kv_offsets[i] MUST equal
+        window_size + max_n_committed_csa for every consecutive seq pair."""
+        window_size, index_topk, max_n_csa, max_n_hca = 128, 1024, 1024, 32
+        bs = 4
+        n_tokens = bs
+        b = self._make_stub_builder(
+            window_size, index_topk, max_n_csa, max_n_hca, n_tokens
+        )
+        md = self._make_metadata_stub()
+        cu_seqlens_q_np = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+        start_pos_per_seq = np.array([10, 500, 1234, 4000], dtype=np.int32)
+        b._attach_sparse_layout_metadata(
+            md, cu_seqlens_q_np, start_pos_per_seq, bs, n_tokens
+        )
+        offsets = md.v4_sparse_layouts[4]["kv_offsets"].cpu().numpy()
+        expected_stride = window_size + max_n_csa
+        for i in range(bs - 1):
+            stride = int(offsets[i + 1]) - int(offsets[i])
+            assert stride == expected_stride, (
+                f"CSA decode kv_offsets stride seq{i}->{i+1}: got {stride},"
+                f" expected {expected_stride}"
+            )
+
+    def test_decode_hca_topk_lens_fixed_at_window_plus_max_n_hca(self):
+        """For ratio==128 decode, topk_len MUST equal window_size +
+        max_n_committed_hca regardless of per-seq start_pos."""
+        window_size, index_topk, max_n_csa, max_n_hca = 128, 1024, 1024, 32
+        bs = 3
+        n_tokens = bs
+        b = self._make_stub_builder(
+            window_size, index_topk, max_n_csa, max_n_hca, n_tokens
+        )
+        md = self._make_metadata_stub()
+        cu_seqlens_q_np = np.array([0, 1, 2, 3], dtype=np.int32)
+        start_pos_per_seq = np.array([129, 1500, 4000], dtype=np.int32)
+        b._attach_sparse_layout_metadata(
+            md, cu_seqlens_q_np, start_pos_per_seq, bs, n_tokens
+        )
+        hca = md.v4_sparse_layouts[128]
+        lens_cpu = hca["topk_lens"].cpu().numpy()
+        expected = window_size + max_n_hca
+        assert (lens_cpu[:n_tokens] == expected).all(), lens_cpu[:n_tokens].tolist()
+        # And kv_offsets stride
+        offsets_cpu = hca["kv_offsets"].cpu().numpy()
+        for i in range(bs - 1):
+            stride = int(offsets_cpu[i + 1]) - int(offsets_cpu[i])
+            assert stride == window_size + max_n_hca, stride
+
+    def test_prefill_csa_keeps_dynamic_shape(self):
+        """For ratio==4 prefill (start_pos==0), the layout MUST keep the
+        legacy variable-shape K (capture is decode-only). Regression guard
+        to ensure r21 didn't accidentally collapse prefill onto fixed K."""
+        window_size, index_topk, max_n_csa, max_n_hca = 128, 1024, 1024, 32
+        bs = 1
+        n_tokens = 16  # prefill: token_num=16
+        b = self._make_stub_builder(
+            window_size, index_topk, max_n_csa, max_n_hca, n_tokens
+        )
+        md = self._make_metadata_stub()
+        cu_seqlens_q_np = np.array([0, 16], dtype=np.int32)
+        start_pos_per_seq = np.array([0], dtype=np.int32)
+        b._attach_sparse_layout_metadata(
+            md, cu_seqlens_q_np, start_pos_per_seq, bs, n_tokens
+        )
+        csa = md.v4_sparse_layouts[4]
+        lens_cpu = csa["topk_lens"].cpu().numpy()
+        # Prefill: window_topk = min(token_num, window_size) = 16,
+        # compress_topk = min(index_topk, end_pos // ratio) = min(1024, 4) = 4,
+        # topk_len = 20 (NOT the decode-fixed 1152).
+        expected = min(n_tokens, window_size) + min(index_topk, n_tokens // 4)
+        assert (lens_cpu[:n_tokens] == expected).all(), (
+            f"prefill CSA topk_lens={lens_cpu[:n_tokens].tolist()},"
+            f" expected all == {expected}"
+        )

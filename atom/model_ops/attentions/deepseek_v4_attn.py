@@ -102,6 +102,22 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             unique.append((128, False))
         self._unique_compress_ratios_overlap = unique
 
+        # P7-r21 site #5d: capture-stable per-ratio max_n_committed used
+        # by Indexer.forward / V4Attention.forward (fixed-size compressed
+        # gather + topk K) AND by _attach_sparse_layout_metadata (fixed
+        # decode topk_lens / kv_len so the captured topk_flat/kv_sa shapes
+        # are constant across replays). Sourced from deployment
+        # max_model_len / ratio (NOT args.max_seq_len, which can be 1M+
+        # for V4 and would blow VRAM on the kv_sa cat).
+        max_dec = int(getattr(model_runner.config, "max_model_len", 0) or 0)
+        assert max_dec > 0, (
+            "V4 builder requires model_runner.config.max_model_len to be set;"
+            " got " + repr(max_dec)
+        )
+        self._max_n_committed_per_ratio: dict[int, int] = {
+            ratio: max(1, max_dec // ratio) for (ratio, _ovr) in unique
+        }
+
         # Geometry from HF config.
         self.head_dim = getattr(hf, "kv_head_dim", 512)
         self.index_head_dim = getattr(hf, "index_head_dim", 128)
@@ -380,6 +396,15 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         if isinstance(module, _V4Attention):
             # Attention.swa_kv — every layer.
             module.swa_kv = runner.v4_swa_kv[module.layer_id]
+            # P7-r21 site #5c: install capture-stable per-seq compressed
+            # gather buffers (ci_template + max_n_committed) on V4Attention
+            # using the deployment max_model_len // compress_ratio. Done here
+            # (post-bind) instead of __init__ because args.max_seq_len would
+            # over-allocate (V4 max_position_embeddings is ~1M; max_model_len
+            # is the per-server cap, typically 4-128k).
+            ratio = module.compress_ratio
+            if ratio in (4, 128):
+                module._v4_init_capture_buffers(self._max_n_committed_per_ratio[ratio])
             return None
 
         if isinstance(module, _V4Indexer):
@@ -388,6 +413,10 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             layer_id_from_prefix = int(module.prefix.split(".")[1])
             pos = self.layer_id_to_csa_pos[layer_id_from_prefix]
             module.kv_cache = runner.v4_csa_idx_kv[:, pos]
+            # P7-r21 site #5a/5b: install capture-stable Indexer gather +
+            # topk buffers (ci_template + max_n_committed). Indexer ratio is
+            # always 4 (CSA only).
+            module._idx_init_capture_buffers(self._max_n_committed_per_ratio[4])
             return None
 
         if isinstance(module, _V4Compressor):
@@ -500,21 +529,29 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
                     )
                 else:
                     n_compress = end_pos // ratio - start_pos // ratio if ratio else 0
+                # P7-r21 site #5d: capture-stable decode topk_len + kv_len.
+                # The captured topk_flat / kv_sa shapes per seq MUST be
+                # invariant across replays. Indexer / V4Attention sites #5a/5b/5c
+                # emit fixed-shape topk_idxs (length=index_topk for CSA;
+                # length=max_n_committed_hca for HCA) and fixed-shape gathered
+                # KV (length=max_n_committed[ratio]); the layout below mirrors
+                # those constants for decode (start_pos>0). Prefill keeps the
+                # variable-shape formulas because prefill is NOT captured (capture
+                # is decode-only — see model_runner.py routing).
                 if ratio == 4:
-                    compress_topk = min(self.index_topk, end_pos // ratio)
                     if start_pos == 0:
+                        compress_topk = min(self.index_topk, end_pos // ratio)
                         kv_len = token_num + n_compress
                     else:
-                        kv_len = self.window_size + end_pos // ratio
+                        compress_topk = self.index_topk
+                        kv_len = self.window_size + self._max_n_committed_per_ratio[4]
                 elif ratio == 128:
-                    if start_pos > 0:
-                        compress_topk = (start_pos + 1) // ratio
-                    else:
-                        compress_topk = token_num // ratio
                     if start_pos == 0:
+                        compress_topk = token_num // ratio
                         kv_len = token_num + n_compress
                     else:
-                        kv_len = self.window_size + end_pos // ratio
+                        compress_topk = self._max_n_committed_per_ratio[128]
+                        kv_len = self.window_size + self._max_n_committed_per_ratio[128]
                 topk_len = window_topk + compress_topk
                 starts[token_base : token_base + token_num] = np.arange(
                     topk_base,

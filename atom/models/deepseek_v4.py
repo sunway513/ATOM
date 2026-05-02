@@ -1194,6 +1194,55 @@ class Indexer(nn.Module):
         self._idx_compress_capacity = max_compress_rows
         self._idx_write_capacity = max_write_rows
 
+        # P7-r21 site #5a/5b: capture-stable compressed-gather + fixed-K
+        # topk buffers. Sized lazily by the V4 attention builder via
+        # _idx_init_capture_buffers(max_n) after model construction (so we
+        # use the deployment max_model_len, not args.max_seq_len which can be
+        # 1M+). Until called, eager-only path is used (Python-int gather).
+        self._idx_max_n_committed: Optional[int] = None
+        # _idx_ci_template will be a [max_n] long arange register_buffer.
+        self.register_buffer(
+            "_idx_ci_template",
+            torch.zeros(0, dtype=torch.long),  # placeholder — resized by builder
+            persistent=False,
+        )
+
+    def _idx_init_capture_buffers(self, max_n_committed: int) -> None:
+        """P7-r21 site #5a/5b: install capture-stable per-seq gather
+        ci_template + record max_n_committed used for fixed-shape gather +
+        fixed-K topk in Indexer.forward.
+
+        Called by DeepseekV4AttentionMetadataBuilder.build_kv_cache_tensor
+        after binding self.kv_cache (the per-CSA-layer view of the global
+        csa_idx_kv pool). max_n_committed is the deployment-bound
+        max_model_len // compress_ratio (NOT args.max_seq_len, which
+        would over-allocate the kv_sa cat by 256x for a typical 4k
+        deployment).
+
+        Idempotent: re-init with the same / smaller value is a no-op (the
+        existing template is already large enough). Re-init with a LARGER
+        value re-allocates.
+        """
+        assert max_n_committed > 0, max_n_committed
+        cur = self._idx_max_n_committed
+        if cur is not None and cur >= max_n_committed:
+            return
+        self._idx_max_n_committed = max_n_committed
+        # Move to the same device as the bound kv_cache (set by builder
+        # right before this call). Falls back to CPU when kv_cache is the
+        # warmup placeholder.
+        device = (
+            self.kv_cache.device
+            if isinstance(self.kv_cache, torch.Tensor)
+            else torch.device("cpu")
+        )
+        ci = torch.arange(max_n_committed, dtype=torch.long, device=device)
+        # register_buffer overwrite: drop the old buffer + register fresh.
+        # Using setattr directly so DDP / state_dict do not try to load the
+        # old shape from a checkpoint (we marked persistent=False above).
+        del self._buffers["_idx_ci_template"]
+        self.register_buffer("_idx_ci_template", ci, persistent=False)
+
     def _build_bs1_compress_plan(
         self,
         token_num: int,
@@ -1289,6 +1338,7 @@ class Indexer(nn.Module):
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
         start_pos: Optional[int] = None,
+        start_pos_t: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute sparse top-k indices over the indexer's compressed KV cache.
 
@@ -1384,41 +1434,109 @@ class Indexer(nn.Module):
         ).unsqueeze(0)
 
         # ----- Index score -----
-        # PR3-main: gather committed compressed Indexer entries from the
-        # per-seq block_table (passed in by the caller). During warmup
-        # block_table is None, so we return a zeros placeholder — the
-        # resulting topk_idxs are discarded by the warmup forward path anyway.
-        n_committed = end_pos // ratio
-        if block_table is not None and not _v4_is_dummy_run() and n_committed > 0:
+        # P7-r21 site #5a/5b: capture-stable compressed gather + fixed-K topk.
+        # Old code baked Python-int n_committed into a per-fwd torch.arange
+        # AND used variable-K topk; both froze at warmup-time values (=0)
+        # under cudagraph capture, so replays gathered an empty pool and
+        # ranked an empty score tensor -> garbage downstream.
+        #
+        # New code (when builder has installed _idx_ci_template):
+        #   1) gather is _v4_gather_compressed_batched_single with fixed
+        #      max_n_committed shape and runtime n_committed_t mask. Pad rows
+        #      are zero (entries * valid).
+        #   2) topk K is FIXED = self.index_topk; columns past the live
+        #      n_committed are -inf-masked so topk skips them; trailing
+        #      topk_idxs entries that point at invalid columns get marked -1.
+        # Eager fallback (when _idx_max_n_committed is None — model not yet
+        # bound by builder, e.g. during smoke unit tests) keeps the legacy
+        # Python-int path. Eager does not capture so it remains correct.
+        max_n = self._idx_max_n_committed
+        capture_path = max_n is not None
+        if capture_path and block_table is not None and not _v4_is_dummy_run():
             k_per_block = _V4_BLOCK_SIZE // ratio
-            gathered = _v4_gather_compressed(
-                self.kv_cache, block_table, n_committed, k_per_block
-            ).unsqueeze(
-                0
-            )  # [1, n_committed, head_dim]
-        else:
-            gathered = torch.zeros(
-                1, n_committed, self.head_dim, dtype=q.dtype, device=q.device
+            # n_committed_t: derive from start_pos_t when caller supplied a
+            # GPU view (capture path); else from Python int (eager-but-still-
+            # capture-stable, just with one .item-free GPU op).
+            if start_pos_t is not None:
+                n_committed_t = (start_pos_t.long() + token_num) // ratio
+            else:
+                n_committed_t = torch.tensor(
+                    [end_pos // ratio], dtype=torch.long, device=x.device
+                )
+            gathered, valid = _v4_gather_compressed_batched_single(
+                self.kv_cache,
+                block_table,
+                n_committed_t,
+                max_n,
+                k_per_block,
+                self._idx_ci_template,
             )
+            # gathered: [1, max_n, head_dim] (pad rows zeroed by valid mask)
+            gathered = gathered.to(q.dtype)
+            valid_n = valid  # [1, max_n] bool
+            n_cols = max_n
+        else:
+            n_committed = end_pos // ratio
+            if block_table is not None and not _v4_is_dummy_run() and n_committed > 0:
+                k_per_block = _V4_BLOCK_SIZE // ratio
+                gathered = _v4_gather_compressed(
+                    self.kv_cache, block_table, n_committed, k_per_block
+                ).unsqueeze(0)
+            else:
+                gathered = torch.zeros(
+                    1, n_committed, self.head_dim, dtype=q.dtype, device=q.device
+                )
+            valid_n = None
+            n_cols = n_committed
         index_score = torch.einsum("bshd,btd->bsht", q, gathered)
         index_score = (index_score.relu_() * weights.unsqueeze(-1)).sum(dim=2)
+        if valid_n is not None:
+            # Mask invalid columns to a very negative score so topk skips them.
+            neg_large = torch.finfo(index_score.dtype).min
+            index_score = torch.where(valid_n.unsqueeze(1), index_score, neg_large)
 
         # ----- Top-k selection over compressed positions -----
         if start_pos == 0:
-            mask = (
-                torch.arange(token_num // ratio, device=x.device).repeat(token_num, 1)
-                >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1) // ratio
+            # Prefill: causal mask over the (live) n_cols columns. n_cols
+            # depends on start_pos==0 token_num so this remains shape-stable
+            # across captures only because capture is decode-only (start_pos>0).
+            cols = n_cols if not capture_path else max_n
+            row = torch.arange(cols, device=x.device)
+            row_t = (
+                torch.arange(1, token_num + 1, device=x.device).unsqueeze(1) // ratio
             )
+            mask = row.unsqueeze(0) >= row_t  # [token_num, cols]
             index_score = index_score + torch.where(mask, float("-inf"), 0.0)
-        topk_idxs = index_score.topk(min(self.index_topk, end_pos // ratio), dim=-1)[1]
-        if start_pos == 0:
-            mask = (
-                topk_idxs
-                >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1) // ratio
-            )
-            topk_idxs = torch.where(mask, -1, topk_idxs + offset)
+        if capture_path:
+            # Fixed-K topk: K is a Python int constant across captures.
+            topk_K = self.index_topk
         else:
-            topk_idxs = topk_idxs + offset
+            topk_K = min(self.index_topk, n_cols)
+        topk_idxs = index_score.topk(topk_K, dim=-1)[1]
+        if capture_path:
+            # Mark trailing topk entries that landed on invalid (>= n_committed)
+            # columns as -1 so sparse_attn skips them (kernel honours -1).
+            n_committed_b = n_committed_t.to(topk_idxs.device).long()
+            invalid = topk_idxs >= n_committed_b.view(1, 1, 1)
+            if start_pos == 0:
+                row_t2 = (
+                    torch.arange(1, token_num + 1, device=x.device).unsqueeze(1)
+                    // ratio
+                )
+                future = topk_idxs >= row_t2
+                topk_idxs = torch.where(future | invalid, -1, topk_idxs + offset)
+            else:
+                topk_idxs = torch.where(invalid, -1, topk_idxs + offset)
+        else:
+            if start_pos == 0:
+                fmask = (
+                    topk_idxs
+                    >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1)
+                    // ratio
+                )
+                topk_idxs = torch.where(fmask, -1, topk_idxs + offset)
+            else:
+                topk_idxs = topk_idxs + offset
         return topk_idxs
 
 
@@ -1582,6 +1700,32 @@ class DeepseekV4Attention(nn.Module):
             )
         self.register_buffer("_v4_topk_short", topk_short, persistent=False)
         self.register_buffer("_v4_topk_ring", topk_ring, persistent=False)
+
+        # P7-r21 site #5c: capture-stable per-seq compressed-gather buffers
+        # for V4Attention's outer Compressor.kv_cache lookup. Sized lazily by
+        # the V4 attention builder via _v4_init_capture_buffers(max_n) after
+        # binding (so we use deployment max_model_len // ratio, not the giant
+        # args.max_seq_len). Until called, eager-only path runs.
+        self._v4_max_n_committed: Optional[int] = None
+        # _v4_ci_template will be a [max_n] long arange register_buffer.
+        self.register_buffer(
+            "_v4_ci_template",
+            torch.zeros(0, dtype=torch.long),  # placeholder — resized by builder
+            persistent=False,
+        )
+        # P7-r21 site #5c (HCA decode): pre-built padded topk lookup table for
+        # HCA layers (compress_ratio==128). _get_compress_topk_idxs decode
+        # branch is Python-int driven (returns variable-shape arange) which
+        # capture bakes at warmup. The table is shape [max_n_hca + 1, max_n_hca]
+        # int32, sentinel-padded with -1; row n_committed gets index_select-ed.
+        # Allocated lazily by _v4_init_capture_buffers (depends on max_n).
+        # For non-HCA layers (ratio==4 or ratio==0) the table is unused.
+        self.register_buffer(
+            "_v4_hca_topk_table",
+            torch.zeros(0, dtype=torch.int32),  # placeholder
+            persistent=False,
+        )
+
         # Classical KV cache (paper §3.6.1) lives entirely in the global
         # `csa_main_kv` / `hca_main_kv` pool (allocated by the V4 attention
         # builder as `[num_blocks, n_layers, k_per_block, head_dim]`).
@@ -1611,6 +1755,44 @@ class DeepseekV4Attention(nn.Module):
             beta_slow=args.beta_slow,
             dtype=torch.bfloat16,
         )
+
+    def _v4_init_capture_buffers(self, max_n_committed: int) -> None:
+        """P7-r21 site #5c: install capture-stable per-seq compressed-gather
+        ci_template + record max_n_committed used for fixed-shape gather in
+        V4Attention.forward and (for HCA layers) the padded topk lookup
+        table consumed by the decode topk branch.
+
+        Called by DeepseekV4AttentionMetadataBuilder.build_kv_cache_tensor
+        after binding self.swa_kv. max_n_committed is the deployment-bound
+        max_model_len // compress_ratio.
+
+        Idempotent: re-init with the same / smaller value is a no-op.
+        """
+        assert max_n_committed > 0, max_n_committed
+        cur = self._v4_max_n_committed
+        if cur is not None and cur >= max_n_committed:
+            return
+        self._v4_max_n_committed = max_n_committed
+        # Use the swa_kv device (bound to the per_req_cache pool slice on
+        # the model_runner.device by the time this runs).
+        device = (
+            self.swa_kv.device
+            if isinstance(self.swa_kv, torch.Tensor)
+            else torch.device("cpu")
+        )
+        ci = torch.arange(max_n_committed, dtype=torch.long, device=device)
+        del self._buffers["_v4_ci_template"]
+        self.register_buffer("_v4_ci_template", ci, persistent=False)
+        # HCA decode topk lookup table: only meaningful for ratio==128
+        # layers; ratio==4 still routes through the Indexer path.
+        if self.compress_ratio == 128:
+            table = _v4_build_hca_decode_topk_table(
+                max_seq_len=max_n_committed * self.compress_ratio,
+                ratio=self.compress_ratio,
+                device=device,
+            )
+            del self._buffers["_v4_hca_topk_table"]
+            self.register_buffer("_v4_hca_topk_table", table, persistent=False)
 
     def process_weights_after_loading(self) -> None:
         """Dequant wo_a (FP8 + e8m0 block scale) → BF16 in place.
@@ -1857,6 +2039,11 @@ class DeepseekV4Attention(nn.Module):
         # alias gated additionally by indexer presence (preserves Step C
         # contract for compress_ratio=128 layers without indexer).
         attn_slots_t: Optional[torch.Tensor] = None
+        # P7-r21 site #5a/5c: also hoist the per-seq start_pos GPU view so the
+        # captured Indexer.forward / V4Attention compressed-gather can derive
+        # n_committed_t as a GPU op (start_pos_t + token_num) // ratio. Source
+        # is attn_md.v4_per_seq_start_pos_t (pinned by builder per SOP-6).
+        attn_start_pos_t: Optional[torch.Tensor] = None
         if num_seqs > 0 and attn_md is not None and not _v4_is_dummy_run():
             candidate = getattr(attn_md, "v4_per_seq_slots_t", None)
             if (
@@ -1866,6 +2053,14 @@ class DeepseekV4Attention(nn.Module):
                 and candidate.numel() >= num_seqs
             ):
                 attn_slots_t = candidate
+            sp_candidate = getattr(attn_md, "v4_per_seq_start_pos_t", None)
+            if (
+                sp_candidate is not None
+                and sp_candidate.is_cuda
+                and sp_candidate.dtype == torch.int32
+                and sp_candidate.numel() >= num_seqs
+            ):
+                attn_start_pos_t = sp_candidate
         indexer_slots_t: Optional[torch.Tensor] = (
             attn_slots_t
             if (
@@ -1919,15 +2114,15 @@ class DeepseekV4Attention(nn.Module):
             )
             if use_decode_lookup:
                 # seq_positions: [1] long. start_pos here equals seq_positions[0].
-                start_pos_t = seq_positions[:1].long()
-                p_mod = start_pos_t % win
+                win_start_pos_t = seq_positions[:1].long()
+                p_mod = win_start_pos_t % win
                 # branch: start_pos < win-1 → short table (use start_pos
                 # directly, capped at win-1 for safety); else ring table
                 # (indexed by p_mod).
-                short_idx = start_pos_t.clamp(max=win - 1)
+                short_idx = win_start_pos_t.clamp(max=win - 1)
                 topk_short_row = self._v4_topk_short.index_select(0, short_idx)
                 topk_ring_row = self._v4_topk_ring.index_select(0, p_mod)
-                is_short = (start_pos_t < (win - 1)).unsqueeze(-1)
+                is_short = (win_start_pos_t < (win - 1)).unsqueeze(-1)
                 # [1, win] — pick row per start_pos branch
                 topk_row = torch.where(is_short, topk_short_row, topk_ring_row)
                 # Bring to [bsz=1, seqlen=1, win] expected by sparse_attn.
@@ -1939,6 +2134,13 @@ class DeepseekV4Attention(nn.Module):
             seq_context_lens = context_lens[seq_idx : seq_idx + 1]
             if self.compress_ratio:
                 offset = seq_kv.size(1) if start_pos == 0 else win
+                # P7-r21: per-seq start_pos GPU view (capture-stable). None
+                # falls through to Python-int path inside indexer / HCA branch.
+                seq_start_pos_t: Optional[torch.Tensor] = (
+                    attn_start_pos_t[seq_idx : seq_idx + 1]
+                    if attn_start_pos_t is not None
+                    else None
+                )
                 if self.indexer is not None:
                     seq_qr = qr[seq_start:seq_end]
                     # P7-r18 TD-3 Step C: pass a 1-elem GPU tensor view of the
@@ -1960,11 +2162,48 @@ class DeepseekV4Attention(nn.Module):
                         block_table=block_table,
                         context_lens=seq_context_lens,
                         start_pos=start_pos,
+                        start_pos_t=seq_start_pos_t,
                     )
                 else:
-                    compress_topk_idxs = _get_compress_topk_idxs(
-                        ratio, 1, token_num, start_pos, offset, device=x.device
+                    # P7-r21 site #5c (HCA decode): use the pre-built padded
+                    # topk lookup table (_v4_hca_topk_table) when available so
+                    # decode topk shape is constant across captures. Falls
+                    # back to legacy Python-int arange for prefill /
+                    # ratio-mismatch / pre-binding paths.
+                    use_hca_table = (
+                        self.compress_ratio == 128
+                        and start_pos > 0
+                        and token_num == 1
+                        and self._v4_max_n_committed is not None
+                        and self._v4_hca_topk_table.numel() > 0
                     )
+                    if use_hca_table:
+                        # n_committed = (start_pos + 1) // ratio. Use GPU view
+                        # when available (capture-stable); else Python int (eager).
+                        if seq_start_pos_t is not None:
+                            n_committed_idx = (
+                                seq_start_pos_t.long() + 1
+                            ) // self.compress_ratio
+                        else:
+                            n_committed_idx = torch.tensor(
+                                [(start_pos + 1) // self.compress_ratio],
+                                dtype=torch.long,
+                                device=x.device,
+                            )
+                        # _v4_hca_topk_table[n] = arange-padded; add offset
+                        # (only for valid entries; -1 sentinels stay -1).
+                        row = self._v4_hca_topk_table.index_select(
+                            0, n_committed_idx
+                        )  # [1, max_n_hca] int32
+                        valid = row >= 0
+                        row_with_off = torch.where(valid, row + offset, row)
+                        compress_topk_idxs = row_with_off.unsqueeze(
+                            0
+                        )  # [1,1,max_n_hca]
+                    else:
+                        compress_topk_idxs = _get_compress_topk_idxs(
+                            ratio, 1, token_num, start_pos, offset, device=x.device
+                        )
                 topk_idxs = torch.cat([topk_idxs, compress_topk_idxs], dim=-1)
             topk_idxs = topk_idxs.int()
 
@@ -2038,27 +2277,62 @@ class DeepseekV4Attention(nn.Module):
                 else:
                     swa_window = self.swa_kv[slot : slot + 1]
                 if self.compress_ratio:
-                    # sparse_attn input layout: [SWA window || compressed
-                    # entries gathered from block-table]. n_committed counts
-                    # all boundaries up to and including this fwd's window
-                    # (end_pos // ratio) — generalizes the single-token decode
-                    # formula to MTP-N where multiple boundaries may commit.
-                    n_committed = end_pos // ratio
+                    # P7-r21 site #5c: capture-stable kv_sa cat using fixed
+                    # max_n_committed gather. Old code used Python-int
+                    # n_committed -> _v4_gather_compressed -> torch.arange(int)
+                    # which baked arange(0) at warmup. New code uses the
+                    # batched_single helper with a constant max_n_committed,
+                    # an _v4_ci_template, and a runtime n_committed_t mask;
+                    # pad rows are zero (entries * valid). The kv_sa cat
+                    # shape is therefore [1, win + max_n, head_dim] every
+                    # replay, matching the topk_lens / kv_offsets layout
+                    # produced by site #5d.
+                    capture_path = self._v4_max_n_committed is not None
                     if (
-                        block_table is not None
+                        capture_path
+                        and block_table is not None
                         and not _v4_is_dummy_run()
-                        and n_committed > 0
                     ):
+                        max_n = self._v4_max_n_committed
+                        if seq_start_pos_t is not None:
+                            n_committed_t = (
+                                seq_start_pos_t.long() + token_num
+                            ) // ratio
+                        else:
+                            n_committed_t = torch.tensor(
+                                [end_pos // ratio],
+                                dtype=torch.long,
+                                device=x.device,
+                            )
                         k_per_block = _V4_BLOCK_SIZE // ratio
-                        gathered = _v4_gather_compressed(
+                        gathered, _valid = _v4_gather_compressed_batched_single(
                             self.compressor.kv_cache,
                             block_table,
-                            n_committed,
+                            n_committed_t,
+                            max_n,
                             k_per_block,
-                        ).unsqueeze(0)
+                            self._v4_ci_template,
+                        )
+                        # gathered: [1, max_n, head_dim] (pad rows zeroed by valid mask)
                         kv_sa = torch.cat([swa_window, gathered], dim=1)
                     else:
-                        kv_sa = swa_window
+                        # Eager fallback: legacy Python-int gather.
+                        n_committed = end_pos // ratio
+                        if (
+                            block_table is not None
+                            and not _v4_is_dummy_run()
+                            and n_committed > 0
+                        ):
+                            k_per_block = _V4_BLOCK_SIZE // ratio
+                            gathered = _v4_gather_compressed(
+                                self.compressor.kv_cache,
+                                block_table,
+                                n_committed,
+                                k_per_block,
+                            ).unsqueeze(0)
+                            kv_sa = torch.cat([swa_window, gathered], dim=1)
+                        else:
+                            kv_sa = swa_window
                 else:
                     kv_sa = swa_window
 
