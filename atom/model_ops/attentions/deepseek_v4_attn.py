@@ -154,6 +154,15 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             model_runner.forward_vars["state_slot_mapping"] = CpuGpuBuffer(
                 max_bs, dtype=torch.int32, device=model_runner.device
             )
+        # P7-r18 TD-3 Step A: stable per-seq start_pos GPU buffer for tensor-driven
+        # Indexer capture. Pinned-CPU staging via CpuGpuBuffer satisfies SOP-6
+        # (ROCm capture-stream H2D requires pinned source). Address is stable
+        # across capture+replay so the captured `_idx_state_slot_buf.copy_(view)`
+        # node reads the per-replay value when V4Attention slices `[i:i+1]`.
+        if "v4_per_seq_start_pos" not in model_runner.forward_vars:
+            model_runner.forward_vars["v4_per_seq_start_pos"] = CpuGpuBuffer(
+                max_bs, dtype=torch.int32, device=model_runner.device
+            )
 
     # ------------------------------------------------------------------ #
     # AttentionMetadataBuilder hooks (per-request cache abstraction).    #
@@ -538,6 +547,19 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         attn_metadata.start_pos_per_seq_cpu = positions_np[
             cu_seqlens_q_np[:scheduled_bs]
         ]
+        # P7-r18 TD-3 Step A: pinned GPU per-seq tensor views consumed by
+        # V4Attention.forward to thread per-replay slot/start_pos into the
+        # captured Indexer call (replaces Python-int slot/start_pos that get
+        # baked into captured `_idx_state_slot_buf.fill_(int)` at warmup time).
+        # `state_slot_mapping` GPU buffer (already pinned in __init__) is
+        # aliased; `v4_per_seq_start_pos` is freshly populated.
+        attn_metadata.v4_per_seq_slots_t = state_slot_gpu
+        var["v4_per_seq_start_pos"].np[
+            :scheduled_bs
+        ] = attn_metadata.start_pos_per_seq_cpu
+        attn_metadata.v4_per_seq_start_pos_t = var["v4_per_seq_start_pos"].copy_to_gpu(
+            scheduled_bs
+        )
         # Compress plans (per ratio) for batched fused_compress + update_states.
         # Decode batch: extend_lens = max_seqlen_q for all seqs (uniform).
         # `context_lens_np` is post-extend (from batch.context_lens, set by
@@ -592,6 +614,17 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         attn_metadata.start_pos_per_seq_cpu = positions_np[
             cu_seqlens_q_np[:scheduled_bs]
         ]
+        # P7-r18 TD-3 Step A: pinned GPU per-seq tensor views (see prepare_decode
+        # for full rationale). Prefill capture is not currently wired but the
+        # mirror keeps prefill / decode metadata symmetric for future
+        # prefill-cudagraph work.
+        attn_metadata.v4_per_seq_slots_t = state_slot_gpu
+        var["v4_per_seq_start_pos"].np[
+            :scheduled_bs
+        ] = attn_metadata.start_pos_per_seq_cpu
+        attn_metadata.v4_per_seq_start_pos_t = var["v4_per_seq_start_pos"].copy_to_gpu(
+            scheduled_bs
+        )
         # Compress plans (per ratio) for batched fused_compress + update_states.
         # Prefill batch: extend_lens read from cu_seqlens_q_np.
         # Must run BEFORE `_attach_sparse_layout_metadata` (sparse layout
@@ -749,6 +782,17 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         metadata.cu_seqlens_q_cpu = cu_seqlens_q_np
         metadata.state_slot_mapping_cpu = state_slot_np
         metadata.start_pos_per_seq_cpu = np.ones(bs, dtype=np.int32)
+        # P7-r18 TD-3 Step A: capture-warmup sentinel per-seq tensor views.
+        # `v4_per_seq_slots_t` aliases the pinned `state_slot_mapping` GPU
+        # buffer (= arange(bs) sentinel). `v4_per_seq_start_pos_t` is a fresh
+        # write into the pinned `v4_per_seq_start_pos` forward_var (= ones(bs)
+        # sentinel matching `start_pos_per_seq_cpu`). At replay these buffer
+        # addresses are stable; `prepare_decode` writes live values into the
+        # SAME addresses so the captured 1-elem `[i:i+1]` view in
+        # `V4Attention.forward` reads per-replay slot/start_pos.
+        metadata.v4_per_seq_slots_t = state_slot_gpu
+        var["v4_per_seq_start_pos"].np[:bs] = metadata.start_pos_per_seq_cpu
+        metadata.v4_per_seq_start_pos_t = var["v4_per_seq_start_pos"].copy_to_gpu(bs)
         # P7-r17 TD-1: build per-ratio CompressPlans and per-token sparse-attn
         # layouts for the capture warmup. Without these, V4Attention.forward
         # crashes at line 1799 (`sparse_layouts[self.compress_ratio]`) because
