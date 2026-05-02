@@ -263,3 +263,230 @@ class TestStepCV4AttentionSlotDispatch:
         slots_t_consumed = getattr(md, "v4_per_seq_slots_t", None)
         assert slots_t_consumed is not None
         assert slots_t_consumed.tolist() == [1, 2, 3]
+
+
+# ── r19b unit tests ────────────────────────────────────────────────────────
+
+
+class TestR19bAttnSlotsHoist:
+    """r19b: hoist a general `attn_slots_t` (independent of indexer presence)
+    so SWA-only and HCA-only layers also benefit from capture-safe slot
+    threading. `indexer_slots_t` becomes a derived alias gated by indexer
+    presence (preserves Step C behavior on CSA layers)."""
+
+    @staticmethod
+    def _select_attn_slots(
+        candidate, num_seqs, attn_md_present, is_dummy_run, dtype, is_cuda
+    ):
+        """Mirrors the r19b master `attn_slots_t` selection branch."""
+        if not (num_seqs > 0 and attn_md_present and not is_dummy_run):
+            return None
+        if candidate is None:
+            return None
+        if not (is_cuda and dtype == torch.int32 and candidate.numel() >= num_seqs):
+            return None
+        return candidate
+
+    @staticmethod
+    def _derive_indexer_slots(attn_slots_t, compress_ratio, has_indexer):
+        return (
+            attn_slots_t
+            if (attn_slots_t is not None and compress_ratio and has_indexer)
+            else None
+        )
+
+    def test_attn_slots_set_for_swa_only_layer(self):
+        """SWA-only layer (compress_ratio=0, no indexer): attn_slots_t MUST
+        still be populated so the SWA write/read sites get the capture-safe
+        path. indexer_slots_t MUST be None (no indexer to feed)."""
+        slots = torch.tensor([3, 7, 11], dtype=torch.int32)
+        attn = self._select_attn_slots(
+            slots,
+            num_seqs=3,
+            attn_md_present=True,
+            is_dummy_run=False,
+            dtype=torch.int32,
+            is_cuda=True,
+        )
+        idx = self._derive_indexer_slots(attn, compress_ratio=0, has_indexer=False)
+        assert attn is slots
+        assert idx is None
+
+    def test_attn_slots_set_for_csa_layer_with_indexer(self):
+        """CSA layer (compress_ratio=4, indexer): both attn_slots_t AND
+        indexer_slots_t alias the same parent — slicing them per-seq must
+        return identical views."""
+        slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        attn = self._select_attn_slots(
+            slots,
+            num_seqs=4,
+            attn_md_present=True,
+            is_dummy_run=False,
+            dtype=torch.int32,
+            is_cuda=True,
+        )
+        idx = self._derive_indexer_slots(attn, compress_ratio=4, has_indexer=True)
+        assert attn is slots and idx is slots
+        for i in range(4):
+            assert attn[i : i + 1].data_ptr() == idx[i : i + 1].data_ptr()
+
+    def test_dummy_run_disables_both(self):
+        """Warmup / dummy run: neither attn_slots_t nor indexer_slots_t is
+        populated — both forwards must fall back to Python-int paths so
+        warmup (which uses sentinel slot=0) doesn't crash on shape mismatches."""
+        slots = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        attn = self._select_attn_slots(
+            slots,
+            num_seqs=4,
+            attn_md_present=True,
+            is_dummy_run=True,
+            dtype=torch.int32,
+            is_cuda=True,
+        )
+        idx = self._derive_indexer_slots(attn, compress_ratio=4, has_indexer=True)
+        assert attn is None and idx is None
+
+    def test_undersized_metadata_disables_path(self):
+        """Defensive: if the metadata tensor has fewer rows than num_seqs
+        (should not happen but guard against builder bugs), fall back to
+        Python-int. This prevents OOB index_select / silent index wrap."""
+        slots = torch.tensor([0, 1], dtype=torch.int32)  # only 2 rows
+        attn = self._select_attn_slots(
+            slots,
+            num_seqs=4,
+            attn_md_present=True,
+            is_dummy_run=False,
+            dtype=torch.int32,
+            is_cuda=True,
+        )
+        assert attn is None
+
+    def test_wrong_dtype_disables_path(self):
+        """Defensive: wrong dtype → fall back. The Triton kernels require
+        int32 slot tensors; int64 would silently misindex."""
+        slots = torch.tensor([0, 1, 2, 3], dtype=torch.int64)
+        attn = self._select_attn_slots(
+            slots,
+            num_seqs=4,
+            attn_md_present=True,
+            is_dummy_run=False,
+            dtype=torch.int64,
+            is_cuda=True,
+        )
+        assert attn is None
+
+
+class TestR19bSwaWriteCapturePath:
+    """r19b: SWA decode write at line ~1932 — must use the `swa_write` Triton
+    kernel (capture-safe) when attn_slots_t is available. This is mirrored
+    by a pure-PyTorch reference for hermetic CPU testing of the math."""
+
+    @staticmethod
+    def _swa_write_ref(seq_kv, seq_positions, slot_view, swa_kv, win):
+        """Pure-PyTorch equivalent of the r19b capture-path branch.
+
+        Writes `swa_kv[slot, pos[t] % win, :] = seq_kv_flat[t, :]` for every
+        token t in seq_positions. Mirrors `swa_write_reference` in
+        atom/model_ops/v4_kernels/state_writes.py."""
+        token_num = seq_positions.shape[0]
+        seq_kv_flat = seq_kv.squeeze(0).contiguous()  # [token_num, head_dim]
+        slot_per_token = slot_view.expand(token_num)  # [token_num]
+        ring_idx = seq_positions % win
+        swa_kv[slot_per_token.long(), ring_idx.long()] = seq_kv_flat
+
+    def test_decode_write_lands_in_correct_ring_slot(self):
+        """Decode token_num=1: write must land at swa_kv[live_slot, pos%win]."""
+        win = 8
+        head_dim = 4
+        num_slots = 4
+        swa_kv = torch.zeros(num_slots, win, head_dim)
+        slots_t = torch.tensor([0, 5, 11, 7], dtype=torch.int32).clamp(
+            max=num_slots - 1
+        )
+        # seq_idx=2 → live slot = clamped to slots_t[2]=2 (clamp due to test
+        # buffer size; in real V4 the slot range is bounded by num_slots).
+        seq_idx = 2
+        slot_view = slots_t[seq_idx : seq_idx + 1]
+        live_slot = int(slot_view.item())
+        seq_positions = torch.tensor([13], dtype=torch.int64)  # decode pos
+        seq_kv = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])  # [1, 1, head_dim]
+        self._swa_write_ref(seq_kv, seq_positions, slot_view, swa_kv, win)
+        assert swa_kv[live_slot, 13 % win].tolist() == [1.0, 2.0, 3.0, 4.0]
+        # Other slots unchanged.
+        for s in range(num_slots):
+            if s != live_slot:
+                assert swa_kv[s].abs().sum().item() == 0.0
+
+    def test_per_seq_replay_invariant_via_slot_view(self):
+        """Capture-replay invariant: a captured swa_write op records the
+        slot_view's parent pointer + offset. At replay, the parent buffer is
+        updated by prepare_decode → the same captured op writes to the new
+        slot. Mirrored hermetically by mutating the parent before the second
+        write call."""
+        win = 4
+        head_dim = 2
+        num_slots = 4
+        swa_kv = torch.zeros(num_slots, win, head_dim)
+        slots_t = torch.tensor([0, 0, 0, 0], dtype=torch.int32)
+        slot_view = slots_t[1:2]
+        seq_positions = torch.tensor([1], dtype=torch.int64)
+
+        # First "replay": parent[1]=0 → write to swa_kv[0, 1].
+        seq_kv = torch.tensor([[[1.0, 1.0]]])
+        self._swa_write_ref(seq_kv, seq_positions, slot_view, swa_kv, win)
+        assert swa_kv[0, 1].tolist() == [1.0, 1.0]
+        # Second "replay" with parent mutated to slot=2.
+        slots_t[1] = 2
+        seq_kv2 = torch.tensor([[[7.0, 7.0]]])
+        self._swa_write_ref(seq_kv2, seq_positions, slot_view, swa_kv, win)
+        assert swa_kv[2, 1].tolist() == [7.0, 7.0]
+        # Original write still visible at swa_kv[0, 1] (ring not corrupted).
+        assert swa_kv[0, 1].tolist() == [1.0, 1.0]
+
+
+class TestR19bKvSaIndexSelect:
+    """r19b: kv_sa SWA-window read at lines ~1968/1971/1973 — must use
+    `index_select(0, slot_view)` instead of `swa_kv[slot:slot+1]` (Python-int
+    bake). Verify shape and per-replay invariant."""
+
+    def test_index_select_shape_matches_slice(self):
+        """`swa_kv.index_select(0, slot_view)` returns shape `[1, n_win,
+        head_dim]` — IDENTICAL to legacy `swa_kv[slot:slot+1]`. Drop-in
+        replacement (no downstream concat shape adjustment needed)."""
+        win = 8
+        head_dim = 4
+        num_slots = 4
+        swa_kv = torch.arange(num_slots * win * head_dim, dtype=torch.float32).reshape(
+            num_slots, win, head_dim
+        )
+        slots_t = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        seq_idx = 2
+        legacy = swa_kv[seq_idx : seq_idx + 1]
+        new = swa_kv.index_select(0, slots_t[seq_idx : seq_idx + 1].long())
+        assert legacy.shape == new.shape == (1, win, head_dim)
+        assert torch.equal(legacy, new)
+
+    def test_index_select_per_replay_invariant(self):
+        """Mutate the parent slots_t between two index_select calls — the
+        second call MUST read the new slot (capture replay simulation)."""
+        # Hardcoded swa_kv: shape [num_slots=4, win=2, head_dim=1].
+        swa_kv = torch.tensor(
+            [[[10.0], [11.0]], [[20.0], [21.0]], [[30.0], [31.0]], [[40.0], [41.0]]]
+        )
+        slots_t = torch.tensor([0, 1, 0, 0], dtype=torch.int32)
+        slot_view = slots_t[1:2]
+        first = swa_kv.index_select(0, slot_view.long())
+        assert first[0].tolist() == [[20.0], [21.0]]  # slot=1 row
+        slots_t[1] = 3
+        second = swa_kv.index_select(0, slot_view.long())
+        assert second[0].tolist() == [[40.0], [41.0]]  # slot=3 row (live value)
+
+    def test_index_select_int32_to_long_cast(self):
+        """`swa_kv.index_select` requires long index. `attn_slots_t` is
+        int32; the .long() cast is necessary. Verify the cast preserves
+        value semantics for all valid slot ranges."""
+        slots_t = torch.tensor([0, 5, 11, 17, 31], dtype=torch.int32)
+        for i in range(slots_t.numel()):
+            v_int32 = int(slots_t[i].item())
+            v_long = int(slots_t[i : i + 1].long().item())
+            assert v_int32 == v_long

@@ -1793,14 +1793,22 @@ class DeepseekV4Attention(nn.Module):
         # destination), AND (b) the metadata tensor has at least `num_seqs`
         # rows. Otherwise fall back to the Python-int `slot` (Step B's
         # `fill_(int)` branch — capture isn't recorded under dummy run).
-        indexer_slots_t: Optional[torch.Tensor] = None
-        if (
-            self.compress_ratio
-            and self.indexer is not None
-            and num_seqs > 0
-            and attn_md is not None
-            and not _v4_is_dummy_run()
-        ):
+        # P7-r19b: generalize the Step-C tensor-slot hoist to ALL layers
+        # (CSA + HCA + SWA-only). Capture-baked Python-int slot was leaking
+        # into THREE distinct sites:
+        #   (1) Indexer.forward dispatch (Step C — fixed in r18 d458644)
+        #   (2) `swa_kv[slot:slot+1, ring_pos] = seq_kv` decode write at line ~1932
+        #   (3) `swa_kv[slot:slot+1]` kv_sa cat reads at lines ~1968/1971/1973
+        # The fix replaces (2) with `swa_write` Triton kernel call (already
+        # capture-safe; takes per-token GPU slot tensor) and (3) with
+        # `index_select(0, slot_view)` (records a captured GPU gather whose
+        # source pointer is the live `state_slot_mapping` buffer).
+        #
+        # `attn_slots_t` is the master GPU view; `indexer_slots_t` is its
+        # alias gated additionally by indexer presence (preserves Step C
+        # contract for compress_ratio=128 layers without indexer).
+        attn_slots_t: Optional[torch.Tensor] = None
+        if num_seqs > 0 and attn_md is not None and not _v4_is_dummy_run():
             candidate = getattr(attn_md, "v4_per_seq_slots_t", None)
             if (
                 candidate is not None
@@ -1808,7 +1816,16 @@ class DeepseekV4Attention(nn.Module):
                 and candidate.dtype == torch.int32
                 and candidate.numel() >= num_seqs
             ):
-                indexer_slots_t = candidate
+                attn_slots_t = candidate
+        indexer_slots_t: Optional[torch.Tensor] = (
+            attn_slots_t
+            if (
+                attn_slots_t is not None
+                and self.compress_ratio
+                and self.indexer is not None
+            )
+            else None
+        )
 
         sparse_kvs = []
         sparse_topks = []
@@ -1929,7 +1946,22 @@ class DeepseekV4Attention(nn.Module):
                         self.swa_kv[slot : slot + 1, :cutoff],
                     ) = seq_kv[:, -win:].split([win - cutoff, cutoff], dim=1)
             else:
-                self.swa_kv[slot : slot + 1, start_pos % win] = seq_kv.squeeze(1)
+                # Decode SWA write: `swa_kv[slot, start_pos % win] = seq_kv`.
+                # P7-r19b: when the per-seq GPU slot tensor view is available
+                # (capture path), route through the existing `swa_write` Triton
+                # kernel (capture-safe; reads slot+pos from GPU tensors at
+                # replay). Falls back to legacy slice-assign for eager / non-V4.
+                if attn_slots_t is not None:
+                    seq_kv_flat = seq_kv.squeeze(0).contiguous()
+                    swa_write(
+                        seq_kv_flat,
+                        seq_positions,
+                        attn_slots_t[seq_idx : seq_idx + 1].expand(token_num),
+                        self.swa_kv,
+                        win,
+                    )
+                else:
+                    self.swa_kv[slot : slot + 1, start_pos % win] = seq_kv.squeeze(1)
 
             # Compressor was called ONCE batched above (kv_compress_batched
             # holds all seqs' boundaries packed in plan order). Per-seq
@@ -1945,6 +1977,17 @@ class DeepseekV4Attention(nn.Module):
                     if seq_compress.shape[0] > 0:
                         kv_sa = torch.cat([kv_sa, seq_compress.unsqueeze(0)], dim=1)
             else:
+                # P7-r19b: capture-safe SWA window read. `swa_kv[slot:slot+1]`
+                # bakes the Python-int slot at capture time; `index_select(0,
+                # slot_view)` records a captured GPU gather whose source pointer
+                # is the live `state_slot_mapping` buffer view. Returns shape
+                # `[1, n_win, head_dim]` — identical to `swa_kv[slot:slot+1]`.
+                if attn_slots_t is not None:
+                    swa_window = self.swa_kv.index_select(
+                        0, attn_slots_t[seq_idx : seq_idx + 1].long()
+                    )
+                else:
+                    swa_window = self.swa_kv[slot : slot + 1]
                 if self.compress_ratio:
                     # sparse_attn input layout: [SWA window || compressed
                     # entries gathered from block-table]. n_committed counts
@@ -1964,13 +2007,11 @@ class DeepseekV4Attention(nn.Module):
                             n_committed,
                             k_per_block,
                         ).unsqueeze(0)
-                        kv_sa = torch.cat(
-                            [self.swa_kv[slot : slot + 1], gathered], dim=1
-                        )
+                        kv_sa = torch.cat([swa_window, gathered], dim=1)
                     else:
-                        kv_sa = self.swa_kv[slot : slot + 1]
+                        kv_sa = swa_window
                 else:
-                    kv_sa = self.swa_kv[slot : slot + 1]
+                    kv_sa = swa_window
 
             sparse_kvs.append(kv_sa.squeeze(0))
             sparse_topks.append(topk_idxs.reshape(-1))
