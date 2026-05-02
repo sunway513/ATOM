@@ -1778,28 +1778,37 @@ class DeepseekV4Attention(nn.Module):
             )
 
         # P7-r18 TD-3 Step C: hoist the per-seq GPU slot tensor view once
-        # before the loop. Source priority: (1) the Step-A `v4_per_seq_slots_t`
-        # metadata field (always available under V4 dispatch — same storage as
-        # `state_slot_mapping`), (2) fallback to `state_slot_mapping` itself,
-        # (3) None when neither is available (warmup / dummy). Inside the loop
-        # we pass `indexer_slots_t[seq_idx:seq_idx+1]` to `self.indexer(...)`
-        # so the captured `_idx_state_slot_buf.copy_(view)` records a GPU memcpy
+        # before the loop. Source: the Step-A `v4_per_seq_slots_t` metadata
+        # field (always populated by `prepare_decode` / `prepare_prefill` /
+        # `build_for_cudagraph_capture`). Inside the loop we pass
+        # `indexer_slots_t[seq_idx:seq_idx+1]` to `self.indexer(...)` so the
+        # captured `_idx_state_slot_buf.copy_(view)` records a GPU memcpy
         # whose source pointer is `parent.data + i*4` — replay reads the
         # per-replay slot from the live `state_slot_mapping` buffer.
+        #
+        # Gating: tensor-slot path is enabled ONLY when (a) we're not in a
+        # dummy/warmup run (where `prepare_prefill` emits a shape-(0,) slots
+        # tensor for the dummy batch — slicing produces a shape-(0,) view that
+        # `_idx_state_slot_buf.copy_` cannot broadcast onto its shape-(1,)
+        # destination), AND (b) the metadata tensor has at least `num_seqs`
+        # rows. Otherwise fall back to the Python-int `slot` (Step B's
+        # `fill_(int)` branch — capture isn't recorded under dummy run).
         indexer_slots_t: Optional[torch.Tensor] = None
-        if self.compress_ratio and self.indexer is not None and num_seqs > 0:
-            if attn_md is not None:
-                indexer_slots_t = getattr(attn_md, "v4_per_seq_slots_t", None)
-            if indexer_slots_t is None and state_slot_mapping is not None:
-                # `state_slot_mapping` here is the GPU tensor (the warmup-fallback
-                # branch above shadows it with a fresh GPU alloc; that path
-                # never reaches the Indexer because warmup also short-circuits
-                # the per-seq Indexer call via _v4_is_dummy_run()).
-                if (
-                    state_slot_mapping.is_cuda
-                    and state_slot_mapping.dtype == torch.int32
-                ):
-                    indexer_slots_t = state_slot_mapping
+        if (
+            self.compress_ratio
+            and self.indexer is not None
+            and num_seqs > 0
+            and attn_md is not None
+            and not _v4_is_dummy_run()
+        ):
+            candidate = getattr(attn_md, "v4_per_seq_slots_t", None)
+            if (
+                candidate is not None
+                and candidate.is_cuda
+                and candidate.dtype == torch.int32
+                and candidate.numel() >= num_seqs
+            ):
+                indexer_slots_t = candidate
 
         sparse_kvs = []
         sparse_topks = []
