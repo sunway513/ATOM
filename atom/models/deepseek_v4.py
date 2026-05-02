@@ -227,7 +227,12 @@ def _v4_gather_compressed_batched(
     entries = kv_cache[physical_blocks, slot_in_block]
 
     # Mask invalid entries to zero (they'd be garbage from stale block 0).
-    entries = entries * valid.unsqueeze(-1).to(entries.dtype)
+    # P7-r21 hotfix: use torch.where (NaN-safe) instead of multiply: stale
+    # blocks may contain NaN bytes from prior allocations and 0*NaN=NaN
+    # which would propagate through einsum -> softmax -> garbage outputs.
+    # `torch.where` replaces invalid rows with literal zeros regardless of
+    # the original gathered byte pattern.
+    entries = torch.where(valid.unsqueeze(-1), entries, entries.new_zeros(()))
 
     return entries, valid
 
