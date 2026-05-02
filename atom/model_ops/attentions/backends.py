@@ -64,6 +64,14 @@ class AttentionBackend(ABC):
     def get_impl_cls() -> Type["AttentionImpl"]:
         return AttentionImpl
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        # vLLM 0.20+ adds is_ssm() on its AttentionBackend interface so
+        # `_find_non_ssm_backend` can pick a non-SSM backend for KV-cache
+        # block-size selection. ATOM attention backends are never SSM/Mamba,
+        # so always return False. Forward-compatible with vLLM 0.19 (unused).
+        return False
+
 
 class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
