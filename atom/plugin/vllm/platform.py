@@ -88,40 +88,19 @@ if not disable_vllm_plugin:
                 return
 
             DIVISOR = 512
-            # Two-part workaround for the upstream view-meta divisibility regression:
-            #
-            #   (1) keep the *captured* graph sizes restricted to multiples of
-            #       DIVISOR so each captured graph itself is divisibility-safe.
-            #
-            #   (2) make the captured set DENSE across [DIVISOR, max] so vLLM
-            #       can always pad-up a runtime batch to the nearest captured
-            #       bucket and execute the captured (safe) graph, instead of
-            #       falling back to the inductor `compiled_graph_for_general_shape`
-            #       path. The general-shape compiled graph is also poisoned by
-            #       the same view-meta bug, so any runtime batch that escapes
-            #       capture (e.g. an arbitrary 1599-token request) crashes.
-            #       Densely covering up to `max(sizes)` keeps every reasonable
-            #       request inside the captured set.
-            #
-            # Cost: extra capture time at engine startup (one graph per bucket).
-            # Benefit: never reach the broken general-shape path for in-range batches.
-            max_size = max(sizes)
-            dense_safe = list(range(DIVISOR, max_size + 1, DIVISOR))
-            if not dense_safe:
-                dense_safe = [DIVISOR]
+            kept = sorted({s for s in sizes if s % DIVISOR == 0})
+            if not kept:
+                kept = [DIVISOR]
 
-            if dense_safe != list(sizes):
-                cc.cudagraph_capture_sizes = dense_safe
+            if kept != list(sizes):
+                cc.cudagraph_capture_sizes = kept
                 logger.warning(
-                    "ATOM[vllm-0.20-compat]: replaced cudagraph_capture_sizes "
-                    "%d entries (max=%d) with dense %d entries [%d..%d step %d] "
-                    "to avoid the broken inductor general-shape fallback. "
+                    "ATOM[vllm-0.20-compat]: filtered cudagraph_capture_sizes "
+                    "from %d -> %d entries (kept multiples of %d). "
+                    "Workaround for upstream view-meta divisibility regression. "
                     "See https://github.com/sunway513/ATOM/issues/61.",
                     len(sizes),
-                    max_size,
-                    len(dense_safe),
-                    dense_safe[0],
-                    dense_safe[-1],
+                    len(kept),
                     DIVISOR,
                 )
 
