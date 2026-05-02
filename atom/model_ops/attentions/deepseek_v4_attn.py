@@ -393,17 +393,24 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
 
         runner = self.model_runner
 
+        # P7-r21: install capture-stable buffers ONLY when explicitly
+        # opted in via ATOM_V4_R21_CAPTURE_PATH=1. The new path produces
+        # numerically near-equivalent results (mask -> topk -> -1 sentinel)
+        # but small drift was observed vs. the legacy gather (eager gsm8k
+        # 0.55 vs. baseline 0.90 in P7-r21 silicon iter — root cause not
+        # identified within the 1-iter budget; r22 follow-up). Default OFF
+        # keeps eager numerically bit-equivalent to a6efb87. Capture-only
+        # deployments can opt in for cap=[1] decode coherence once the
+        # residual eager drift is fixed.
+        import os as _os
+
+        _r21_enabled = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "0") == "1"
+
         if isinstance(module, _V4Attention):
             # Attention.swa_kv — every layer.
             module.swa_kv = runner.v4_swa_kv[module.layer_id]
-            # P7-r21 site #5c: install capture-stable per-seq compressed
-            # gather buffers (ci_template + max_n_committed) on V4Attention
-            # using the deployment max_model_len // compress_ratio. Done here
-            # (post-bind) instead of __init__ because args.max_seq_len would
-            # over-allocate (V4 max_position_embeddings is ~1M; max_model_len
-            # is the per-server cap, typically 4-128k).
             ratio = module.compress_ratio
-            if ratio in (4, 128):
+            if _r21_enabled and ratio in (4, 128):
                 module._v4_init_capture_buffers(self._max_n_committed_per_ratio[ratio])
             return None
 
@@ -413,10 +420,8 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
             layer_id_from_prefix = int(module.prefix.split(".")[1])
             pos = self.layer_id_to_csa_pos[layer_id_from_prefix]
             module.kv_cache = runner.v4_csa_idx_kv[:, pos]
-            # P7-r21 site #5a/5b: install capture-stable Indexer gather +
-            # topk buffers (ci_template + max_n_committed). Indexer ratio is
-            # always 4 (CSA only).
-            module._idx_init_capture_buffers(self._max_n_committed_per_ratio[4])
+            if _r21_enabled:
+                module._idx_init_capture_buffers(self._max_n_committed_per_ratio[4])
             return None
 
         if isinstance(module, _V4Compressor):
