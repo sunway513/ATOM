@@ -1236,7 +1236,7 @@ class Indexer(nn.Module):
         qr: torch.Tensor,
         positions: torch.Tensor,
         offset: int,
-        slot: int = 0,
+        slot: "int | torch.Tensor" = 0,
         block_table: Optional[torch.Tensor] = None,
         context_lens: Optional[torch.Tensor] = None,
         start_pos: Optional[int] = None,
@@ -1252,6 +1252,13 @@ class Indexer(nn.Module):
             offset: offset added to returned indices to land them in the
                 concatenated (window || compressed) KV layout consumed by sparse_attn.
             slot: per-request state-cache slot — routed to the inner Compressor.
+                P7-r18 TD-3 Step B: accepts EITHER a Python `int` (legacy /
+                eager path; uses `_idx_state_slot_buf.fill_(slot)`) OR a 1-elem
+                int32 GPU `torch.Tensor` view (capture path; uses
+                `_idx_state_slot_buf.copy_(slot)`). The tensor branch records a
+                captured GPU memcpy whose source pointer is a stable GPU
+                buffer view — replay reads the per-replay slot value and
+                writes into the inner Compressor's correct kv_state row.
             block_table: `[max_blocks]` int — physical block IDs for this seq;
                 routed to inner Compressor for scatter and used here for the
                 gather of committed Indexer compressed entries.
@@ -1298,7 +1305,20 @@ class Indexer(nn.Module):
         single_plan = self._build_bs1_compress_plan(
             token_num=token_num, start_pos=start_pos
         )
-        self._idx_state_slot_buf.fill_(slot)
+        # P7-r18 TD-3 Step B: tensor-aware slot ingest. When `slot` is a 1-elem
+        # GPU tensor view (Step C call site `slots_t[i:i+1]`), record a captured
+        # GPU memcpy from the stable `state_slot_mapping` view; replay reads
+        # the per-replay slot. When `slot` is a Python int (eager / non-V4
+        # paths), fall back to the in-place fill (records the int into the
+        # captured graph — only correct under non-capture).
+        if isinstance(slot, torch.Tensor):
+            # `non_blocking=False`: under cudagraph stream capture the flag is
+            # essentially ignored (copy goes onto the capture stream regardless);
+            # spelling it explicitly avoids surprises in eager + gives a clear
+            # readback ordering for unit tests.
+            self._idx_state_slot_buf.copy_(slot, non_blocking=False)
+        else:
+            self._idx_state_slot_buf.fill_(slot)
         single_state_slot = self._idx_state_slot_buf
         single_block_tables = (
             block_table.unsqueeze(0) if block_table is not None else None

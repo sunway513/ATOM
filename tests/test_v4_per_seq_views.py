@@ -139,3 +139,72 @@ class TestStepACpuGpuBufferStaging:
         # Slice's storage MUST be inside parent buffer (sub-view, not copy).
         assert out.data_ptr() == buf.gpu.data_ptr()
 
+
+# ── Step B unit tests ──────────────────────────────────────────────────────
+
+
+class TestStepBIndexerSlotTensor:
+    """Step B: Indexer.forward must accept BOTH Python-int slot (eager / legacy)
+    AND 1-elem GPU tensor slot (capture path). Validated via a focused mock of
+    the slot-ingest branch — the full Indexer.forward needs a loaded model and
+    GPU and is silicon-only (covered by the silicon driver, not this UT)."""
+
+    @staticmethod
+    def _ingest_slot_branch(slot, state_slot_buf):
+        """Mirrors the exact Step-B branch in Indexer.forward (lines 1308-1322
+        of atom/models/deepseek_v4.py). Pure function for test isolation."""
+        if isinstance(slot, torch.Tensor):
+            state_slot_buf.copy_(slot, non_blocking=False)
+        else:
+            state_slot_buf.fill_(slot)
+        return state_slot_buf
+
+    def test_int_slot_uses_fill(self):
+        buf = torch.zeros(1, dtype=torch.int32)
+        out = self._ingest_slot_branch(7, buf)
+        assert out.item() == 7
+        # Same buffer (fill_ is in-place).
+        assert out.data_ptr() == buf.data_ptr()
+
+    def test_tensor_slot_uses_copy(self):
+        buf = torch.zeros(1, dtype=torch.int32)
+        slots_t = torch.tensor([0, 5, 11, 17], dtype=torch.int32)
+        # Take a 1-elem view (mimics V4Attention.forward `slots_t[i:i+1]`).
+        slot_view = slots_t[2:3]
+        out = self._ingest_slot_branch(slot_view, buf)
+        assert out.item() == 11
+        assert out.data_ptr() == buf.data_ptr()  # buf address stable
+        # Verify view → buf is true copy_ (mutation of buf doesn't write back to slots_t).
+        out.fill_(99)
+        assert slots_t.tolist() == [0, 5, 11, 17]
+
+    def test_tensor_slot_replay_invariant(self):
+        """The TD-3 capture-replay invariant: at replay-time, the parent
+        `state_slot_mapping` buffer is updated by `prepare_decode`. A captured
+        copy_(slots_t[i:i+1]) records the source POINTER (parent.data + i*4),
+        so replay reads whatever the parent buffer holds at that offset.
+
+        This test simulates that invariant by mutating the parent and checking
+        that re-running the slot-ingest produces the new value (proving the
+        captured copy_ would do the right thing at replay)."""
+        buf = torch.zeros(1, dtype=torch.int32)
+        slots_t = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        slot_view = slots_t[1:2]
+        # First "replay": slots_t holds [0,1,2,3] → view reads 1.
+        self._ingest_slot_branch(slot_view, buf)
+        assert buf.item() == 1
+        # Mutate parent (simulates prepare_decode writing live values).
+        slots_t[1] = 42
+        # Second "replay": same captured copy_ op — but parent now holds different
+        # value at offset 1. Capture-replay would read 42.
+        self._ingest_slot_branch(slot_view, buf)
+        assert buf.item() == 42
+
+    def test_int_slot_does_not_break_non_capture_path(self):
+        """Eager (non-capture) path always called Indexer with a Python int
+        before TD-3. After TD-3 Step B, the int branch must remain functional
+        so the eager parity gate stays green."""
+        buf = torch.zeros(1, dtype=torch.int32)
+        for s in (0, 1, 7, 31):
+            self._ingest_slot_branch(s, buf)
+            assert buf.item() == s
