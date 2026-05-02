@@ -543,17 +543,34 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
                 # those constants for decode (start_pos>0). Prefill keeps the
                 # variable-shape formulas because prefill is NOT captured (capture
                 # is decode-only — see model_runner.py routing).
+                # P7-r21 site #5d: capture-stable decode topk_len + kv_len
+                # gated on ATOM_V4_R21_CAPTURE_PATH=1 to keep the layout
+                # consistent with the model-side install gating. When OFF
+                # (default), keeps the legacy variable-shape formulas so
+                # eager runs the same code as a6efb87.
+                import os as _os
+
+                _r21_layout = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "0") == "1"
                 if ratio == 4:
-                    if start_pos == 0:
+                    if start_pos == 0 or not _r21_layout:
                         compress_topk = min(self.index_topk, end_pos // ratio)
-                        kv_len = token_num + n_compress
+                        if start_pos == 0:
+                            kv_len = token_num + n_compress
+                        else:
+                            kv_len = self.window_size + end_pos // ratio
                     else:
                         compress_topk = self.index_topk
                         kv_len = self.window_size + self._max_n_committed_per_ratio[4]
                 elif ratio == 128:
-                    if start_pos == 0:
-                        compress_topk = token_num // ratio
-                        kv_len = token_num + n_compress
+                    if start_pos == 0 or not _r21_layout:
+                        if start_pos > 0:
+                            compress_topk = (start_pos + 1) // ratio
+                        else:
+                            compress_topk = token_num // ratio
+                        if start_pos == 0:
+                            kv_len = token_num + n_compress
+                        else:
+                            kv_len = self.window_size + end_pos // ratio
                     else:
                         compress_topk = self._max_n_committed_per_ratio[128]
                         kv_len = self.window_size + self._max_n_committed_per_ratio[128]

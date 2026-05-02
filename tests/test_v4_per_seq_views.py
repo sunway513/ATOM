@@ -1018,7 +1018,10 @@ class TestR21SparseLayoutFixedDecodeK:
             ln[4:] if ln.startswith("    ") else ln for ln in body.splitlines()
         )
         # Compose: attach a wrapper function that takes self explicitly.
-        # Stub the type symbols the function annotates (no runtime use).
+        # Stub the type symbols the function annotates + force the
+        # r21 layout flag ON for tests (default OFF in production).
+        import os as _os
+        _os.environ["ATOM_V4_R21_CAPTURE_PATH"] = "1"
         ns = {"np": np, "torch": torch, "AttentionMetaData": object}
         exec(body, ns)
         fn = ns["_attach_sparse_layout_metadata"]
