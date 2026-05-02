@@ -721,9 +721,7 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
 
         max_q_len = var.get("mtp_k", None)
         max_q_len = (max_q_len + 1) if max_q_len is not None else 1
-        cu_seqlens_q_np = np.arange(
-            0, (bs + 1) * max_q_len, max_q_len, dtype=np.int32
-        )
+        cu_seqlens_q_np = np.arange(0, (bs + 1) * max_q_len, max_q_len, dtype=np.int32)
         cu_seqlens_q_gpu = var["cu_seqlens_q"].gpu[: bs + 1]
 
         # OVERRIDE positions to force decode branch in V4 attention.
@@ -751,6 +749,39 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         metadata.cu_seqlens_q_cpu = cu_seqlens_q_np
         metadata.state_slot_mapping_cpu = state_slot_np
         metadata.start_pos_per_seq_cpu = np.ones(bs, dtype=np.int32)
+        # P7-r17 TD-1: build per-ratio CompressPlans and per-token sparse-attn
+        # layouts for the capture warmup. Without these, V4Attention.forward
+        # crashes at line 1799 (`sparse_layouts[self.compress_ratio]`) because
+        # `attn_metadata.v4_sparse_layouts` is None during capture, and the
+        # batched compressor at line 1595 falls back to `make_single_seq_plan`
+        # which allocates fresh GPU tensors on the capture stream (TD-2 will
+        # pin those — for now we just route the compressor through the proper
+        # batched plan so the layout helper can read `cu_compress_cpu`).
+        # Sentinel decode geometry per the metadata above:
+        #   extend_lens = 1 (token_num=1 per seq, decode)
+        #   seq_lens    = start_pos_per_seq + extend_lens = 2 (matches context_lens)
+        # which makes (positions+1) % ratio == 0 false for both ratio=4 and
+        # ratio=128, so num_compress=0 and num_write=0 — the plans are empty
+        # but `cu_compress_cpu = [0,0,...,0]` is well-formed for the layout
+        # helper and the batched compressor short-circuits with a zero-row
+        # output (no kernel launch, no fresh GPU alloc on the capture stream).
+        capture_extend_lens_np = np.ones(bs, dtype=np.int32)
+        capture_context_lens_np = (
+            metadata.start_pos_per_seq_cpu + capture_extend_lens_np
+        ).astype(np.int32)
+        metadata.compress_plans = self._build_compress_plans(
+            capture_extend_lens_np, capture_context_lens_np, positions.device
+        )
+        # Total tokens in the warmup batch = bs * max_q_len; the helper writes
+        # per-token rows into the v4_*_sparse_topk_* / v4_*_sparse_kv_offsets
+        # forward_var slices and copies them to GPU.
+        self._attach_sparse_layout_metadata(
+            metadata,
+            cu_seqlens_q_np,
+            metadata.start_pos_per_seq_cpu,
+            scheduled_bs=bs,
+            total_tokens=bs * max_q_len,
+        )
         context = Context(
             positions=positions, is_prefill=False, batch_size=bs, graph_bs=bs
         )
