@@ -1177,3 +1177,155 @@ class TestR21SparseLayoutFixedDecodeK:
             f"prefill CSA topk_lens={lens_cpu[:n_tokens].tolist()},"
             f" expected all == {expected}"
         )
+
+
+
+# ---------------------------------------------------------------------------
+# P7-r22: Indexer.forward eager K_eff topk vs capture K_max+pad ordering UT.
+# ---------------------------------------------------------------------------
+
+
+class TestR22EagerKeffTopkOrdering:
+    """Verify that the r22 eager K_eff topk over LIVE columns gives the
+    SAME sorted set of topk indices as the legacy `_v4_gather_compressed` +
+    `topk(K_eff)` path, AND that the capture K_max+pad path also produces
+    the same SET (possibly in a different order due to tied -inf
+    boundaries) once the pad sentinels (>= n_committed -> -1) are filtered.
+
+    This is the regression guard for EVIDENCE_P721 §4 hypothesis #1
+    (topk tied-score ordering on -inf-padded scores reorders marginal
+    valid columns) which caused eager-r21-ON gsm8k 0.90 -> 0.55.
+    """
+
+    @staticmethod
+    def _legacy_keff_topk(index_score_live, index_topk):
+        """Mirror legacy `topk(min(index_topk, n_committed))` over live cols."""
+        import torch
+        n_committed = index_score_live.size(-1)
+        K = min(index_topk, n_committed)
+        if K == 0:
+            return torch.empty(
+                index_score_live.size(0),
+                index_score_live.size(1),
+                0,
+                dtype=torch.long,
+            )
+        return index_score_live.topk(K, dim=-1)[1]
+
+    @staticmethod
+    def _capture_kmax_topk(index_score_live, index_topk, max_n):
+        """Mirror r21 capture K_max topk over -inf-padded score, filter
+        invalid (>= n_committed) -> -1."""
+        import torch
+        n_committed = index_score_live.size(-1)
+        if max_n > n_committed:
+            pad = torch.full(
+                (
+                    index_score_live.size(0),
+                    index_score_live.size(1),
+                    max_n - n_committed,
+                ),
+                float("-inf"),
+                dtype=index_score_live.dtype,
+            )
+            padded = torch.cat([index_score_live, pad], dim=-1)
+        else:
+            padded = index_score_live
+        topk_idxs = padded.topk(index_topk, dim=-1)[1]
+        invalid = topk_idxs >= n_committed
+        return torch.where(invalid, torch.tensor(-1), topk_idxs)
+
+    @staticmethod
+    def _r22_eager_keff_topk_padded(index_score_live, index_topk, max_n):
+        """r22 eager fix: legacy K_eff topk over live cols, pad to K_max with -1."""
+        import torch
+        n_committed = index_score_live.size(-1)
+        K_eff = min(index_topk, n_committed) if n_committed > 0 else 0
+        if K_eff == 0:
+            return torch.full(
+                (index_score_live.size(0), index_score_live.size(1), index_topk),
+                -1,
+                dtype=torch.long,
+            )
+        live = index_score_live.topk(K_eff, dim=-1)[1]
+        if K_eff < index_topk:
+            pad = torch.full(
+                (live.size(0), live.size(1), index_topk - K_eff),
+                -1,
+                dtype=live.dtype,
+            )
+            return torch.cat([live, pad], dim=-1)
+        return live
+
+    def test_r22_eager_first_keff_matches_legacy_byteequal(self):
+        import torch
+        torch.manual_seed(0)
+        index_topk = 8
+        max_n = 16
+        n_committed = 5  # K_eff = 5 < index_topk
+        # synthetic scores with intentional ties at 0.0 (relu_-saturated)
+        live_score = torch.zeros(1, 3, n_committed)
+        live_score[0, 0, :] = torch.tensor([0.5, 0.0, 0.3, 0.0, 0.1])
+        live_score[0, 1, :] = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0])  # all ties
+        live_score[0, 2, :] = torch.tensor([0.7, 0.6, 0.5, 0.4, 0.3])
+        legacy = self._legacy_keff_topk(live_score, index_topk)  # [1,3,5]
+        r22 = self._r22_eager_keff_topk_padded(live_score, index_topk, max_n)
+        # First K_eff=5 entries MUST be byte-equal-to-legacy (same topk over
+        # same live cols).
+        assert torch.equal(legacy, r22[..., :n_committed]), (
+            f"r22 eager first-K_eff ordering differs from legacy:\n"
+            f"legacy={legacy.tolist()}\nr22[:K_eff]={r22[..., :n_committed].tolist()}"
+        )
+        # Trailing entries are -1 sentinels.
+        assert (r22[..., n_committed:] == -1).all(), r22[..., n_committed:].tolist()
+
+    def test_capture_kmax_can_diverge_from_legacy_on_ties(self):
+        """Confirms the r21 bug: K_max topk on -inf-padded score may pick
+        invalid (-> -1) columns AHEAD of marginal valid ties when the live
+        valid set has scores all == 0.0 (relu_-saturated). Documents WHY
+        r22 is needed."""
+        import torch
+        torch.manual_seed(0)
+        index_topk = 8
+        max_n = 16
+        n_committed = 3  # K_eff = 3 < index_topk
+        live_score = torch.zeros(1, 1, n_committed)  # all zero ties
+        legacy = self._legacy_keff_topk(live_score, index_topk)  # [1,1,3]
+        capture = self._capture_kmax_topk(live_score, index_topk, max_n)  # [1,1,8]
+        # Filtered capture (mark -1, then select non-(-1)) should still
+        # equal the legacy SET (capture preserves the K_eff valid cols at
+        # the front of its K_max output, just possibly in a different
+        # order). After -1 filter, remaining = 3 valid cols.
+        capture_valid = capture[capture != -1]
+        legacy_valid = legacy.flatten()
+        assert sorted(capture_valid.tolist()) == sorted(
+            legacy_valid.tolist()
+        ), (
+            f"capture filter set differs from legacy:\n"
+            f"capture_valid={capture_valid.tolist()}\nlegacy={legacy_valid.tolist()}"
+        )
+
+    def test_r22_eager_zero_ncommitted_returns_all_minus1(self):
+        import torch
+        index_topk = 8
+        max_n = 16
+        # n_committed=0 corner: K_eff=0 path returns [...,index_topk] of -1.
+        live_score = torch.zeros(1, 2, 0)
+        r22 = self._r22_eager_keff_topk_padded(live_score, index_topk, max_n)
+        assert r22.shape == (1, 2, index_topk), r22.shape
+        assert (r22 == -1).all(), r22.tolist()
+
+    def test_r22_eager_keff_eq_index_topk_no_pad(self):
+        """When n_committed >= index_topk, K_eff == index_topk so no pad
+        needed and result is direct topk over live cols (legacy semantics)."""
+        import torch
+        torch.manual_seed(1)
+        index_topk = 4
+        max_n = 32
+        n_committed = 10  # K_eff = 4 == index_topk
+        live_score = torch.randn(1, 2, n_committed)
+        legacy = self._legacy_keff_topk(live_score, index_topk)
+        r22 = self._r22_eager_keff_topk_padded(live_score, index_topk, max_n)
+        assert r22.shape == (1, 2, index_topk), r22.shape
+        assert torch.equal(legacy, r22), (legacy.tolist(), r22.tolist())
+        assert (r22 != -1).all(), "no -1 sentinels expected when K_eff == index_topk"

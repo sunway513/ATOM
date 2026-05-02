@@ -1505,6 +1505,27 @@ class Indexer(nn.Module):
             index_score = torch.where(valid_n.unsqueeze(1), index_score, neg_large)
 
         # ----- Top-k selection over compressed positions -----
+        # P7-r22: split capture_path into TWO sub-modes by stream-capture state:
+        #   (a) Actively-capturing stream (HIP cudagraph record): MUST use
+        #       K_max-sized topk over the -inf-padded score tensor (shape stable
+        #       across replays). Cannot call .item() on n_committed_t (the GPU
+        #       sync would fail with hipErrorStreamCaptureUnsupported).
+        #   (b) Eager / non-capturing forward (this is what `enforce_eager`
+        #       runs hit + what hits when builder installed but no graph is
+        #       being recorded): fall back to the LEGACY `K_eff = min(index_topk,
+        #       n_committed)` topk over the LIVE columns only — restores
+        #       byte-equivalent ordering vs the legacy `_v4_gather_compressed`
+        #       path. `n_committed_t.item()` is safe here (no capture stream).
+        # Without this split, eager-with-r21-ON used the K_max topk over -inf
+        # columns and PyTorch's tied-score ordering occasionally swapped two
+        # marginally-positive valid columns versus legacy K_eff topk, causing
+        # the eager-r21-ON gsm8k regression 0.90 -> 0.55 documented in
+        # EVIDENCE_P721 §4.
+        is_capturing = (
+            capture_path
+            and torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        )
         if start_pos == 0:
             # Prefill: causal mask over the (live) n_cols columns. n_cols
             # depends on start_pos==0 token_num so this remains shape-stable
@@ -1516,15 +1537,11 @@ class Indexer(nn.Module):
             )
             mask = row.unsqueeze(0) >= row_t  # [token_num, cols]
             index_score = index_score + torch.where(mask, float("-inf"), 0.0)
-        if capture_path:
-            # Fixed-K topk: K is a Python int constant across captures.
+        if is_capturing:
+            # Capture path (sub-case a): K_max-sized topk over -inf-padded
+            # scores. Pad sentinels via -1 mark below.
             topk_K = self.index_topk
-        else:
-            topk_K = min(self.index_topk, n_cols)
-        topk_idxs = index_score.topk(topk_K, dim=-1)[1]
-        if capture_path:
-            # Mark trailing topk entries that landed on invalid (>= n_committed)
-            # columns as -1 so sparse_attn skips them (kernel honours -1).
+            topk_idxs = index_score.topk(topk_K, dim=-1)[1]
             n_committed_b = n_committed_t.to(topk_idxs.device).long()
             invalid = topk_idxs >= n_committed_b.view(1, 1, 1)
             if start_pos == 0:
@@ -1536,16 +1553,79 @@ class Indexer(nn.Module):
                 topk_idxs = torch.where(future | invalid, -1, topk_idxs + offset)
             else:
                 topk_idxs = torch.where(invalid, -1, topk_idxs + offset)
-        else:
-            if start_pos == 0:
-                fmask = (
-                    topk_idxs
-                    >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1)
-                    // ratio
-                )
-                topk_idxs = torch.where(fmask, -1, topk_idxs + offset)
+            return topk_idxs
+        if capture_path:
+            # Eager-with-builder-installed path (sub-case b): replicate the
+            # legacy variable-K topk over the LIVE n_committed columns to
+            # restore byte-equivalent ordering. SHAPE GATING:
+            #   - start_pos == 0 (prefill): return [1, S, K_eff] WITHOUT
+            #     padding — matches the legacy `compress_topk = min(index_topk,
+            #     end_pos//ratio)` layout in `_attach_sparse_layout_metadata`
+            #     site #5d (which always uses the variable-K formula for
+            #     prefill, even when r21_layout is ON, because prefill is
+            #     never captured).
+            #   - start_pos > 0 (decode): pad result to K_max with -1 so the
+            #     downstream r21-ON decode layout (sized for win+max_n) sees
+            #     the same column count as the capture path would emit.
+            n_committed_int = int(n_committed_t.max().item())
+            K_eff = min(self.index_topk, n_committed_int) if n_committed_int > 0 else 0
+            if K_eff > 0:
+                live_score = index_score[..., :n_committed_int]
+                live_topk = live_score.topk(K_eff, dim=-1)[1]
+                if start_pos == 0:
+                    fmask = (
+                        live_topk
+                        >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1)
+                        // ratio
+                    )
+                    topk_idxs = torch.where(fmask, -1, live_topk + offset)
+                    # NO pad — prefill layout uses K_eff stride.
+                    return topk_idxs
+                live_topk = live_topk + offset
+                if K_eff < self.index_topk:
+                    pad = torch.full(
+                        (
+                            live_topk.size(0),
+                            live_topk.size(1),
+                            self.index_topk - K_eff,
+                        ),
+                        -1,
+                        dtype=live_topk.dtype,
+                        device=live_topk.device,
+                    )
+                    topk_idxs = torch.cat([live_topk, pad], dim=-1)
+                else:
+                    topk_idxs = live_topk
             else:
-                topk_idxs = topk_idxs + offset
+                # n_committed == 0: shape depends on start_pos for the same
+                # layout-stride reason described above.
+                if start_pos == 0:
+                    topk_idxs = torch.full(
+                        (index_score.size(0), index_score.size(1), 0),
+                        -1,
+                        dtype=torch.long,
+                        device=index_score.device,
+                    )
+                else:
+                    topk_idxs = torch.full(
+                        (index_score.size(0), index_score.size(1), self.index_topk),
+                        -1,
+                        dtype=torch.long,
+                        device=index_score.device,
+                    )
+            return topk_idxs
+        # Pre-r21 legacy path (builder has NOT installed) — kept untouched.
+        topk_K = min(self.index_topk, n_cols)
+        topk_idxs = index_score.topk(topk_K, dim=-1)[1]
+        if start_pos == 0:
+            fmask = (
+                topk_idxs
+                >= torch.arange(1, token_num + 1, device=x.device).unsqueeze(1)
+                // ratio
+            )
+            topk_idxs = torch.where(fmask, -1, topk_idxs + offset)
+        else:
+            topk_idxs = topk_idxs + offset
         return topk_idxs
 
 
