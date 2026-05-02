@@ -404,7 +404,7 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
         # residual eager drift is fixed.
         import os as _os
 
-        _r21_enabled = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "0") == "1"
+        _r21_enabled = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "1") == "1"
 
         if isinstance(module, _V4Attention):
             # Attention.swa_kv — every layer.
@@ -550,7 +550,7 @@ class DeepseekV4AttentionMetadataBuilder(CommonAttentionBuilder):
                 # eager runs the same code as a6efb87.
                 import os as _os
 
-                _r21_layout = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "0") == "1"
+                _r21_layout = _os.environ.get("ATOM_V4_R21_CAPTURE_PATH", "1") == "1"
                 if ratio == 4:
                     if start_pos == 0 or not _r21_layout:
                         compress_topk = min(self.index_topk, end_pos // ratio)
