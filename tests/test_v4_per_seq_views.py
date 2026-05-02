@@ -208,3 +208,58 @@ class TestStepBIndexerSlotTensor:
         for s in (0, 1, 7, 31):
             self._ingest_slot_branch(s, buf)
             assert buf.item() == s
+
+
+# ── Step C unit tests ──────────────────────────────────────────────────────
+
+
+class TestStepCV4AttentionSlotDispatch:
+    """Step C: V4Attention.forward must thread a 1-elem GPU tensor view of
+    the per-seq slot to Indexer when `attn_md.v4_per_seq_slots_t` is
+    available, and gracefully fall back to the Python-int `slot` when it
+    isn't. Validated via a focused mock of the dispatch logic — full
+    V4Attention.forward needs a loaded model and is silicon-only."""
+
+    @staticmethod
+    def _select_indexer_slot(indexer_slots_t, slot_int, seq_idx):
+        """Mirrors the Step-C selection branch in V4Attention.forward."""
+        if indexer_slots_t is not None:
+            return indexer_slots_t[seq_idx : seq_idx + 1]
+        return slot_int
+
+    def test_tensor_path_returns_view(self):
+        slots_t = torch.tensor([4, 5, 6, 7], dtype=torch.int32)
+        out = self._select_indexer_slot(slots_t, slot_int=99, seq_idx=2)
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == (1,)
+        assert out.item() == 6
+        # Must be a view (not a copy) — share storage with parent at offset 2.
+        assert out.data_ptr() == slots_t.data_ptr() + 2 * slots_t.element_size()
+
+    def test_fallback_path_returns_int(self):
+        out = self._select_indexer_slot(indexer_slots_t=None, slot_int=99, seq_idx=2)
+        assert isinstance(out, int)
+        assert out == 99
+
+    def test_view_per_seq_isolation(self):
+        """Different seq_idx must produce views into different parent offsets,
+        so V4Attention's per-seq loop dispatches the right slot per call."""
+        slots_t = torch.tensor([10, 20, 30, 40], dtype=torch.int32)
+        view0 = self._select_indexer_slot(slots_t, slot_int=0, seq_idx=0)
+        view3 = self._select_indexer_slot(slots_t, slot_int=0, seq_idx=3)
+        assert view0.item() == 10 and view3.item() == 40
+        assert view0.data_ptr() != view3.data_ptr()
+        assert view3.data_ptr() == view0.data_ptr() + 3 * slots_t.element_size()
+
+    def test_metadata_attribute_attach_for_step_c_consumer(self):
+        """Confirms the V4Attention loop consumer can `getattr` the field
+        attached by Step A's prepare_decode/prefill — keeps Step A and Step
+        C in sync at the contract level."""
+        md = AttentionMetaData()
+        # Field absent before Step A code runs (matches non-V4 backends).
+        assert getattr(md, "v4_per_seq_slots_t", None) is None
+        # After Step A attach.
+        md.v4_per_seq_slots_t = torch.tensor([1, 2, 3], dtype=torch.int32)
+        slots_t_consumed = getattr(md, "v4_per_seq_slots_t", None)
+        assert slots_t_consumed is not None
+        assert slots_t_consumed.tolist() == [1, 2, 3]
