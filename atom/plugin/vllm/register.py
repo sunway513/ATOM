@@ -51,40 +51,51 @@ def _vllm_at_least(major: int, minor: int) -> bool:
 
 
 def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
-    """Mark `vllm_attention_cls.forward` as opaque to torch._dynamo.
+    """Replace `vllm_attention_cls.forward` body to skip query/key/value
+    reshape when the backend opted out via `accept_output_buffer = False`.
 
-    vLLM 0.20+ moved the per-tensor reshape (`query/key/value.view(-1, num_heads, head_size)`)
-    out of the registered custom op (`unified_attention_with_output`) and into
-    the surrounding Python forward body, with the comment "We do this outside
-    the custom op to minimize the CPU overheads from the non-CUDA-graph regions."
-    Under torch.compile + AOT autograd, those reshapes get traced into the
-    compiled fx graph with a pathological symbolic shape annotation
-    `(s80//512), 8, (s80//(8*((s80//512))))` — `head_size` is derived from a
-    KV-cache layout symbol rather than carried as a constant. At runtime
-    AOT autograd's `apply_view_meta_sequence` replays the recorded view and
-    crashes whenever the intermediate tensor numel isn't divisible by
-    `num_kv_heads * head_dim` (e.g. 1599 for a mid-batch GPT-OSS request):
+    vLLM 0.19 had an else branch in `Attention.forward` (gated by the
+    backend's `accept_output_buffer = False`) that skipped the per-tensor
+    `query/key/value.view(-1, num_heads, head_size)` reshape and called
+    `unified_attention(query, key, value, layer_name)` (the no-output-buffer
+    variant of the custom op) directly. ATOM relies on this gated path to
+    smuggle non-tensor data through the Attention call (positions through
+    `key`, fused qkv through `value` when
+    ATOM_ENABLE_QK_NORM_ROPE_CACHE_QUANT_FUSION=1) and let its own backend
+    impl unpack them inside `forward_impl_plugin_mode`.
 
-      RuntimeError: shape '[-1, 8, 64]' is invalid for input of size 1599
+    vLLM 0.20+ removed both the else branch and the standalone
+    `unified_attention` op (vllm-project/vllm#39125,
+    "[Attention][V0 Deprecation] Deprecate accept output buffer"), so every
+    Attention.forward call unconditionally reshapes. ATOM's smuggled key
+    (= positions, 1-D length=num_tokens) is then `view(-1, num_kv_heads,
+    head_size)`-ed, which fails for any num_tokens not divisible by
+    num_kv_heads * head_size:
 
-    Wrapping `Attention.forward` with `torch._dynamo.disable` makes the entire
-    forward (reshapes + custom op call) opaque to dynamo, so the broken view
-    never enters any compiled fx graph (captured cudagraphs OR inductor
-    general-shape fallback). The reshape executes eagerly with concrete
-    shapes at runtime, which always satisfies the divisibility constraint.
+      RuntimeError: shape '[-1, 8, 64]' is invalid for input of size 1008
 
-    Cost: a graph break at every attention call. vLLM's compile pipeline is
-    already piecewise (one fx graph per stretch of model code between attention
-    layers), so this just makes that boundary explicit. No measured perf
-    regression vs the upstream PR-#39125 reshape-outside-custom-op design.
+    Fix: monkey-patch Attention.forward so that for backends with
+    `accept_output_buffer = False` (i.e. ATOM plugin backends), we skip
+    the reshape entirely and call `unified_attention_with_output` directly.
+    The output buffer is still allocated (vLLM 0.20 has no
+    no-output-buffer custom op anymore), but we leave it un-reshaped, just
+    like the query/key/value, so the backend's `impl.forward` receives all
+    four tensors in their raw layout. ATOM's own backend handles unpacking
+    and reshaping inside `atom/plugin/attention_mha.forward_impl_plugin_mode`
+    and `atom/plugin/attention_mla.forward_impl_plugin_mode`.
 
-    No-op on vLLM 0.19, where the reshapes were gated behind
-    `accept_output_buffer=False` and ATOM never hit this path.
+    For backends with `accept_output_buffer = True` (the vLLM default), we
+    delegate to the original forward — no behavior change.
 
-    Caller is responsible for importing `vllm.attention.layer.Attention` and
-    passing it here (avoids a circular import if this is called from
-    register_platform during early plugin discovery — call it from
-    register_model() instead).
+    The patched forward is wrapped with `torch._dynamo.disable` so neither
+    branch's body gets traced into a compiled fx graph (avoids the upstream
+    view-meta divisibility bug from being baked into inductor sub-graphs
+    via any other code path that might trace through Attention.forward).
+
+    No-op on vLLM 0.19, where the original else branch is still present.
+
+    Caller imports the Attention class and passes it (avoids a circular
+    import; call from register_model() not register_platform).
 
     See https://github.com/sunway513/ATOM/issues/61.
     """
@@ -93,28 +104,104 @@ def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
 
     try:
         import torch._dynamo as _dynamo
+        from vllm.model_executor.layers.attention.attention import (
+            _encode_layer_name,
+            unified_attention_with_output,
+            unified_kv_cache_update,
+        )
 
-        if getattr(vllm_attention_cls.forward, "_atom_dynamo_disabled", False):
+        if getattr(vllm_attention_cls.forward, "_atom_compat_patched", False):
             return  # idempotent
 
         _orig_forward = vllm_attention_cls.forward
-        _wrapped = _dynamo.disable(_orig_forward)
+
+        def _patched_forward(
+            self,
+            query: "torch.Tensor",
+            key: "torch.Tensor",
+            value: "torch.Tensor",
+            output_shape=None,
+        ) -> "torch.Tensor":
+            accept_output_buffer = getattr(
+                self.attn_backend, "accept_output_buffer", True
+            )
+            if accept_output_buffer:
+                # vLLM 0.20 default — original behavior (with reshapes).
+                return _orig_forward(self, query, key, value, output_shape=output_shape)
+
+            # ATOM-style: backend opted out of vLLM-managed output buffer.
+            # Mirror vLLM 0.19's else-branch behavior — skip the reshapes
+            # of query/key/value (they may carry smuggled positions/qkv),
+            # and dispatch straight to unified_attention_with_output. The
+            # backend's impl.forward (e.g. ATOM forward_impl_plugin_mode)
+            # handles all unpacking and reshaping internally.
+            if self.calculate_kv_scales:
+                torch.ops.vllm.maybe_calc_kv_scales(
+                    query, key, value, _encode_layer_name(self.layer_name)
+                )
+            output_dtype = query.dtype
+            if (
+                self.query_quant is not None
+                and self.impl.supports_quant_query_input
+            ):
+                query, _ = self.query_quant(query, self._q_scale)
+
+            num_tokens = query.shape[0]
+            if output_shape is None:
+                output_shape = torch.Size(
+                    (num_tokens, self.num_heads * self.head_size_v)
+                )
+            output = torch.empty(
+                output_shape, dtype=output_dtype, device=query.device
+            )
+            hidden_size = output_shape[-1]
+
+            # Unlike vLLM's default path, do NOT reshape query/key/value/output
+            # here. ATOM backends have forward_includes_kv_cache_update=True so
+            # the kv_cache_dummy_dep branch is dead; pass kv_cache_dummy_dep=None.
+            kv_cache_dummy_dep = None
+            if self.use_direct_call:
+                unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+            else:
+                encoded = _encode_layer_name(self.layer_name)
+                torch.ops.vllm.unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    encoded,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+            # Backend wrote into output in whatever layout it likes; flatten to
+            # 2-D [num_tokens, hidden_size] for the caller (matches the original
+            # forward's final `output.view(-1, hidden_size)`).
+            return output.view(-1, hidden_size)
+
+        wrapped = _dynamo.disable(_patched_forward)
         try:
-            _wrapped._atom_dynamo_disabled = True
+            wrapped._atom_compat_patched = True
         except (AttributeError, TypeError):
             pass
-        vllm_attention_cls.forward = _wrapped
+        vllm_attention_cls.forward = wrapped
         logger.warning(
-            "ATOM[vllm-0.20-compat]: marked vllm %s.forward as opaque "
-            "to torch._dynamo to keep upstream view-meta divisibility bug "
-            "(attention.py reshapes baked with symbolic head_size) out of "
-            "compiled fx graphs. See https://github.com/sunway513/ATOM/issues/61.",
+            "ATOM[vllm-0.20-compat]: replaced vllm %s.forward to skip "
+            "query/key/value reshape when backend.accept_output_buffer=False "
+            "(restores vLLM 0.19 else-branch semantics that ATOM relies on "
+            "for smuggling positions/qkv through Attention call args). "
+            "See https://github.com/sunway513/ATOM/issues/61.",
             vllm_attention_cls.__name__,
         )
     except Exception as e:
         logger.warning(
-            "ATOM[vllm-0.20-compat]: failed to install %s.forward "
-            "dynamo-disable wrapper: %s",
+            "ATOM[vllm-0.20-compat]: failed to install %s.forward body "
+            "replacement: %s",
             getattr(vllm_attention_cls, "__name__", "<unknown>"),
             e,
         )
