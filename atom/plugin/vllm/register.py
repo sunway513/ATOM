@@ -120,6 +120,74 @@ def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
         )
 
 
+def _maybe_install_atom_dispatcher_compat() -> None:
+    """Force ATOM's @support_torch_compile decorator off the bytecode-swap
+    dispatch path on vLLM 0.20+.
+
+    ATOM's `TorchCompileWrapperWithCustomDispatcher` (atom/utils/decorators.py)
+    runs the first forward call through dynamo + AOT autograd + inductor and
+    captures the resulting bytecode in `self.compiled_codes`. From the second
+    call onward it bypasses dynamo entirely by swapping
+    `forward.__code__ = self.compiled_codes[0]` via `dispatch_to_code(0)` —
+    no guards, no recompile checks.
+
+    vLLM 0.20's `gpu_model_runner.profile_run` exercises the model with
+    multiple shape buckets in succession, and at least one bucket passes a
+    rank-2 input_ids where the first trace recorded rank-1 (`i32[s72]`).
+    The bytecode-swap path executes the rank-1 inductor compile against the
+    rank-2 input and immediately fails:
+
+      AssertionError: wrong number of dimensions 2
+      (assert_size_stride(arg0_1, (s72, ), (1, )))
+
+    Setting `use_custom_dispatcher = False` after the original __init__
+    forces every call to go through `self.compiled_callable(*args, **kwargs)`
+    instead of `dispatch_to_code(0)`. Dynamo's guard mechanism then handles
+    rank/shape changes correctly via on-demand recompilation. ATOM's
+    inductor + cudagraph optimization paths are still used; we just give up
+    the bytecode-swap micro-optimization on vLLM 0.20+.
+
+    No-op on vLLM 0.19, where profile_run apparently never feeds a different
+    rank than the first trace.
+    """
+    if not _vllm_at_least(0, 20):
+        return
+
+    try:
+        import functools
+
+        from atom.utils.decorators import (
+            TorchCompileWrapperWithCustomDispatcher as _Wrapper,
+        )
+
+        if getattr(_Wrapper.__init__, "_atom_dispatcher_force_dynamo", False):
+            return  # idempotent
+
+        _orig_init = _Wrapper.__init__
+
+        @functools.wraps(_orig_init)
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            # Force the slow (dynamo-guarded) dispatch path. The custom
+            # bytecode-swap path is rank-fragile under vLLM 0.20 profile_run.
+            self.use_custom_dispatcher = False
+
+        _patched_init._atom_dispatcher_force_dynamo = True
+        _Wrapper.__init__ = _patched_init
+        logger.warning(
+            "ATOM[vllm-0.20-compat]: forced TorchCompileWrapperWithCustomDispatcher"
+            ".use_custom_dispatcher=False to keep dynamo guards in the dispatch"
+            " loop and let it recompile when vLLM 0.20 profile_run feeds inputs"
+            " of different rank than the first trace. See"
+            " https://github.com/sunway513/ATOM/issues/61."
+        )
+    except Exception as e:
+        logger.warning(
+            "ATOM[vllm-0.20-compat]: failed to install dispatcher compat: %s",
+            e,
+        )
+
+
 def register_platform() -> Optional[str]:
 
     if disable_vllm_plugin:
@@ -222,6 +290,12 @@ def register_model() -> None:
     # lifecycle hook (the lines above prove it). Idempotent and gated on
     # vllm >= 0.20.
     _maybe_install_vllm_020_attention_compat(Attention)
+
+    # Force ATOM's @support_torch_compile decorator to use the dynamo-guarded
+    # dispatch path (instead of its custom bytecode-swap fast path) so the
+    # model can re-trace when vLLM 0.20+ profile_run feeds different input
+    # ranks across buckets. See sunway513/ATOM#61.
+    _maybe_install_atom_dispatcher_compat()
 
     # Patch vLLM graph_capture to also enter aiter's ca_comm.capture(),
     # avoiding hipMemcpyAsync in fused_allreduce_rmsnorm when model uses aiter collectives
