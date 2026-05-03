@@ -106,8 +106,8 @@ def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
         import torch._dynamo as _dynamo
         from vllm.model_executor.layers.attention.attention import (
             _encode_layer_name,
-            unified_attention_with_output,
-            unified_kv_cache_update,
+            _resolve_layer_name,
+            get_attention_context,
         )
 
         if getattr(vllm_attention_cls.forward, "_atom_compat_patched", False):
@@ -132,57 +132,50 @@ def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
             # ATOM-style: backend opted out of vLLM-managed output buffer.
             # Mirror vLLM 0.19's else-branch behavior — skip the reshapes
             # of query/key/value (they may carry smuggled positions/qkv),
-            # and dispatch straight to unified_attention_with_output. The
-            # backend's impl.forward (e.g. ATOM forward_impl_plugin_mode)
-            # handles all unpacking and reshaping internally.
+            # and call the backend's impl.forward DIRECTLY. We can't go
+            # through unified_attention_with_output because that custom op is
+            # void (returns None); ATOM's PagedAttentionImpl.forward_impl_plugin_mode
+            # ignores any passed `output` buffer and allocates+returns its
+            # own. If we pre-allocated an output and passed it through the
+            # void custom op, the backend's allocated tensor would be lost
+            # and we'd return uninitialized garbage — which is exactly the
+            # gsm8k=0% accuracy regression observed in the first iteration of
+            # this patch (sunway513/ATOM#61 follow-up).
             if self.calculate_kv_scales:
                 torch.ops.vllm.maybe_calc_kv_scales(
                     query, key, value, _encode_layer_name(self.layer_name)
                 )
-            output_dtype = query.dtype
             if (
                 self.query_quant is not None
                 and self.impl.supports_quant_query_input
             ):
                 query, _ = self.query_quant(query, self._q_scale)
 
-            num_tokens = query.shape[0]
-            if output_shape is None:
-                output_shape = torch.Size(
-                    (num_tokens, self.num_heads * self.head_size_v)
-                )
-            output = torch.empty(
-                output_shape, dtype=output_dtype, device=query.device
+            # Fetch attn_metadata + kv_cache the same way vllm 0.20's
+            # unified_attention_with_output does.
+            layer_name = _resolve_layer_name(self.layer_name)
+            attn_metadata, attn_layer, kv_cache, _ = get_attention_context(
+                layer_name
             )
-            hidden_size = output_shape[-1]
 
-            # Unlike vLLM's default path, do NOT reshape query/key/value/output
-            # here. ATOM backends have forward_includes_kv_cache_update=True so
-            # the kv_cache_dummy_dep branch is dead; pass kv_cache_dummy_dep=None.
-            kv_cache_dummy_dep = None
-            if self.use_direct_call:
-                unified_attention_with_output(
-                    query,
-                    key,
-                    value,
-                    output,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+            # Direct dispatch — backend allocates output internally and
+            # returns it (raw layout, e.g. [num_tokens, num_heads*head_size]).
+            output = attn_layer.impl.forward(
+                attn_layer, query, key, value, kv_cache, attn_metadata
+            )
+
+            # Flatten to 2-D [num_tokens, hidden_size] for the caller
+            # (matches the original forward's final `output.view(-1, hidden_size)`).
+            if output is None:
+                raise RuntimeError(
+                    "ATOM[vllm-0.20-compat]: backend "
+                    f"{type(attn_layer.impl).__name__}.forward returned None "
+                    "but the patched Attention.forward expects a tensor return. "
+                    "Backend may need to be updated to return the allocated output."
                 )
-            else:
-                encoded = _encode_layer_name(self.layer_name)
-                torch.ops.vllm.unified_attention_with_output(
-                    query,
-                    key,
-                    value,
-                    output,
-                    encoded,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
-            # Backend wrote into output in whatever layout it likes; flatten to
-            # 2-D [num_tokens, hidden_size] for the caller (matches the original
-            # forward's final `output.view(-1, hidden_size)`).
-            return output.view(-1, hidden_size)
+            if output.dim() > 2:
+                output = output.reshape(output.shape[0], -1)
+            return output
 
         wrapped = _dynamo.disable(_patched_forward)
         try:
