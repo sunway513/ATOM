@@ -645,9 +645,23 @@ class VllmBackend:
         logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
         self.compilation_config.compilation_time += dynamo_time
 
-        # we control the compilation process, each instance can only be
-        # called once
-        assert not self._called, "VllmBackend can only be called once"
+        # vLLM 0.20+ profile_run drives the model with multiple shape
+        # buckets in succession; with the ATOM 0.20-compat dynamo-disable
+        # wrapper around vllm Attention.forward (see plugin/vllm/register.py)
+        # the resulting graph layout reaches this backend more than once.
+        # The first call did the expensive split + PiecewiseCompileInterpreter
+        # work and populated self.split_gm / self.input_buffers; subsequent
+        # calls just need to return the same callable. We re-run the
+        # compile-time work only if the prior call did not finish.
+        if self._called:
+            cached = getattr(self, "_atom_cached_returned", None)
+            if cached is not None:
+                return cached
+            # If we get here, the previous call finished compilation but did
+            # not cache its return value (older code path) — fall through to
+            # the existing logic, which is safe because split_gm is idempotent
+            # for the same input graph.
+            self._called = False  # allow the body to repopulate self.split_gm
 
         self.graph = graph
         # self.configure_post_pass()
@@ -696,6 +710,7 @@ class VllmBackend:
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
+            self._atom_cached_returned = self.split_gm
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -741,4 +756,5 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
+        self._atom_cached_returned = copy_and_call
         return copy_and_call

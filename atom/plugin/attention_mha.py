@@ -577,6 +577,20 @@ class PagedAttentionImplPluginModeMethods:
             qkv = value  # packed [q, k, v] tensor
             q_size = self.num_heads * self.head_dim
             kv_size = self.num_kv_heads * self.head_dim
+            fused_last = q_size + 2 * kv_size
+
+            # vLLM 0.20+ (PR vllm-project/vllm#39125 deprecated accept_output_buffer=False)
+            # unconditionally reshapes value via `value.view(-1, num_kv_heads, head_size_v)`
+            # before invoking the backend. ATOM's smuggle-fused-qkv-through-value trick
+            # then arrives reshaped instead of as a flat [num_tokens, q_size+2*kv_size]
+            # tensor, breaking the split below. Restore the fused layout here. The same
+            # reshape happens to `key` (which carries `position`); flatten it back to 1D.
+            # No-op on vLLM 0.19, where accept_output_buffer=False kept these reshapes off.
+            if qkv.dim() != 2 or qkv.shape[-1] != fused_last:
+                qkv = qkv.reshape(-1, fused_last)
+            if position.dim() != 1:
+                position = position.reshape(-1)
+
             query, key, value = torch.split(qkv, [q_size, kv_size, kv_size], dim=-1)
 
         query = query.view(-1, self.num_heads, self.head_dim)
