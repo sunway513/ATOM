@@ -50,8 +50,8 @@ def _vllm_at_least(major: int, minor: int) -> bool:
         return True
 
 
-def _maybe_install_vllm_020_attention_compat() -> None:
-    """Mark vllm.attention.layer.Attention.forward as opaque to torch._dynamo.
+def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
+    """Mark `vllm_attention_cls.forward` as opaque to torch._dynamo.
 
     vLLM 0.20+ moved the per-tensor reshape (`query/key/value.view(-1, num_heads, head_size)`)
     out of the registered custom op (`unified_attention_with_output`) and into
@@ -81,6 +81,11 @@ def _maybe_install_vllm_020_attention_compat() -> None:
     No-op on vLLM 0.19, where the reshapes were gated behind
     `accept_output_buffer=False` and ATOM never hit this path.
 
+    Caller is responsible for importing `vllm.attention.layer.Attention` and
+    passing it here (avoids a circular import if this is called from
+    register_platform during early plugin discovery — call it from
+    register_model() instead).
+
     See https://github.com/sunway513/ATOM/issues/61.
     """
     if not _vllm_at_least(0, 20):
@@ -89,33 +94,28 @@ def _maybe_install_vllm_020_attention_compat() -> None:
     try:
         import torch._dynamo as _dynamo
 
-        try:
-            from vllm.attention.layer import Attention as _vllm_Attention
-        except ImportError:
-            from vllm.model_executor.layers.attention import (
-                Attention as _vllm_Attention,
-            )
-
-        if getattr(_vllm_Attention.forward, "_atom_dynamo_disabled", False):
+        if getattr(vllm_attention_cls.forward, "_atom_dynamo_disabled", False):
             return  # idempotent
 
-        _orig_forward = _vllm_Attention.forward
+        _orig_forward = vllm_attention_cls.forward
         _wrapped = _dynamo.disable(_orig_forward)
         try:
             _wrapped._atom_dynamo_disabled = True
         except (AttributeError, TypeError):
             pass
-        _vllm_Attention.forward = _wrapped
+        vllm_attention_cls.forward = _wrapped
         logger.warning(
-            "ATOM[vllm-0.20-compat]: marked vllm Attention.forward as opaque "
+            "ATOM[vllm-0.20-compat]: marked vllm %s.forward as opaque "
             "to torch._dynamo to keep upstream view-meta divisibility bug "
             "(attention.py reshapes baked with symbolic head_size) out of "
-            "compiled fx graphs. See https://github.com/sunway513/ATOM/issues/61."
+            "compiled fx graphs. See https://github.com/sunway513/ATOM/issues/61.",
+            vllm_attention_cls.__name__,
         )
     except Exception as e:
         logger.warning(
-            "ATOM[vllm-0.20-compat]: failed to install Attention.forward "
+            "ATOM[vllm-0.20-compat]: failed to install %s.forward "
             "dynamo-disable wrapper: %s",
+            getattr(vllm_attention_cls, "__name__", "<unknown>"),
             e,
         )
 
@@ -134,9 +134,14 @@ def register_platform() -> Optional[str]:
     # branch runs and requires vllm.model_executor.models.qwen3_5, which may be
     # absent. Backbone is set in register_model() for real vLLM runs.
 
-    # Install vLLM 0.20+ attention compat shim (torch._dynamo.disable wrapper)
-    # before any model gets compiled. No-op on 0.19.
-    _maybe_install_vllm_020_attention_compat()
+    # NOTE: do NOT install the vllm-0.20 Attention.forward dynamo-disable
+    # wrapper here. register_platform() runs during plugin discovery while
+    # vllm.config / vllm.distributed are still partially initialized; importing
+    # vllm.attention.layer at this point triggers a circular import. The
+    # install is deferred to register_model() (called later), at which point
+    # vllm has finished bringing up its core modules — the existing
+    # _patch_vllm_attention_process_weights_after_loading hook already proves
+    # vllm.attention.layer is importable from there.
 
     # return the ATOM platform to vllm
     return "atom.plugin.vllm.platform.ATOMPlatform"
@@ -211,6 +216,12 @@ def register_model() -> None:
 
     _patch_vllm_attention_process_weights_after_loading(Attention)
     _patch_vllm_attention_process_weights_after_loading(MLAAttention)
+
+    # Install vLLM 0.20+ Attention.forward dynamo-disable wrapper here (NOT in
+    # register_platform); vllm.attention.layer is safely importable from this
+    # lifecycle hook (the lines above prove it). Idempotent and gated on
+    # vllm >= 0.20.
+    _maybe_install_vllm_020_attention_compat(Attention)
 
     # Patch vLLM graph_capture to also enter aiter's ca_comm.capture(),
     # avoiding hipMemcpyAsync in fused_allreduce_rmsnorm when model uses aiter collectives
