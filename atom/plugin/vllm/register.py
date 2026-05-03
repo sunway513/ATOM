@@ -121,64 +121,66 @@ def _maybe_install_vllm_020_attention_compat(vllm_attention_cls) -> None:
 
 
 def _maybe_install_atom_dispatcher_compat() -> None:
-    """Force ATOM's @support_torch_compile decorator off the bytecode-swap
-    dispatch path on vLLM 0.20+.
+    """Disable ATOM's @support_torch_compile decoration on vLLM 0.20+.
 
-    ATOM's `TorchCompileWrapperWithCustomDispatcher` (atom/utils/decorators.py)
-    runs the first forward call through dynamo + AOT autograd + inductor and
-    captures the resulting bytecode in `self.compiled_codes`. From the second
-    call onward it bypasses dynamo entirely by swapping
-    `forward.__code__ = self.compiled_codes[0]` via `dispatch_to_code(0)` —
-    no guards, no recompile checks.
+    ATOM's compile pipeline (TorchCompileWrapperWithCustomDispatcher /
+    VllmBackend / dispatch_to_code) bakes shape and rank assumptions from
+    the first forward call into the inductor-compiled sub-graphs and
+    relies on bypassing dynamo guards (via `forward.__code__` swap) for
+    speed on subsequent calls. vLLM 0.20's `gpu_model_runner.profile_run`
+    drives the model with multiple shape buckets — including different
+    input ranks — in rapid succession, and the cached inductor sub-graphs
+    fire `assert_size_stride(arg0_1, (s72,), (1,))` (rank-mismatch) on
+    the very first profile-run forward pass after the trace.
 
-    vLLM 0.20's `gpu_model_runner.profile_run` exercises the model with
-    multiple shape buckets in succession, and at least one bucket passes a
-    rank-2 input_ids where the first trace recorded rank-1 (`i32[s72]`).
-    The bytecode-swap path executes the rank-1 inductor compile against the
-    rank-2 input and immediately fails:
+    Earlier attempts in this PR's history tried narrower fixes:
+      - filter cudagraph_capture_sizes to multiples of 512 (insufficient,
+        the bug surfaces in the inductor general-shape compile too)
+      - mark `Attention.forward` opaque to dynamo (necessary but
+        the broken view-meta is also baked at the model-wrapper level)
+      - force `use_custom_dispatcher=False` (necessary but the cached
+        inductor sub-graphs still assert before dynamo would invalidate)
 
-      AssertionError: wrong number of dimensions 2
-      (assert_size_stride(arg0_1, (s72, ), (1, )))
+    The robust fix is to opt out of ATOM's compile decoration entirely
+    on vLLM 0.20+ and let the model run eagerly. AITER kernels and ATOM
+    model implementations still execute (they're plain PyTorch ops);
+    cudagraph capture continues to work at vLLM's worker layer. We give
+    up ATOM's inductor + piecewise-compile optimization in exchange for
+    end-to-end correctness on the new vLLM contract.
 
-    Setting `use_custom_dispatcher = False` after the original __init__
-    forces every call to go through `self.compiled_callable(*args, **kwargs)`
-    instead of `dispatch_to_code(0)`. Dynamo's guard mechanism then handles
-    rank/shape changes correctly via on-demand recompilation. ATOM's
-    inductor + cudagraph optimization paths are still used; we just give up
-    the bytecode-swap micro-optimization on vLLM 0.20+.
+    Implementation: monkey-patch `atom.utils.decorators._support_torch_compile`
+    to return the class unchanged. Any module imported AFTER this patch
+    runs (e.g. `atom.models.gpt_oss` when vLLM later instantiates the
+    model) sees the no-op decorator and skips the wrapper installation.
+    Model classes fall back to `nn.Module.__call__` which invokes
+    `forward` eagerly.
 
-    No-op on vLLM 0.19, where profile_run apparently never feeds a different
-    rank than the first trace.
+    No-op on vLLM 0.19, where ATOM's compile path works correctly.
+    See https://github.com/sunway513/ATOM/issues/61.
     """
     if not _vllm_at_least(0, 20):
         return
 
     try:
-        import functools
+        import atom.utils.decorators as _atom_dec
 
-        from atom.utils.decorators import (
-            TorchCompileWrapperWithCustomDispatcher as _Wrapper,
-        )
-
-        if getattr(_Wrapper.__init__, "_atom_dispatcher_force_dynamo", False):
+        if getattr(_atom_dec, "_atom_compile_decoration_disabled", False):
             return  # idempotent
 
-        _orig_init = _Wrapper.__init__
+        def _patched_support_torch_compile(cls, dynamic_arg_dims):
+            # Return cls unchanged — no @support_torch_compile decoration.
+            # cls.__call__ then resolves to nn.Module.__call__ which calls
+            # cls.forward(*args, **kwargs) eagerly with no compile.
+            return cls
 
-        @functools.wraps(_orig_init)
-        def _patched_init(self, *args, **kwargs):
-            _orig_init(self, *args, **kwargs)
-            # Force the slow (dynamo-guarded) dispatch path. The custom
-            # bytecode-swap path is rank-fragile under vLLM 0.20 profile_run.
-            self.use_custom_dispatcher = False
-
-        _patched_init._atom_dispatcher_force_dynamo = True
-        _Wrapper.__init__ = _patched_init
+        _atom_dec._support_torch_compile = _patched_support_torch_compile
+        _atom_dec._atom_compile_decoration_disabled = True
         logger.warning(
-            "ATOM[vllm-0.20-compat]: forced TorchCompileWrapperWithCustomDispatcher"
-            ".use_custom_dispatcher=False to keep dynamo guards in the dispatch"
-            " loop and let it recompile when vLLM 0.20 profile_run feeds inputs"
-            " of different rank than the first trace. See"
+            "ATOM[vllm-0.20-compat]: replaced atom.utils.decorators."
+            "_support_torch_compile with a no-op so subsequent model imports"
+            " skip ATOM's torch.compile pipeline and run eager. AITER kernels"
+            " and ATOM model implementations are unaffected; cudagraph capture"
+            " still happens at the vLLM worker layer. See"
             " https://github.com/sunway513/ATOM/issues/61."
         )
     except Exception as e:
