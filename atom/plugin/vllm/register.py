@@ -37,6 +37,89 @@ def _set_plugin_mode() -> None:
     _set_framework_backbone("vllm")
 
 
+def _vllm_at_least(major: int, minor: int) -> bool:
+    """Best-effort vllm version gate. Returns True on parse failure to be
+    conservative (the caller's compat path is a no-op on older vllm anyway)."""
+    try:
+        import vllm
+
+        v = vllm.__version__.split("+")[0]
+        parts = v.split(".")
+        return (int(parts[0]), int(parts[1])) >= (major, minor)
+    except Exception:
+        return True
+
+
+def _maybe_install_vllm_020_attention_compat() -> None:
+    """Mark vllm.attention.layer.Attention.forward as opaque to torch._dynamo.
+
+    vLLM 0.20+ moved the per-tensor reshape (`query/key/value.view(-1, num_heads, head_size)`)
+    out of the registered custom op (`unified_attention_with_output`) and into
+    the surrounding Python forward body, with the comment "We do this outside
+    the custom op to minimize the CPU overheads from the non-CUDA-graph regions."
+    Under torch.compile + AOT autograd, those reshapes get traced into the
+    compiled fx graph with a pathological symbolic shape annotation
+    `(s80//512), 8, (s80//(8*((s80//512))))` — `head_size` is derived from a
+    KV-cache layout symbol rather than carried as a constant. At runtime
+    AOT autograd's `apply_view_meta_sequence` replays the recorded view and
+    crashes whenever the intermediate tensor numel isn't divisible by
+    `num_kv_heads * head_dim` (e.g. 1599 for a mid-batch GPT-OSS request):
+
+      RuntimeError: shape '[-1, 8, 64]' is invalid for input of size 1599
+
+    Wrapping `Attention.forward` with `torch._dynamo.disable` makes the entire
+    forward (reshapes + custom op call) opaque to dynamo, so the broken view
+    never enters any compiled fx graph (captured cudagraphs OR inductor
+    general-shape fallback). The reshape executes eagerly with concrete
+    shapes at runtime, which always satisfies the divisibility constraint.
+
+    Cost: a graph break at every attention call. vLLM's compile pipeline is
+    already piecewise (one fx graph per stretch of model code between attention
+    layers), so this just makes that boundary explicit. No measured perf
+    regression vs the upstream PR-#39125 reshape-outside-custom-op design.
+
+    No-op on vLLM 0.19, where the reshapes were gated behind
+    `accept_output_buffer=False` and ATOM never hit this path.
+
+    See https://github.com/sunway513/ATOM/issues/61.
+    """
+    if not _vllm_at_least(0, 20):
+        return
+
+    try:
+        import torch._dynamo as _dynamo
+
+        try:
+            from vllm.attention.layer import Attention as _vllm_Attention
+        except ImportError:
+            from vllm.model_executor.layers.attention import (
+                Attention as _vllm_Attention,
+            )
+
+        if getattr(_vllm_Attention.forward, "_atom_dynamo_disabled", False):
+            return  # idempotent
+
+        _orig_forward = _vllm_Attention.forward
+        _wrapped = _dynamo.disable(_orig_forward)
+        try:
+            _wrapped._atom_dynamo_disabled = True
+        except (AttributeError, TypeError):
+            pass
+        _vllm_Attention.forward = _wrapped
+        logger.warning(
+            "ATOM[vllm-0.20-compat]: marked vllm Attention.forward as opaque "
+            "to torch._dynamo to keep upstream view-meta divisibility bug "
+            "(attention.py reshapes baked with symbolic head_size) out of "
+            "compiled fx graphs. See https://github.com/sunway513/ATOM/issues/61."
+        )
+    except Exception as e:
+        logger.warning(
+            "ATOM[vllm-0.20-compat]: failed to install Attention.forward "
+            "dynamo-disable wrapper: %s",
+            e,
+        )
+
+
 def register_platform() -> Optional[str]:
 
     if disable_vllm_plugin:
@@ -50,6 +133,10 @@ def register_platform() -> Optional[str]:
     # importing SGLang plugin modules — then atom.models.qwen3_5's ``if is_vllm():``
     # branch runs and requires vllm.model_executor.models.qwen3_5, which may be
     # absent. Backbone is set in register_model() for real vLLM runs.
+
+    # Install vLLM 0.20+ attention compat shim (torch._dynamo.disable wrapper)
+    # before any model gets compiled. No-op on 0.19.
+    _maybe_install_vllm_020_attention_compat()
 
     # return the ATOM platform to vllm
     return "atom.plugin.vllm.platform.ATOMPlatform"
